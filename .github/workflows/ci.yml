@@ -1,6 +1,6 @@
 # Every change: build, lint, test. Nothing merges on failure.
 # Later sessions add: Test262 slice, differential checks, instruction-count
-# benchmarks, Miri on rjs_core, and nightly/continuous jobs.
+# benchmarks, Miri on ferrojs-core, and nightly/continuous jobs.
 name: ci
 
 on:

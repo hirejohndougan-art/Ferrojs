@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rjs_value", "crates/rjs_core"]
+members = ["crates/ferrojs-value", "crates/ferrojs-core"]
 
 [workspace.package]
 version = "0.0.1"
@@ -9,7 +9,7 @@ license = "MIT"
 rust-version = "1.80"
 
 [workspace.lints.rust]
-# Every crate except rjs_core forbids unsafe code (see docs/DECISIONS.md, D-004).
+# Every crate except ferrojs-core forbids unsafe code (see docs/DECISIONS.md, D-004).
 unsafe_code = "forbid"
 
 [profile.release]

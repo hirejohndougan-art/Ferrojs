@@ -1,5 +1,5 @@
 [package]
-name = "rjs_value"
+name = "ferrojs-value"
 description = "NaN-boxed JavaScript value representation"
 version.workspace = true
 edition.workspace = true

@@ -3,9 +3,9 @@
 version = 3
 
 [[package]]
-name = "rjs_core"
+name = "ferrojs-core"
 version = "0.0.1"
 
 [[package]]
-name = "rjs_value"
+name = "ferrojs-value"
 version = "0.0.1"

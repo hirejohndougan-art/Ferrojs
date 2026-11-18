@@ -1,5 +1,7 @@
 # Decision log
 
+The decision log for FerroJS.
+
 Every major choice, what was rejected and why. Read this at the start of every
 work session. Newest decisions are added at the bottom; a changed decision gets
 a new entry that supersedes the old one rather than an edit.
@@ -17,7 +19,7 @@ Status: **Proposed** until John confirms, then **Accepted**.
   costing allocations in numeric code.
 - **Why:** no allocation for doubles; used by JavaScriptCore and SpiderMonkey;
   fits 32-bit heap offsets (D-002) with room to spare.
-- **Implemented:** `crates/rjs_value`.
+- **Implemented:** `crates/ferrojs-value`.
 
 ## D-002 Heap and references: 4 GB cage, 32-bit offsets
 - **Status:** Proposed (2026-11-18)
@@ -38,7 +40,7 @@ Status: **Proposed** until John confirms, then **Accepted**.
 
 ## D-004 Unsafe code boundary
 - **Status:** Proposed (2026-11-18)
-- **Choice:** `unsafe` is allowed only in `rjs_core`. The workspace forbids it
+- **Choice:** `unsafe` is allowed only in `ferrojs-core`. The workspace forbids it
   everywhere else (`unsafe_code = "forbid"` in the root `Cargo.toml`). Every
   `unsafe` block carries a `// SAFETY:` comment.
 - **Why:** keeps the code that needs auditing small and easy to find.

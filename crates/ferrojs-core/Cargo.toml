@@ -1,12 +1,12 @@
 [package]
-name = "rjs_core"
+name = "ferrojs-core"
 description = "The engine's small, audited unsafe core: heap cage, GC internals, JIT memory"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-# rjs_core is the ONLY crate allowed to use `unsafe` (docs/DECISIONS.md, D-004).
+# ferrojs-core is the ONLY crate allowed to use `unsafe` (docs/DECISIONS.md, D-004).
 # It does not inherit the workspace lint that forbids unsafe code.
 [lints.rust]
 unsafe_code = "warn"
