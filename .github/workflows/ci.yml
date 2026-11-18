@@ -1,0 +1,23 @@
+# Every change: build, lint, test. Nothing merges on failure.
+# Later sessions add: Test262 slice, differential checks, instruction-count
+# benchmarks, Miri on rjs_core, and nightly/continuous jobs.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --release
