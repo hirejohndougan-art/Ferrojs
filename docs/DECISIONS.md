@@ -58,6 +58,35 @@ Status: **Proposed** until John confirms, then **Accepted**.
   `Value::from_bits_checked`, which rejects encodings the engine never produces.
 - **Why:** supports the plan's rule that cache files are untrusted input.
 
+## D-007 Interrupt checks in every tier
+- **Status:** Proposed (2026-11-18)
+- **Choice:** the interpreter loop and every JIT loop back-edge and function
+  entry check an interrupt flag.
+- **Why:** CPU time limits, script termination and the debugger must work in
+  every tier. Retrofitting this into JIT code later is painful.
+
+## D-008 All nondeterminism goes through host hooks
+- **Status:** Proposed (2026-11-18)
+- **Choice:** `Math.random`, clocks (`Date.now`, `performance.now`) and job
+  ordering are supplied by the embedder through hooks, with sensible defaults.
+- **Why:** makes deterministic mode a configuration, not a retrofit, and keeps
+  tests reproducible.
+
+## D-009 Snapshot-friendly heap
+- **Status:** Proposed (2026-11-18)
+- **Choice:** nothing in the heap stores raw machine addresses; references are
+  cage offsets (D-002), and native function pointers are stored as indexes into
+  a registered table.
+- **Why:** a saved heap can be restored in milliseconds without rewriting
+  pointers, enabling startup snapshots.
+
+## D-010 WebAssembly compiled by Cranelift
+- **Status:** Proposed (2026-11-18)
+- **Choice:** Wasm modules are validated with `wasmparser` and compiled with
+  Cranelift (the Wasmtime pipeline). FerroJS owns the JS API and Wasm memory.
+- **Why:** proven in production; Wasm's fixed types make a fast compiler
+  enough; stays 100% Rust.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,
