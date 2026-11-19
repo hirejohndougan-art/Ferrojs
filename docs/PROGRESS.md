@@ -19,3 +19,12 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-013
 - Test262: 0 (+0; engine can't run JS yet)
 - Next: 0.2 fuzzing scaffold
+
+## 2026-11-19 11:18 UTC — 0.2 Fuzzing scaffold
+- Result: merged
+- Changed: `fuzz/` libFuzzer crate with `value_bits` and `value_roundtrip`
+  property targets; `tools/fuzz.sh` builds them on stable Rust (no nightly)
+  and runs a 10 s-per-target smoke as a new gate step and CI job.
+- Decisions: D-014
+- Test262: 0 (+0; engine can't run JS yet)
+- Next: 0.3 benchmark harness

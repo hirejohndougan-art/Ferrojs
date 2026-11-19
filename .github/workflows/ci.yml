@@ -35,6 +35,21 @@ jobs:
       - run: ./target/release/jsdiff --engine node tests/diff
       - run: ./target/release/jsdiff --engine ferrojs tests/diff
 
+  fuzz:
+    # Lints fuzz/ and runs every libFuzzer target briefly (decision D-014).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: tools/fuzz.sh smoke
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+
   test262:
     # Runs the pinned Test262 suite against FerroJS. Fails if any test listed
     # in conformance/test262-baseline.txt no longer passes.

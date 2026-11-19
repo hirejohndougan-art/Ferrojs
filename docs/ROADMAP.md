@@ -33,7 +33,7 @@ Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
   existing Node driver) and compare printed output and thrown errors. Add a
   `tests/diff/` corpus and a gate step. Until FerroJS runs JS, the harness
   is tested with Node vs Node.
-- [ ] 0.2 Fuzzing scaffold: `cargo-fuzz` targets for `ferrojs-value`
+- [x] 0.2 (2026-11-19) Fuzzing scaffold: `cargo-fuzz` targets for `ferrojs-value`
   (`from_bits_checked`, round trips). Short smoke run in the gate; document
   how to run long sessions. Later targets get added as components land.
 - [ ] 0.3 Benchmark harness: `iai-callgrind` instruction-count benchmarks

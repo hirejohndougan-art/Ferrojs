@@ -1,2 +1,5 @@
 target/
 /test262/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/

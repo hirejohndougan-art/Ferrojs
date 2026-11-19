@@ -93,6 +93,7 @@ cargo run --release -p ferrojs-test262 -- --suite test262 \
   --write-baseline conformance/test262-baseline.txt
 cargo run --release -p ferrojs-diff -- --engine node tests/diff
 cargo run --release -p ferrojs-diff -- --engine ferrojs tests/diff
+tools/fuzz.sh smoke
 ```
 
 - The Test262 run must not lose any test in the baseline. New passes are
@@ -102,7 +103,12 @@ cargo run --release -p ferrojs-diff -- --engine ferrojs tests/diff
   The `--engine node` run checks the harness and corpus against a second
   Node process. Files FerroJS can't run yet count as skipped. Needs `node`
   on the PATH.
-- As the roadmap adds them, the gate also includes: fuzzing smoke runs, Miri on `ferrojs-core`, and the
+- The fuzz smoke run (D-014) lints the `fuzz/` crate and runs every
+  libFuzzer target for 10 seconds from an empty corpus on stable Rust. Any
+  crash fails the gate; the input is left in `fuzz/artifacts/`. When a task
+  adds a component that parses or decodes outside input, it adds a fuzz
+  target for it.
+- As the roadmap adds them, the gate also includes: Miri on `ferrojs-core`, and the
   instruction-count benchmarks (a slowdown over 3% on a key benchmark blocks
   the merge unless the decision log explains it).
 - When a gate step is added, add it to this list and to `.github/workflows/ci.yml`.

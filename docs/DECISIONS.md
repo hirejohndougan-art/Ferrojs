@@ -146,6 +146,28 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
   number formatting, job ordering) and gives every bug fix a cheap place
   for a regression test.
 
+## D-014 Fuzzing with libFuzzer, smoke-run on stable Rust
+- **Status:** Accepted (autopilot, 2026-11-19)
+- **Choice:** fuzz targets live in a `fuzz/` crate laid out for `cargo-fuzz`
+  (libfuzzer-sys, own `[workspace]`, excluded from the main one).
+  `tools/fuzz.sh` builds them on **stable** Rust with the same
+  SanitizerCoverage flags cargo-fuzz passes (minus the sanitizer), with
+  debug assertions and overflow checks on, and an explicit `--target` so
+  build scripts aren't instrumented. The gate runs `tools/fuzz.sh smoke`:
+  each target 10 s from an empty corpus. Long runs use `tools/fuzz.sh run
+  <target>` (persistent corpus in git-ignored `fuzz/corpus/`) or nightly
+  `cargo fuzz` for AddressSanitizer. Targets check properties, not just
+  "doesn't crash": the first two show `Value::from_bits_checked` accepts
+  exactly the encodings the constructors produce.
+- **Rejected:** requiring nightly + cargo-fuzz in the gate (not installable
+  in every run environment, and a toolchain drift risk; ASan adds little
+  while only safe code is fuzzed — revisit when `ferrojs-core` has
+  `unsafe`); a home-made random-input loop (no coverage guidance, and
+  libFuzzer's compare tracing finds the tag constants in milliseconds);
+  checking a seed corpus into git (empty start is fast for now; add seeds
+  once a target needs them, e.g. JS source for the parser).
+- **Why:** coverage-guided fuzzing in every merge, with no extra toolchain.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

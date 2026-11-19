@@ -1,0 +1,43 @@
+# Fuzz targets (decision D-014). Not a member of the main workspace: the
+# targets link libFuzzer and are built with coverage instrumentation by
+# tools/fuzz.sh (stable Rust) or by `cargo fuzz` (nightly, adds sanitizers).
+[package]
+name = "ferrojs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+ferrojs-value = { path = "../crates/ferrojs-value" }
+
+# Keeps this crate out of the parent workspace.
+[workspace]
+members = ["."]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "value_bits"
+path = "fuzz_targets/value_bits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "value_roundtrip"
+path = "fuzz_targets/value_roundtrip.rs"
+test = false
+doc = false
+bench = false

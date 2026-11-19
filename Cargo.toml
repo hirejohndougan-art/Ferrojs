@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/ferrojs-value", "crates/ferrojs-core", "crates/ferrojs-test262", "crates/ferrojs-diff"]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.1"
