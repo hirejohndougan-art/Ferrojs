@@ -59,6 +59,14 @@ name = "ferrojs-core"
 version = "0.0.1"
 
 [[package]]
+name = "ferrojs-diff"
+version = "0.0.1"
+dependencies = [
+ "ferrojs-test262",
+ "walkdir",
+]
+
+[[package]]
 name = "ferrojs-test262"
 version = "0.0.1"
 dependencies = [

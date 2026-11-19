@@ -123,6 +123,29 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
   by automatic checks (Test262 baseline, differential testing, fuzzing,
   Miri, benchmarks) plus independent review and a monthly course check.
 
+## D-013 Differential testing against Node.js
+- **Status:** Accepted (autopilot, 2026-11-19)
+- **Choice:** a `ferrojs-diff` crate with a `jsdiff` tool runs every `.js`
+  file in `tests/diff/` on FerroJS and on Node.js, reusing the Test262
+  runner's `Engine` trait and Node driver (fresh realm per file, Test262's
+  one-argument `print`). Files run once as raw, non-module scripts. It
+  compares the printed lines exactly and the uncaught error by constructor
+  name and phase. Error messages are not compared. `Unsupported` counts as
+  skipped; a crash or timeout on either side is a difference. The gate runs
+  it twice: FerroJS vs Node, and Node vs a second Node process (checks the
+  harness and that every corpus file is deterministic). Only files under
+  `tests/diff/errors/` may end with an uncaught error; a test enforces it so
+  a file that breaks early (e.g. uses a host API the realm lacks) can't
+  silently test less.
+- **Rejected:** stored expected-output files (they go stale and hide
+  reference changes; Node is the oracle, as the plan says); comparing error
+  messages (implementation-defined, would only produce noise); running the
+  corpus as modules or with the Test262 harness (keeps files plain JS that
+  any engine can run).
+- **Why:** catches behaviour bugs Test262 doesn't assert on (output order,
+  number formatting, job ordering) and gives every bug fix a cheap place
+  for a regression test.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

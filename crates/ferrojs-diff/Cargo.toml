@@ -1,0 +1,19 @@
+[package]
+name = "ferrojs-diff"
+description = "Differential testing: run JavaScript files on FerroJS and a reference engine and compare"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "jsdiff"
+path = "src/main.rs"
+
+[dependencies]
+ferrojs-test262 = { path = "../ferrojs-test262" }
+walkdir = "2"
+
+[lints]
+workspace = true

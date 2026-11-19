@@ -91,12 +91,18 @@ tools/fetch-test262.sh
 cargo run --release -p ferrojs-test262 -- --suite test262 \
   --baseline conformance/test262-baseline.txt \
   --write-baseline conformance/test262-baseline.txt
+cargo run --release -p ferrojs-diff -- --engine node tests/diff
+cargo run --release -p ferrojs-diff -- --engine ferrojs tests/diff
 ```
 
 - The Test262 run must not lose any test in the baseline. New passes are
   written into the baseline in the same commit.
-- As the roadmap adds them, the gate also includes: differential tests
-  against Node.js, fuzzing smoke runs, Miri on `ferrojs-core`, and the
+- The differential test (D-013) runs every `tests/diff/` file on FerroJS and
+  Node.js and fails on any difference in printed output or uncaught error.
+  The `--engine node` run checks the harness and corpus against a second
+  Node process. Files FerroJS can't run yet count as skipped. Needs `node`
+  on the PATH.
+- As the roadmap adds them, the gate also includes: fuzzing smoke runs, Miri on `ferrojs-core`, and the
   instruction-count benchmarks (a slowdown over 3% on a key benchmark blocks
   the merge unless the decision log explains it).
 - When a gate step is added, add it to this list and to `.github/workflows/ci.yml`.

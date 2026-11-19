@@ -1,6 +1,6 @@
 # Every change: build, lint, unit tests on three platforms, then the Test262
 # conformance gate. Nothing merges on failure.
-# Later sessions add: differential checks, instruction-count benchmarks,
+# Later sessions add: instruction-count benchmarks,
 # Miri on ferrojs-core, and nightly/continuous jobs.
 name: ci
 
@@ -22,6 +22,18 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
+
+  differential:
+    # Runs tests/diff/ on FerroJS and on Node.js and fails on any difference
+    # (decision D-013). The node-vs-node run checks the harness and corpus.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: node --version
+      - run: cargo build --release -p ferrojs-diff
+      - run: ./target/release/jsdiff --engine node tests/diff
+      - run: ./target/release/jsdiff --engine ferrojs tests/diff
 
   test262:
     # Runs the pinned Test262 suite against FerroJS. Fails if any test listed

@@ -29,7 +29,7 @@ Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
 
 ## Phase 0 — Finish the quality system
 
-- [ ] 0.1 Differential harness: run a JS file on FerroJS and Node.js (via the
+- [x] 0.1 (2026-11-19) Differential harness: run a JS file on FerroJS and Node.js (via the
   existing Node driver) and compare printed output and thrown errors. Add a
   `tests/diff/` corpus and a gate step. Until FerroJS runs JS, the harness
   is tested with Node vs Node.
