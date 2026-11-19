@@ -11,7 +11,9 @@ publish = false
 ferrojs-value = { path = "../ferrojs-value" }
 serde_json = "1"
 
-[dev-dependencies]
+# Valgrind benchmarks run on Linux only; elsewhere the bench is an empty stub
+# so `cargo clippy --all-targets` still works on macOS and Windows CI.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 gungraun = "=0.20.0"
 
 # Only benches/ are benchmarks; keeps `cargo bench` from running unit tests.

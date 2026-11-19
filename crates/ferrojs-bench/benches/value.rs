@@ -1,12 +1,21 @@
 //! Value encoding micro-benchmarks (D-001). Each benchmark processes
 //! `inputs::N` values so per-call costs show up clearly in the counts.
+//!
+//! Valgrind benchmarks are Linux-only: every item is behind
+//! `cfg(target_os = "linux")` (not a module, which would change the
+//! benchmark ids), and other platforms get an empty `main`.
 
+#[cfg(target_os = "linux")]
 use std::hint::black_box;
 
+#[cfg(target_os = "linux")]
 use ferrojs_bench::inputs;
+#[cfg(target_os = "linux")]
 use ferrojs_value::{Kind, Value};
+#[cfg(target_os = "linux")]
 use gungraun::prelude::*;
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::mixed(setup = inputs::numbers)]
 fn from_f64(numbers: Vec<f64>) -> u64 {
@@ -17,6 +26,7 @@ fn from_f64(numbers: Vec<f64>) -> u64 {
     acc
 }
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::mixed(setup = inputs::numbers)]
 fn number(numbers: Vec<f64>) -> u64 {
@@ -27,6 +37,7 @@ fn number(numbers: Vec<f64>) -> u64 {
     acc
 }
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::mixed(setup = inputs::bit_patterns)]
 fn from_bits_checked(bits: Vec<u64>) -> usize {
@@ -35,6 +46,7 @@ fn from_bits_checked(bits: Vec<u64>) -> usize {
         .count()
 }
 
+#[cfg(target_os = "linux")]
 fn valid_values() -> Vec<Value> {
     inputs::bit_patterns()
         .into_iter()
@@ -42,6 +54,7 @@ fn valid_values() -> Vec<Value> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::mixed(setup = valid_values)]
 fn kind(values: Vec<Value>) -> u64 {
@@ -58,6 +71,7 @@ fn kind(values: Vec<Value>) -> u64 {
     acc
 }
 
+#[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::mixed(setup = valid_values)]
 fn as_number(values: Vec<Value>) -> f64 {
@@ -70,9 +84,14 @@ fn as_number(values: Vec<Value>) -> f64 {
     acc
 }
 
+#[cfg(target_os = "linux")]
 library_benchmark_group!(
     name = value_encoding,
     benchmarks = [from_f64, number, from_bits_checked, kind, as_number]
 );
 
+#[cfg(target_os = "linux")]
 main!(library_benchmark_groups = value_encoding);
+
+#[cfg(not(target_os = "linux"))]
+fn main() {}

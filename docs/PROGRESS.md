@@ -34,7 +34,9 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Changed: `ferrojs-bench` crate with five gungraun (ex-iai-callgrind)
   value-encoding benchmarks, `benchcheck` tool, stored baseline in
   `conformance/bench-baseline.txt`; `tools/bench.sh check --write` is a new
-  gate step and CI job (fails on >3% more instructions).
+  gate step and CI job (fails on >3% more instructions). Follow-up commit
+  makes the gungraun dependency and benchmarks Linux-only so macOS and
+  Windows CI still build all targets.
 - Decisions: D-015
 - Test262: 0 (+0; engine can't run JS yet)
 - Next: 0.4 Miri job on ferrojs-core
