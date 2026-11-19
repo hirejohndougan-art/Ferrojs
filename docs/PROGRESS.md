@@ -40,3 +40,13 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-015
 - Test262: 0 (+0; engine can't run JS yet)
 - Next: 0.4 Miri job on ferrojs-core
+
+## 2026-11-19 16:05 UTC — 0.4 Miri job on ferrojs-core
+- Result: merged
+- Changed: `tools/miri.sh` (strict provenance, canary test that only exists
+  under Miri) as a gate step, plus a CI `miri` job on nightly. Nightly can't
+  be downloaded in the autopilot sandbox, so core changes wait for the CI
+  job; Miri passed in CI run 44561192248 for this change.
+- Decisions: D-016
+- Test262: 0 (+0; engine can't run JS yet)
+- Next: 0.5 progress dashboard

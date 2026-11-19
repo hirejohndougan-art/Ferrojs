@@ -39,7 +39,7 @@ Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
 - [x] 0.3 (2026-11-19) Benchmark harness: `iai-callgrind` (now `gungraun`, D-015) instruction-count benchmarks
   in a `ferrojs-bench` crate, with a stored baseline and a 3% regression
   check in the gate. Start with value encoding micro-benchmarks.
-- [ ] 0.4 Miri job on `ferrojs-core` (empty for now, but wired into the gate
+- [x] 0.4 (2026-11-19) Miri job on `ferrojs-core` (empty for now, but wired into the gate
   and CI so every later `unsafe` addition is checked).
 - [ ] 0.5 Progress dashboard: a script that writes Test262 pass counts per
   directory and benchmark numbers to `docs/reports/dashboard.md`.

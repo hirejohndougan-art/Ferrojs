@@ -95,6 +95,7 @@ cargo run --release -p ferrojs-diff -- --engine node tests/diff
 cargo run --release -p ferrojs-diff -- --engine ferrojs tests/diff
 tools/fuzz.sh smoke
 tools/bench.sh check --write
+tools/miri.sh
 ```
 
 - The Test262 run must not lose any test in the baseline. New passes are
@@ -118,7 +119,14 @@ tools/bench.sh check --write
   like Test262. Needs `valgrind` and the matching `gungraun-runner`
   (the script prints the install command). When a task adds a feature on a
   hot path, it adds a benchmark for it.
-- As the roadmap adds them, the gate also includes: Miri on `ferrojs-core`.
+- The Miri step (D-016) runs `ferrojs-core`'s tests under Miri with strict
+  provenance. It needs nightly Rust with the `miri` component. If the run
+  environment can't install nightly, the step passes only when
+  `ferrojs-core` is unchanged; otherwise push the branch, wait for the CI
+  `miri` job on it to pass (check with the GitHub tools), and note the CI
+  run id in the progress entry. Never merge a `ferrojs-core` change
+  without a passing Miri run. Every `unsafe` addition comes with tests that
+  exercise it, so Miri has something to check.
 - When a gate step is added, add it to this list and to `.github/workflows/ci.yml`.
 
 ## Pacing

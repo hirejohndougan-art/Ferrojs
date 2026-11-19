@@ -190,6 +190,27 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
 - **Why:** deterministic counts let a 3% threshold catch real regressions
   without flaky failures, from the first micro-benchmark on.
 
+## D-016 Miri on ferrojs-core, locally or in CI
+- **Status:** Accepted (autopilot, 2026-11-19)
+- **Choice:** `tools/miri.sh` runs `cargo +nightly miri test -p ferrojs-core`
+  with `-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check`, and
+  checks that a `cfg(miri)`-only canary test ran so a non-Miri run can't
+  pass as one. The CI `miri` job always runs it (nightly + miri component,
+  `FERROJS_MIRI_REQUIRED=1`). Autopilot environments that can't download
+  nightly (the cloud sandbox blocks static.rust-lang.org) skip it only when
+  `ferrojs-core` is unchanged; a core change must wait for the CI `miri`
+  job on its pushed branch before merging. Code in `ferrojs-core` that
+  Miri can't run (e.g. `mmap` for the 4 GB cage reservation) gets a
+  `cfg(miri)` path with the same interface over a small `std::alloc`
+  region, so the logic on top is still checked.
+- **Rejected:** Miri over the whole workspace (everything else forbids
+  `unsafe`; Miri would only slow the gate); default (permissive) provenance
+  (the cage's offset-based references are exactly where int-to-pointer
+  casts would creep in); skipping Miri whenever nightly is missing (would
+  let unchecked `unsafe` merge).
+- **Why:** catches undefined behaviour in the only crate allowed to have
+  it, from the first `unsafe` block on (D-004).
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

@@ -1,6 +1,6 @@
 # Every change: build, lint, unit tests on three platforms, then the Test262
 # conformance gate. Nothing merges on failure.
-# Later sessions add: Miri on ferrojs-core, and nightly/continuous jobs.
+# Later sessions add:, and nightly/continuous jobs.
 name: ci
 
 on:
@@ -64,6 +64,18 @@ jobs:
           v="$(sed -n '/^name = "gungraun"$/{n;s/^version = "\(.*\)"$/\1/p}' Cargo.lock)"
           cargo install gungraun-runner --version "$v" --locked
       - run: tools/bench.sh check
+
+  miri:
+    # ferrojs-core's tests under Miri with strict provenance (D-016).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - run: tools/miri.sh
+        env:
+          FERROJS_MIRI_REQUIRED: "1"
 
   test262:
     # Runs the pinned Test262 suite against FerroJS. Fails if any test listed
