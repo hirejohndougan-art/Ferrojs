@@ -1,7 +1,6 @@
 # Every change: build, lint, unit tests on three platforms, then the Test262
 # conformance gate. Nothing merges on failure.
-# Later sessions add: instruction-count benchmarks,
-# Miri on ferrojs-core, and nightly/continuous jobs.
+# Later sessions add: Miri on ferrojs-core, and nightly/continuous jobs.
 name: ci
 
 on:
@@ -49,6 +48,22 @@ jobs:
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts/
+
+  bench:
+    # Instruction-count benchmarks; fails on a slowdown over 3% (D-015).
+    # CI's rustc may differ from the stored baseline's, in which case
+    # tools/bench.sh measures origin/main on this runner and compares to that.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: git fetch --depth=1 origin main:refs/remotes/origin/main
+      - run: sudo apt-get update && sudo apt-get install -y valgrind
+      - name: Install gungraun-runner
+        run: |
+          v="$(sed -n '/^name = "gungraun"$/{n;s/^version = "\(.*\)"$/\1/p}' Cargo.lock)"
+          cargo install gungraun-runner --version "$v" --locked
+      - run: tools/bench.sh check
 
   test262:
     # Runs the pinned Test262 suite against FerroJS. Fails if any test listed

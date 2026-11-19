@@ -94,6 +94,7 @@ cargo run --release -p ferrojs-test262 -- --suite test262 \
 cargo run --release -p ferrojs-diff -- --engine node tests/diff
 cargo run --release -p ferrojs-diff -- --engine ferrojs tests/diff
 tools/fuzz.sh smoke
+tools/bench.sh check --write
 ```
 
 - The Test262 run must not lose any test in the baseline. New passes are
@@ -108,9 +109,16 @@ tools/fuzz.sh smoke
   crash fails the gate; the input is left in `fuzz/artifacts/`. When a task
   adds a component that parses or decodes outside input, it adds a fuzz
   target for it.
-- As the roadmap adds them, the gate also includes: Miri on `ferrojs-core`, and the
-  instruction-count benchmarks (a slowdown over 3% on a key benchmark blocks
-  the merge unless the decision log explains it).
+- The benchmark step (D-015) runs the `ferrojs-bench` instruction-count
+  benchmarks under Valgrind and fails if any is more than 3% slower than
+  `conformance/bench-baseline.txt` or has disappeared. A slowdown blocks the
+  merge unless a decision entry explains it; then update the baseline with
+  `rm conformance/bench-baseline.txt && tools/bench.sh check --write` in the
+  same commit. New counts are written into the baseline in the same commit,
+  like Test262. Needs `valgrind` and the matching `gungraun-runner`
+  (the script prints the install command). When a task adds a feature on a
+  hot path, it adds a benchmark for it.
+- As the roadmap adds them, the gate also includes: Miri on `ferrojs-core`.
 - When a gate step is added, add it to this list and to `.github/workflows/ci.yml`.
 
 ## Pacing

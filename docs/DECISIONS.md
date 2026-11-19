@@ -168,6 +168,28 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
   once a target needs them, e.g. JS source for the parser).
 - **Why:** coverage-guided fuzzing in every merge, with no extra toolchain.
 
+## D-015 Instruction-count benchmarks with gungraun
+- **Status:** Accepted (autopilot, 2026-11-19)
+- **Choice:** benchmarks live in a `ferrojs-bench` crate and run under
+  Valgrind's Callgrind through **gungraun** 0.20 (the renamed successor of
+  `iai-callgrind`, which the plan names), pinned with `=` because the
+  separately installed `gungraun-runner` must match. The metric is total
+  instructions (`Ir`) per benchmark. `conformance/bench-baseline.txt`
+  stores one count per benchmark plus the rustc and Valgrind versions;
+  the `benchcheck` tool fails on a rise over 3% or a missing benchmark.
+  Counts from another toolchain aren't comparable, so on a mismatch
+  `tools/bench.sh` measures `origin/main` in a temporary worktree with the
+  current toolchain and compares against that (CI always takes this path
+  when its rustc differs). Benchmark inputs are generated deterministically
+  (fixed-seed xorshift), never from host randomness.
+- **Rejected:** wall-clock timing in the gate (noisy on shared CI; kept for
+  the planned nightly timing runs); gungraun's own saved baselines in
+  `target/` (not committed, so lost between runs); pinning the whole
+  project's toolchain just for stable counts (the main-vs-branch fallback
+  handles drift without that).
+- **Why:** deterministic counts let a 3% threshold catch real regressions
+  without flaky failures, from the first micro-benchmark on.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

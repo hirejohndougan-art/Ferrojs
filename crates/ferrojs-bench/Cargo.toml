@@ -1,0 +1,30 @@
+[package]
+name = "ferrojs-bench"
+description = "Instruction-count benchmarks (Valgrind via gungraun) and the regression check"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ferrojs-value = { path = "../ferrojs-value" }
+serde_json = "1"
+
+[dev-dependencies]
+gungraun = "=0.20.0"
+
+# Only benches/ are benchmarks; keeps `cargo bench` from running unit tests.
+[lib]
+bench = false
+
+[[bin]]
+name = "benchcheck"
+bench = false
+
+[[bench]]
+name = "value"
+harness = false
+
+[lints]
+workspace = true

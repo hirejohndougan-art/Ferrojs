@@ -36,7 +36,7 @@ Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
 - [x] 0.2 (2026-11-19) Fuzzing scaffold: `cargo-fuzz` targets for `ferrojs-value`
   (`from_bits_checked`, round trips). Short smoke run in the gate; document
   how to run long sessions. Later targets get added as components land.
-- [ ] 0.3 Benchmark harness: `iai-callgrind` instruction-count benchmarks
+- [x] 0.3 (2026-11-19) Benchmark harness: `iai-callgrind` (now `gungraun`, D-015) instruction-count benchmarks
   in a `ferrojs-bench` crate, with a stored baseline and a 3% regression
   check in the gate. Start with value encoding micro-benchmarks.
 - [ ] 0.4 Miri job on `ferrojs-core` (empty for now, but wired into the gate
