@@ -17,6 +17,10 @@ conformance runner exist; the engine cannot run JavaScript yet.
 | `tools/test262-commit.txt` | The Test262 commit all results are measured against |
 | `tools/fetch-test262.sh` | Downloads Test262 at that commit |
 | `docs/DECISIONS.md` | Decision log: read at the start of every session |
+| `docs/AUTOPILOT.md` | How scheduled Claude sessions build FerroJS without a human in the loop |
+| `docs/ROADMAP.md` | Task queue the autopilot works through |
+| `docs/PROGRESS.md` | One entry per autopilot run |
+| `docs/PLAN.md` | Goals, architecture and phases |
 | `.github/workflows/ci.yml` | Build, lint and test on Linux, macOS and Windows, then the Test262 gate |
 
 ## Rules
