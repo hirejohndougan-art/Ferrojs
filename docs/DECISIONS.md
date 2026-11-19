@@ -87,6 +87,24 @@ Status: **Proposed** until John confirms, then **Accepted**.
 - **Why:** proven in production; Wasm's fixed types make a fast compiler
   enough; stays 100% Rust.
 
+## D-011 Test262 runner design
+- **Status:** Proposed (2026-11-19)
+- **Choice:** our own runner (`crates/ferrojs-test262`) that follows Test262's
+  INTERPRETING.md exactly. Engines only report what happened (error, phase,
+  printed output); one shared judge decides pass or fail. Test262 is pinned to
+  a commit (`tools/test262-commit.txt`) and a baseline of passing runs
+  (`conformance/test262-baseline.txt`) gates every change: a test that passed
+  before must keep passing.
+- **Host settings:** the main agent can block (`CanBlock = true`, like Node and
+  shells), so the 2 `CanBlockIsFalse` tests are skipped. `intl402` runs but is
+  reported separately, matching the accuracy scope.
+- **Reference engine:** Node.js runs through the same runner via a small driver
+  (fresh realm per test, phases reported separately). It proves the runner is
+  correct and is the first engine for differential testing.
+- **Rejected:** the npm `test262-harness` tool (adds a Node dependency to the
+  core gate and doesn't report phases from our engine); unpinned Test262 (new
+  upstream tests would change our numbers by surprise).
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,
