@@ -21,6 +21,29 @@ Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
 | 6. WebAssembly | Alongside 5 | Wasm spec tests and JS API tests |
 | 1.0 release | ~9–12 months in | 100% Test262 for the current edition, adoption items 1–5, 7, 8 |
 
+## How overall completion is measured
+
+The daily update reports one percentage for the whole project (to 1.0 plus
+V8-competitive speed). Each phase has a fixed weight, roughly its share of
+the total work; a phase counts as done in proportion to its progress.
+
+| Phase | Weight | Progress within the phase |
+| --- | --- | --- |
+| Planning and setup (done before autopilot) | 2% | done |
+| 0. Quality system | 3% | finished tasks ÷ tasks |
+| 1. Core engine | 12% | finished tasks ÷ tasks |
+| 2. Full language and built-ins | 35% | Test262 pass rate ÷ 95%, capped at 100% (until then, finished tasks ÷ tasks if that is higher) |
+| 3. Baseline JIT and inline caches | 10% | finished tasks ÷ tasks |
+| 4. Warm starts, embedding API 1.0 | 5% | finished tasks ÷ tasks |
+| 5. Optimizing tier, moving GC | 23% | finished tasks ÷ tasks |
+| 6. WebAssembly | 7% | finished tasks ÷ tasks |
+| Close to 100% Test262 and 1.0 release | 3% | (Test262 pass rate − 95%) ÷ 5% |
+
+A phase with no task list yet counts as 0%. When the monthly review breaks a
+phase into tasks, the weights stay the same. Change weights only in a
+monthly review, with the reason logged, so the number stays comparable from
+day to day.
+
 ## Done before the autopilot started
 
 - [x] Value representation, NaN-boxing (`ferrojs-value`, D-001)
