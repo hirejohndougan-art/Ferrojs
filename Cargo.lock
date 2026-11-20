@@ -128,6 +128,7 @@ dependencies = [
 name = "ferrojs-test262"
 version = "0.0.1"
 dependencies = [
+ "ferrojs-bench",
  "rayon",
  "serde",
  "serde_json",

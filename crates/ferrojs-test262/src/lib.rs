@@ -5,6 +5,7 @@
 //! rates. A saved baseline of passing tests turns it into a regression gate:
 //! any test that used to pass and now fails stops the build.
 
+pub mod dashboard;
 pub mod engine;
 pub mod job;
 pub mod judge;

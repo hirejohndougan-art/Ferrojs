@@ -2,10 +2,10 @@
 //! gate that compares a run against a saved baseline of passing tests.
 
 use crate::judge::Verdict;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Default, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Counts {
     pub passed: usize,
     pub failed: usize,
@@ -24,6 +24,13 @@ impl Counts {
         } else {
             100.0 * self.passed as f64 / self.total() as f64
         }
+    }
+
+    /// Adds another set of counts to this one.
+    pub fn merge(&mut self, other: &Counts) {
+        self.passed += other.passed;
+        self.failed += other.failed;
+        self.not_run += other.not_run;
     }
 
     fn add(&mut self, verdict: &Verdict) {
@@ -146,10 +153,7 @@ impl Report {
         let mut tops: BTreeMap<&str, Counts> = BTreeMap::new();
         for (area, c) in &self.by_area {
             let top = area.split('/').next().unwrap_or(area);
-            let t = tops.entry(top).or_default();
-            t.passed += c.passed;
-            t.failed += c.failed;
-            t.not_run += c.not_run;
+            tops.entry(top).or_default().merge(c);
         }
         for (top, c) in tops {
             s.push_str(&format!(
