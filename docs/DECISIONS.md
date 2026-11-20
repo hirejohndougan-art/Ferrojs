@@ -423,6 +423,47 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
 - **Why:** three system calls per platform, a sandbox whose checks can't be
   corrupted from inside, and tests that run unchanged under Miri.
 
+## D-028 Phase 1 collector: Rust-side free lists, `Trace` callback, freed-kind byte
+- **Status:** Accepted (autopilot, 2026-11-20)
+- **Choice:** task 1.3 is split: 1.3a is the collector core, 1.3b the
+  branded handles (D-023) on top. The collector (`ferrojs-core::heap`)
+  allocates small cells from per-size-class chunks (D-022) with free
+  lists kept as Rust `Vec`s, and large cells from chunk runs; empty
+  chunks go to a free-chunk pool and are zeroed when reused. Mark bits are
+  the side bitmap in each chunk header; marking uses an explicit stack.
+  Cell layouts stay outside the core: `collect(roots, &impl Trace)` asks
+  the caller for each cell's references, and any reference that isn't
+  null or the start of a live cell panics. A freed cell's kind byte
+  becomes `0xff` (`FREED_KIND`, reserved); `HeapOptions` turns on
+  poisoning and the heap verifier after every collection (default on in
+  debug builds). A collection is due after allocating max(1 MB, live
+  bytes) since the last one; the heap never collects by itself, the
+  caller (1.3b's `Cx`) decides. Writes through `Heap` are always kept out
+  of chunk headers (mark bits) and unallocated memory; with the verifier
+  on they must also land inside one live cell. A collection that panicked
+  part-way is cleaned up at the next one.
+  Bump allocation got slower in the instruction-count benchmark: the
+  size-class lookup, the free-list check, the GC accounting and the write
+  check (the baseline was reset for it; the old number came from a setup
+  that warmed one size class, the new one warms four).
+- **Accepted costs:** whether a small cell is freed is read from its kind
+  byte in the cage, so cell layouts must never use `0xff` as a kind (1.3b's
+  `cells!` table asserts it), and a stray raw write could flip a cell's
+  state; writes through `Heap` are checked, and 1.3b's handles remove
+  stale references, so the cheaper representation is kept for now. Free
+  lists cost 4 bytes of Rust memory per free cell (a per-chunk free bitmap
+  can replace them if that matters). Each size class keeps its current
+  bump chunk even when empty, up to 19 chunks (4.75 MB).
+- **Rejected:** intrusive free lists inside freed cells (the collector
+  would trust data in the cage, against D-027, and poisoning would erase
+  them); a per-chunk "used" field updated on every allocation (measured
+  slower than per-class bump arrays); mark bits in a Rust-side table
+  (D-022 puts them in the chunk header so a later concurrent marker and
+  snapshots see one layout); one shared bump chunk for all sizes (D-022's
+  size classes keep sweeping simple and fragmentation low).
+- **Why:** a correct, checkable collector now, with no new `unsafe`, and
+  the cell-layout knowledge left to the `cells!` table that will own it.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

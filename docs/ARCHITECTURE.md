@@ -288,6 +288,12 @@ planned big speed step.
 - Mark bits live in a side bitmap per chunk (one bit per 8-byte granule),
   not in cell headers: sweeping touches less memory, concurrent marking
   later doesn't race on headers, and snapshotted cells carry no GC state.
+- Free lists, the chunk table and the free-chunk pool are kept in Rust,
+  outside the cage (D-027, D-028). A freed cell's kind byte is `0xff`
+  (reserved); empty chunks return to the pool and are zeroed on reuse.
+- The collector learns cell layouts through a `Trace` callback that lists
+  each cell's references; a reference that isn't null or the start of a
+  live cell is a panic, not a guess.
 
 ### 5.3 Cell layout
 

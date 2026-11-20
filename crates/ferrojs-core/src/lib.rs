@@ -8,7 +8,8 @@
 //!
 //! - [`cage`]: the address-space reservation, chunk commits and checked
 //!   accessors (D-002, D-022, D-027).
-//! - [`heap`]: bump allocation of cells inside the cage.
+//! - [`heap`]: cell allocation in size-class chunks and the mark-sweep
+//!   collector.
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
@@ -16,7 +17,7 @@ pub mod cage;
 pub mod heap;
 
 pub use cage::{Cage, CageError};
-pub use heap::{AllocError, Heap};
+pub use heap::{AllocError, CollectStats, Heap, HeapOptions, Trace};
 
 #[cfg(test)]
 mod tests {
