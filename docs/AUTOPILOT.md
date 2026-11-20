@@ -140,7 +140,7 @@ tools/miri.sh
 
 ## Pacing
 
-John chose six runs a night, hourly from 1 AM to 6 AM Central (2026-11-20),
+John chose three runs a night, at 1, 3 and 5 AM Central (2026-11-20);
 so runs can overlap. Usage is protected by
 keeping each run to **one task** and stopping when it's done. If a task
 keeps growing, split it rather than working longer. Do not start extra
