@@ -33,7 +33,16 @@ one of these files.
      then continue with a task if there's room.
 4. **Pick one task:** the first `[ ]` task in `docs/ROADMAP.md` whose
    dependencies are done, skipping tasks marked `[!]` (stuck) unless every
-   other task is blocked. Mark it `[~]` (in progress) with the date.
+   other task is blocked, and skipping tasks already marked `[~]` with a
+   claim less than 8 hours old (another run is on them). **Claim it right
+   away:** mark it `[~] (claimed <yyyy-mm-dd hh:mm UTC>)`, commit only that
+   line, and push to `main` before doing any other work. If the push is
+   rejected because `main` moved, pull, re-read the roadmap and pick again.
+   Runs overlap, so this is what stops two runs doing the same task. If
+   every available task is claimed or blocked by unfinished dependencies,
+   take a useful side task instead (tests for existing code, docs, fuzz
+   targets, splitting a future task) or record a short progress entry and
+   stop.
 5. **Size it.** A task must fit in one run: one coherent change, normally
    under about 1,500 changed lines. If it's bigger, split it into subtasks in
    the roadmap, commit that, and do the first subtask.
@@ -131,7 +140,8 @@ tools/miri.sh
 
 ## Pacing
 
-John chose a middle pace: about three runs a day. Usage is protected by
+John chose six runs a night, hourly from 1 AM to 6 AM Central (2026-11-20),
+so runs can overlap. Usage is protected by
 keeping each run to **one task** and stopping when it's done. If a task
 keeps growing, split it rather than working longer. Do not start extra
 runs or loop.
