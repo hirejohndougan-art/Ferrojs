@@ -116,6 +116,24 @@ Map/Set/WeakMap/WeakRef, iterators and generators complete, modules,
 Annex B, built-in TypeScript type stripping, debugger hooks, WebAssembly
 build target. Gate: over 95% of Test262.
 
+Always included when Phase 2 is broken down (requested by John, 2026-11-20):
+
+- **Real-world code corpus.** A `realworld/` suite of popular npm packages
+  (start with React and ReactDOM server rendering, jQuery on a minimal DOM
+  stub, lodash, Vue, the TypeScript compiler, Babel, a bundler such as
+  esbuild-wasm or Rollup, marked, moment/date-fns, a JSON-heavy workload)
+  plus JetStream, Octane and SunSpider from GitHub. Each entry runs on
+  FerroJS and Node.js through the differential harness (same output, same
+  errors) and, where the package has its own test suite, runs that suite
+  too. Pass count per package goes on the dashboard. Packages come from the
+  npm registry, which the run environment can reach; pin exact versions.
+- **Real-world gate.** Once a package passes, it joins the gate: it must
+  keep passing, like the Test262 baseline.
+- **Real-world tuning.** Profile the corpus and the benchmarks against V8,
+  QuickJS and Boa weekly; slow spots become roadmap tasks.
+- Live websites need a browser (Ironswift) and open internet; that work is
+  planned after FerroJS can be embedded in Ironswift.
+
 ## Phase 3 onward
 
 See `docs/PLAN.md` (phased roadmap, adoption features). Broken down by the
