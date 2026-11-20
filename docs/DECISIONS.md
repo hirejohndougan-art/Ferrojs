@@ -378,6 +378,24 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
 - **Why:** follows D-003; one IC format for the interpreter, baseline JIT
   and Warp.
 
+## D-025 Withdrawn
+- **Status:** Withdrawn (2026-11-20). A goal of beating V8's peak speed was
+  set and reverted the same night; the goal stays competitive with V8.
+
+## D-026 Dependency checks and CI minutes
+- **Status:** Accepted (2026-11-20, requested by John)
+- **Choice:** `cargo-deny` joins the gate and CI (`deny.toml`,
+  `tools/deny.sh`): MIT-compatible licenses only, no known vulnerabilities
+  or yanked crates, crates only from crates.io. CI runs the build and tests
+  on Linux for every push; macOS and Windows run weekly (Sunday) and on
+  demand; a newer push cancels the older run on the same branch.
+- **Rejected:** keeping three platforms on every push (uses GitHub Actions
+  minutes fast while the repo is private, and macOS minutes count about ten
+  times as much); making the repo public (John wants it private for now).
+- **Why:** runs add dependencies on their own, so licenses and advisories
+  must be checked automatically; and CI must not quietly stop when Actions
+  minutes run out. Revisit platform frequency if the repo goes public.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

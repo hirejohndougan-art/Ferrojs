@@ -1,18 +1,23 @@
-# Every change: build, lint, unit tests on three platforms, then the Test262
-# conformance gate. Nothing merges on failure.
-# Later sessions add:, and nightly/continuous jobs.
+# Every change: build, lint and unit tests on Linux, then the other gate
+# jobs. macOS and Windows run weekly and on demand to save Actions minutes
+# while the repo is private (decision D-026). Nothing merges on failure.
 name: ci
 
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 9 * * 0" # Sundays, after the night's autopilot runs
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -21,6 +26,32 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --release
+
+  platforms:
+    # macOS and Windows: weekly and on demand only (D-026).
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --release
+
+  deny:
+    # Licenses, known vulnerabilities, yanked crates, sources (D-026).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources
+          arguments: --all-features
 
   differential:
     # Runs tests/diff/ on FerroJS and on Node.js and fails on any difference
