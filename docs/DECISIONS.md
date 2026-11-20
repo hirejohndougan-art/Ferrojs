@@ -378,6 +378,24 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
 - **Why:** follows D-003; one IC format for the interpreter, baseline JIT
   and Warp.
 
+## D-025 Speed goal: beat V8's peak speed where possible
+- **Status:** Accepted (2026-11-20, chosen by John)
+- **Choice:** the end goal changes from "competitive with V8" to "beat V8's
+  peak speed wherever possible": match V8 on JetStream overall, then beat it
+  overall, then win most individual JetStream and real-world benchmarks.
+  Optional optimizations in the plan (e-graph rewriting, a trace tier for
+  hot loops, TypeScript types as guarded hints) become planned work for
+  Phase 5, each kept only if benchmarks show it pays off. See
+  `docs/PLAN.md`, "Beating V8's peak speed".
+- **Rejected:** stopping at parity (John wants to beat V8 if possible).
+- **Why:** a fresh design without V8's legacy constraints, plus saved type
+  profiles, NaN-boxed numbers and one source for every tier, gives real
+  openings to beat it. Correctness still wins over speed: every optimization
+  is gated by differential testing against the interpreter.
+- **Effect now:** earlier phases must not close off peak speed: keep the
+  frame layout, value representation, GC interface and inline-cache format
+  JIT-friendly, and record any trade-off that would cost peak speed later.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,
