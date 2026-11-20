@@ -48,7 +48,7 @@ Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
 
 Order matters: each task builds on the ones above it.
 
-- [ ] 1.1 Architecture spec: write `docs/ARCHITECTURE.md` covering frames,
+- [~] (claimed 2026-11-20 09:12 UTC) 1.1 Architecture spec: write `docs/ARCHITECTURE.md` covering frames,
   bytecode format, op-definition language, heap layout, GC interface,
   shapes and inline caches, in enough detail for later runs. Log the
   remaining planned decisions (GC, frames, tail calls, parser) in
