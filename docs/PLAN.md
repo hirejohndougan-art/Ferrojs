@@ -8,8 +8,7 @@ Document", Nov 2026), condensed for autopilot runs. Where this file and
 
 A new JavaScript engine written from scratch in 100% Rust, MIT licensed,
 with a tiered JIT, aiming to compete with V8 on speed, correctness and
-efficiency. Since D-025 the end goal is to **beat V8's peak speed** wherever
-possible, not just match it (see "Beating V8's peak speed" below).
+efficiency. V8 parity is the direction, not the first finish line.
 
 Milestones:
 
@@ -19,8 +18,7 @@ Milestones:
 2. **Faster than QuickJS and Boa,** via a baseline JIT with inline caches.
 3. **Instant warm starts,** via saved type profiles and a bytecode cache,
    ahead of V8 (with its code cache) on repeat runs.
-4. **Peak speed beyond V8** on a broad benchmark set (JetStream overall and
-   most individual benchmarks), via an
+4. **Competitive peak speed** with V8 on a broad benchmark set, via an
    optimizing tier and a generational moving GC.
 
 ## Guiding principles
@@ -141,37 +139,7 @@ and Boa.
 
 Targets: Phase 1 interpreter within 2× QuickJS; Phase 3 faster than
 QuickJS and Boa; Phase 4 repeat-run startup ahead of V8 with code cache;
-Phase 5 match V8 on JetStream, then beat it (D-025).
-
-## Beating V8's peak speed (D-025)
-
-Target, in order: match V8 on JetStream overall, then beat it overall, then
-win on most individual JetStream and real-world benchmarks. Where V8 stays
-ahead, the gap and its cause are tracked on the dashboard.
-
-Where a fresh design can beat V8:
-
-- **No warm-up on repeat runs:** saved type profiles let the optimizing tier
-  start at full speed, so real workloads reach peak sooner than V8.
-- **Numbers without allocation:** NaN-boxing keeps doubles unboxed in every
-  tier; V8 boxes heap numbers.
-- **One source for every tier:** op definitions and CacheIR-style caches mean
-  the optimizer sees exact, shared feedback and tiers never disagree.
-- **Aggressive optimizer:** escape analysis and scalar replacement,
-  inlining driven by profiles, bounds-check elimination, loop-invariant code
-  motion, and e-graph rewriting in the top tier (promoted from optional).
-- **Tracing for hot loops:** a LuaJIT-style trace tier for tight numeric
-  loops, if measurements show it pays off (promoted from optional).
-- **TypeScript annotations as hints:** trusted only behind guards, to start
-  optimized code with better types (promoted from optional).
-- **GC built for speed:** inline bump allocation in JIT code, a generational
-  nursery, concurrent marking, and allocation sinking so short-lived objects
-  never reach the heap.
-- **Fast regex:** a regex JIT on the copy-and-patch machinery.
-
-Every optimization must keep the interpreter as the reference: differential
-testing and fuzzing against the interpreter gate each one, and correctness
-always wins over speed.
+Phase 5 steady climb toward V8 parity.
 
 ## Phased roadmap
 

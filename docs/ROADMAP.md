@@ -17,7 +17,7 @@ Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
 | 2. Full language and built-ins | Mar–Aug 2027 | Over 95% of Test262 |
 | 3. Baseline JIT and inline caches | Sep–Oct 2027 | Faster than QuickJS and Boa on the suite |
 | 4. Warm starts, embedding API 1.0 | Nov 2027 | Repeat-run startup ahead of V8 with code cache |
-| 5. Optimizing tier, moving GC | 2028 | Match V8 on JetStream, then beat it (D-025) |
+| 5. Optimizing tier, moving GC | 2028 | Steady climb toward V8 parity |
 | 6. WebAssembly | Alongside 5 | Wasm spec tests and JS API tests |
 | 1.0 release | ~9–12 months in | 100% Test262 for the current edition, adoption items 1–5, 7, 8 |
 
