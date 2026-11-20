@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ferrojs-core = { path = "../ferrojs-core" }
 ferrojs-value = { path = "../ferrojs-value" }
 serde_json = "1"
 
@@ -26,6 +27,10 @@ bench = false
 
 [[bench]]
 name = "value"
+harness = false
+
+[[bench]]
+name = "heap"
 harness = false
 
 [lints]

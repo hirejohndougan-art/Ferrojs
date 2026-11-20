@@ -396,6 +396,33 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
   must be checked automatically; and CI must not quietly stop when Actions
   minutes run out. Revisit platform frequency if the repo goes public.
 
+## D-027 Cage memory backends and checked access
+- **Status:** Accepted (autopilot, 2026-11-20)
+- **Choice:** the cage (D-002, D-022) reserves address space with `mmap`
+  (`PROT_NONE`, `MAP_NORESERVE` on Linux) through `libc` on Unix and with
+  `VirtualAlloc(MEM_RESERVE)` through `windows-sys` on Windows; chunks are
+  committed with `mprotect` / `MEM_COMMIT`. Under Miri, and on platforms
+  with neither, the reservation is a zeroed `std::alloc` block (no guard
+  pages; Miri's default cage is 8 chunks). Chunk 0 is never committed, so
+  the low 64 KB null region is the whole first chunk. The facts safety
+  relies on (base, size, committed-chunk bitmap) live in the Rust `Cage`
+  struct, never inside the cage, and every access from safe code goes
+  through checked accessors (bounds, commitment, alignment; reads `&self`,
+  writes `&mut self`; `Cage` is neither `Send` nor `Sync`). The cage size
+  is a parameter (4 GB default); code that skips checks must require
+  `Cage::is_full_size`. Until 1.3, `Heap` bump-allocates cells of every
+  size in shared chunks; cells over 8 KB get a chunk run; every chunk
+  starts with a 4,160-byte header (kind word plus room for the mark
+  bitmap).
+- **Rejected:** `rustix` or `memmap2` (more code than three calls need;
+  `memmap2` can't reserve without committing); handing out `&mut Cage`
+  from `Heap` (lets callers commit chunks or swap cages behind the
+  allocator); metadata in chunk headers as the source of truth (a stray
+  write into the cage could then defeat the checks); a fast path for
+  single-chunk accesses (measured 16% slower in the bump benchmark).
+- **Why:** three system calls per platform, a sandbox whose checks can't be
+  corrupted from inside, and tests that run unchanged under Miri.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

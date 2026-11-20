@@ -269,7 +269,9 @@ planned big speed step.
 - Offsets below 64 KB are never committed. Offset 0 is the null reference
   and faults on access.
 - `base + u32 + small displacement` always lands inside the reservation, so
-  any JIT bug that computes a wrong offset stays inside the cage.
+  any JIT bug that computes a wrong offset stays inside the cage. This only
+  holds for a full 4 GB cage (`Cage::is_full_size`); smaller cages (tests,
+  Miri) rely on the checked accessors (D-027).
 - Under Miri (D-016) the cage is a small `std::alloc` region with the same
   interface.
 

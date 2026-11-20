@@ -10,3 +10,10 @@ rust-version.workspace = true
 # It does not inherit the workspace lint that forbids unsafe code.
 [lints.rust]
 unsafe_code = "warn"
+
+# Platform memory backends for the cage (D-027).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory"] }

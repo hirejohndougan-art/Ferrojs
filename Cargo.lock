@@ -107,6 +107,7 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 name = "ferrojs-bench"
 version = "0.0.1"
 dependencies = [
+ "ferrojs-core",
  "ferrojs-value",
  "gungraun",
  "serde_json",
@@ -115,6 +116,10 @@ dependencies = [
 [[package]]
 name = "ferrojs-core"
 version = "0.0.1"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
 
 [[package]]
 name = "ferrojs-diff"
@@ -224,6 +229,12 @@ name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
+
+[[package]]
+name = "libc"
+version = "0.2.191"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "memchr"

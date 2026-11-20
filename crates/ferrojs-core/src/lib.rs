@@ -1,10 +1,22 @@
 //! The audited unsafe core.
 //!
-//! This crate will hold the only `unsafe` code in the engine: the 4 GB heap
-//! cage, GC internals, JIT executable memory and tier trampolines. Every
-//! `unsafe` block must carry a `// SAFETY:` comment naming the invariant it
-//! relies on. Nothing lives here yet; it is created now so the boundary
-//! exists before any code is written.
+//! This crate holds the only `unsafe` code in the engine (D-004): the 4 GB
+//! heap cage, and later GC internals, JIT executable memory and tier
+//! trampolines. Every `unsafe` block must carry a `// SAFETY:` comment
+//! naming the invariant it relies on, and comes with tests that exercise
+//! it so Miri (D-016) has something to check.
+//!
+//! - [`cage`]: the address-space reservation, chunk commits and checked
+//!   accessors (D-002, D-022, D-027).
+//! - [`heap`]: bump allocation of cells inside the cage.
+
+#![deny(clippy::undocumented_unsafe_blocks)]
+
+pub mod cage;
+pub mod heap;
+
+pub use cage::{Cage, CageError};
+pub use heap::{AllocError, Heap};
 
 #[cfg(test)]
 mod tests {
