@@ -41,7 +41,7 @@ Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
   check in the gate. Start with value encoding micro-benchmarks.
 - [x] 0.4 (2026-11-19) Miri job on `ferrojs-core` (empty for now, but wired into the gate
   and CI so every later `unsafe` addition is checked).
-- [ ] 0.5 Progress dashboard: a script that writes Test262 pass counts per
+- [x] 0.5 (2026-11-20) Progress dashboard: a script that writes Test262 pass counts per
   directory and benchmark numbers to `docs/reports/dashboard.md`.
 
 ## Phase 1 — Core engine

@@ -50,3 +50,15 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-016
 - Test262: 0 (+0; engine can't run JS yet)
 - Next: 0.5 progress dashboard
+
+## 2026-11-20 07:18 UTC — 0.5 Progress dashboard
+- Result: merged
+- Changed: `tools/dashboard.sh` and a tested `dashboard` binary in
+  `ferrojs-test262` write `docs/reports/dashboard.md` (Test262 per
+  top-level and second-level directory, benchmark counts); first page
+  committed. `default-run` keeps the gate's `cargo run -p ferrojs-test262`
+  working. Phase 0 is complete.
+- Decisions: D-017
+- Test262: 0 (+0; engine can't run JS yet)
+- Next: 1.1 architecture spec. Weekly report runs should regenerate the
+  dashboard with `tools/dashboard.sh` (D-017).
