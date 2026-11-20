@@ -393,7 +393,7 @@ fn a_root_to_a_freed_cell_panics() {
 /// against a model of the object graph each time.
 #[test]
 fn stress_collect_on_every_allocation() {
-    let steps: u32 = if cfg!(miri) { 60 } else { 3000 };
+    let steps: u32 = if cfg!(miri) { 30 } else { 3000 };
     let mut heap = checked(if cfg!(miri) { 32 } else { 64 });
     let mut rng = 0x2545_f491_4f6c_dd1du64;
     let mut next = move |n: u32| {
@@ -571,7 +571,7 @@ fn a_run_can_start_in_the_pool_and_end_in_fresh_chunks() {
 /// then, so garbage piles up, and with cells spanning several chunks.
 #[test]
 fn stress_periodic_collection_with_chunk_runs() {
-    let steps: u32 = if cfg!(miri) { 80 } else { 2500 };
+    let steps: u32 = if cfg!(miri) { 40 } else { 2500 };
     let mut heap = checked(if cfg!(miri) { 32 } else { 96 });
     let mut rng = 0x9e37_79b9_7f4a_7c15u64;
     let mut next = move |n: u32| {

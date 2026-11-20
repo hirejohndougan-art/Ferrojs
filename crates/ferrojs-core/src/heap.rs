@@ -634,12 +634,8 @@ impl Heap {
     fn recover_from_panic(&mut self) {
         self.mark_stack.clear();
         for chunk in 1..self.next_chunk {
-            if matches!(
-                self.chunks[chunk as usize],
-                ChunkInfo::Small { .. } | ChunkInfo::LargeHead { .. }
-            ) {
-                self.cage
-                    .fill(chunk * CHUNK_SIZE + BITMAP_OFFSET, BITMAP_BYTES, 0);
+            if let Some(len) = self.bitmap_in_use(chunk) {
+                self.cage.fill(chunk * CHUNK_SIZE + BITMAP_OFFSET, len, 0);
             }
         }
         self.collecting = false;
@@ -647,20 +643,31 @@ impl Heap {
 
     /// Panics if any chunk in use has a mark bit set outside a collection.
     fn check_bitmaps_clear(&self) {
-        let mut bitmap = vec![0u8; BITMAP_BYTES as usize];
         for chunk in 1..self.next_chunk {
-            if matches!(
-                self.chunks[chunk as usize],
-                ChunkInfo::Small { .. } | ChunkInfo::LargeHead { .. }
-            ) {
-                self.cage
-                    .read_bytes(chunk * CHUNK_SIZE + BITMAP_OFFSET, &mut bitmap);
-                assert!(
-                    bitmap.iter().all(|&b| b == 0),
-                    "heap verifier: chunk {chunk} has mark bits left set"
-                );
+            if let Some(len) = self.bitmap_in_use(chunk) {
+                let words = chunk * CHUNK_SIZE + BITMAP_OFFSET;
+                for i in 0..len / 8 {
+                    assert_eq!(
+                        self.cage.read_u64(words + 8 * i),
+                        0,
+                        "heap verifier: chunk {chunk} has mark bits left set"
+                    );
+                }
             }
         }
+    }
+
+    /// Bytes at the start of a chunk's mark bitmap that can hold set bits:
+    /// those covering the handed-out cells (mark bits are only ever set at
+    /// cell starts). A multiple of 8. `None` for chunks without cells.
+    fn bitmap_in_use(&self, chunk: u32) -> Option<u32> {
+        let end = match self.chunks[chunk as usize] {
+            ChunkInfo::Small { class, used } => self.small_used(chunk, class, used),
+            ChunkInfo::LargeHead { .. } => CHUNK_HEADER_SIZE + CELL_ALIGN,
+            ChunkInfo::Unused | ChunkInfo::Free | ChunkInfo::LargeTail { .. } => return None,
+        };
+        // One bit per 8-byte granule below `end`, rounded up to whole words.
+        Some((end / CELL_ALIGN).div_ceil(64) * 8)
     }
 
     fn sweep(&mut self) -> CollectStats {
@@ -693,7 +700,8 @@ impl Heap {
                         rel += slot;
                     }
                     stats.live_bytes += live as u64 * slot as u64;
-                    self.cage.fill(start + BITMAP_OFFSET, BITMAP_BYTES, 0);
+                    let len = self.bitmap_in_use(chunk).expect("a small chunk");
+                    self.cage.fill(start + BITMAP_OFFSET, len, 0);
                     if live == 0 && self.bump_chunk[class as usize] != chunk {
                         self.chunks[chunk as usize] = ChunkInfo::Free;
                         self.free_chunks.insert(chunk);
