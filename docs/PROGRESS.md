@@ -89,3 +89,22 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 0 (+0; engine can't run JS yet)
 - Next: 1.3 mark-sweep GC (risky; core change, needs CI Miri). 1.4 and
   1.5 are also unblocked.
+
+## 2026-11-21 00:00 UTC — 1.3a Collector core (1.3 split into 1.3a/1.3b)
+- Result: merged
+- Changed: `ferrojs-core::heap` is now a mark-sweep collector: size-class
+  chunks with Rust-side free lists, large cells in chunk runs, a
+  free-chunk pool (runs may extend into fresh chunks), side mark bitmaps,
+  explicit mark stack, poisoning, a `Trace` callback, and a heap verifier
+  that also checks the chunk table, pool, free lists and byte count.
+  Writes are kept out of chunk headers; a collection that panicked is
+  cleaned up at the next one. Two randomized model-checked stress tests;
+  new `collect` benchmark. Independent review: one bug (stale mark bits
+  after a panic) and several should-fixes, all fixed or recorded in D-028.
+  Miri: passed in CI run 44839178765. That run's bench job fails by
+  design (it compares with main; the slowdown is explained in D-028).
+  Started at John's request outside the nightly schedule.
+- Decisions: D-028
+- Test262: 0 (+0; engine can't run JS yet)
+- Next: 1.3b branded handles (risky; core change, needs CI Miri). 1.4
+  and 1.5 are also unblocked.

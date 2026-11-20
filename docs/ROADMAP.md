@@ -78,7 +78,7 @@ Order matters: each task builds on the ones above it.
   `DECISIONS.md`.
 - [x] 1.2 (2026-11-20) (risky) Heap cage in `ferrojs-core`: reserve the 4 GB region,
   32-bit offsets, bump allocation, guard pages (D-002). needs: 1.1
-- [~] (claimed 2026-11-20 12:00 UTC) 1.3a (risky) Collector core in
+- [x] 1.3a (2026-11-20) (risky) Collector core in
   `ferrojs-core`: size-class chunks with free lists (D-022), side mark
   bitmaps, explicit mark stack, sweep with poisoning, chunk reuse, a
   `Trace` callback for cell layouts, heap verifier, and a randomized
