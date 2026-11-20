@@ -76,7 +76,7 @@ Order matters: each task builds on the ones above it.
   shapes and inline caches, in enough detail for later runs. Log the
   remaining planned decisions (GC, frames, tail calls, parser) in
   `DECISIONS.md`.
-- [ ] 1.2 (risky) Heap cage in `ferrojs-core`: reserve the 4 GB region,
+- [~] (claimed 2026-11-20 11:20 UTC) 1.2 (risky) Heap cage in `ferrojs-core`: reserve the 4 GB region,
   32-bit offsets, bump allocation, guard pages (D-002). needs: 1.1
 - [ ] 1.3 (risky) Simple non-moving mark-sweep GC behind lifetime-branded
   handles (`gc-arena` style, refined by D-023: borrow-checked unrooted
