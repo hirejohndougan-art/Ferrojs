@@ -78,10 +78,17 @@ Order matters: each task builds on the ones above it.
   `DECISIONS.md`.
 - [x] 1.2 (2026-11-20) (risky) Heap cage in `ferrojs-core`: reserve the 4 GB region,
   32-bit offsets, bump allocation, guard pages (D-002). needs: 1.1
-- [ ] 1.3 (risky) Simple non-moving mark-sweep GC behind lifetime-branded
-  handles (`gc-arena` style, refined by D-023: borrow-checked unrooted
-  handles plus scoped roots); no code may assume objects stay put. GC
-  stress mode (collect on every allocation) from the start. needs: 1.2
+- [~] (claimed 2026-11-20 12:00 UTC) 1.3a (risky) Collector core in
+  `ferrojs-core`: size-class chunks with free lists (D-022), side mark
+  bitmaps, explicit mark stack, sweep with poisoning, chunk reuse, a
+  `Trace` callback for cell layouts, heap verifier, and a randomized
+  collect-on-every-allocation stress test. Roots are passed in by the
+  caller. needs: 1.2
+- [ ] 1.3b (risky) Lifetime-branded handles on top of 1.3a (D-023): `Cx`,
+  `NoGc`, `Gc<'a, T>`, `Unbound<T>`, scoped `Root`s on a handle stack,
+  `Global` table, the write-barrier API, and GC stress mode (collect on
+  every allocation) wired into `Cx`; no code may assume objects stay put.
+  Compile-fail tests for the rooting rules. needs: 1.3a
 - [ ] 1.4 Op-definition language: a Rust macro that defines each bytecode
   op once and generates the interpreter handler (later also the
   copy-and-patch stencil and optimizer lowering). needs: 1.1
@@ -91,9 +98,9 @@ Order matters: each task builds on the ones above it.
 - [ ] 1.6 Bytecode compiler, part 1: expressions, variables, functions,
   control flow; register-based bytecode. needs: 1.4, 1.5
 - [ ] 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
-  layout; proper tail calls designed in. needs: 1.3, 1.6
+  layout; proper tail calls designed in. needs: 1.3b, 1.6
 - [ ] 1.8 Objects and shapes (hidden classes), property get/set, prototype
-  chains. needs: 1.3
+  chains. needs: 1.3b
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7
 - [ ] 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
