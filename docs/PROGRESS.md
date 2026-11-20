@@ -75,3 +75,17 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 0 (+0; engine can't run JS yet)
 - Next: 1.2 heap cage (risky; core change, needs CI Miri). Note oxc 0.159
   needs rustc 1.98; the sandbox has 1.97 (see D-018 for 1.5).
+
+## 2026-11-20 11:40 UTC — 1.2 Heap cage
+- Result: merged
+- Changed: `ferrojs-core` cage (4 GB + 64 KB guard reserved via mmap /
+  VirtualAlloc, 256 KB chunks committed on demand, chunk 0 never
+  committed, checked 32-bit-offset accessors) and a bump-allocating `Heap`
+  with chunk runs for cells over 8 KB; new `heap/bump_alloc` benchmark.
+  Independent review found no bugs; its should-fixes (no `&mut Cage` from
+  `Heap`, `is_full_size`, OOM reports requested size) are in.
+  Miri: passed in CI run 44727937387 (Windows and macOS jobs too).
+- Decisions: D-027
+- Test262: 0 (+0; engine can't run JS yet)
+- Next: 1.3 mark-sweep GC (risky; core change, needs CI Miri). 1.4 and
+  1.5 are also unblocked.
