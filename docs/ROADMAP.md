@@ -48,7 +48,7 @@ Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
 
 Order matters: each task builds on the ones above it.
 
-- [~] (claimed 2026-11-20 09:12 UTC) 1.1 Architecture spec: write `docs/ARCHITECTURE.md` covering frames,
+- [x] 1.1 (2026-11-20) Architecture spec: write `docs/ARCHITECTURE.md` covering frames,
   bytecode format, op-definition language, heap layout, GC interface,
   shapes and inline caches, in enough detail for later runs. Log the
   remaining planned decisions (GC, frames, tail calls, parser) in
@@ -56,13 +56,15 @@ Order matters: each task builds on the ones above it.
 - [ ] 1.2 (risky) Heap cage in `ferrojs-core`: reserve the 4 GB region,
   32-bit offsets, bump allocation, guard pages (D-002). needs: 1.1
 - [ ] 1.3 (risky) Simple non-moving mark-sweep GC behind lifetime-branded
-  handles (`gc-arena` style); no code may assume objects stay put. GC
+  handles (`gc-arena` style, refined by D-023: borrow-checked unrooted
+  handles plus scoped roots); no code may assume objects stay put. GC
   stress mode (collect on every allocation) from the start. needs: 1.2
 - [ ] 1.4 Op-definition language: a Rust macro that defines each bytecode
   op once and generates the interpreter handler (later also the
   copy-and-patch stencil and optimizer lowering). needs: 1.1
 - [ ] 1.5 Parser integration: oxc AST in, plus an early-error pass. Run
-  Test262's syntax (negative parse) tests through it. needs: 1.1
+  Test262's syntax (negative parse) tests through it. Pin oxc per D-018
+  (newest release whose `rust-version` the toolchain meets). needs: 1.1
 - [ ] 1.6 Bytecode compiler, part 1: expressions, variables, functions,
   control flow; register-based bytecode. needs: 1.4, 1.5
 - [ ] 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame

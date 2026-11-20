@@ -231,6 +231,153 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
 - **Why:** gives John and the weekly report one place to see conformance
   by area and benchmark numbers, built from the same files the gate checks.
 
+## D-018 Parser: oxc, pinned, plus our own early-error pass
+- **Status:** Accepted (autopilot, 2026-11-20)
+- **Choice:** `ferrojs-compiler` parses with `oxc_parser` and builds scopes
+  and symbols with `oxc_semantic` (with its syntax-error checks on). Our
+  own early-error pass runs after it and covers whatever Test262's negative
+  syntax tests show oxc misses. The compiler reads the oxc AST directly; no
+  AST of our own. oxc is pinned with `=` to the newest release whose
+  `rust-version` the gate's toolchain meets (0.150.x needs 1.96; 0.159
+  needs 1.98, newer than the sandbox's 1.97), and the workspace
+  `rust-version` is raised to match. Upgrades are their own task and
+  re-run the full gate.
+- **Rejected:** Boa's parser (kept as the plan's fallback if oxc's
+  early-error gap proves large); swc (larger API surface, fewer early
+  errors); writing our own parser now (months of work the plan reserves
+  for built-ins and the JIT); unpinned oxc (0.x releases break the API
+  often).
+- **Why:** oxc is MIT, fast, maintained, and its semantic pass already does
+  scope analysis we need for register allocation (ARCHITECTURE.md §8).
+
+## D-019 Bytecode format: register-based, variable-width operands
+- **Status:** Accepted (autopilot, 2026-11-20)
+- **Choice:** three-address register bytecode with no accumulator. One
+  opcode byte; operands 1 byte by default, 2 or 4 after a `Wide` /
+  `ExtraWide` prefix; little-endian. Operand kinds `Reg`, `Imm`, `Const`,
+  `Ic`, `Label` (relative), `Count`, `EnvSlot`. Bytecode is an immutable
+  heap cell owned by a `FunctionTemplate` (snapshot-friendly, D-009).
+  Loop back-edges use `JumpLoop`, the op that checks interrupts (D-007).
+  All bytecode passes a verifier before running when it comes from a
+  cache, and in debug builds and tests always. Details: ARCHITECTURE.md §4.
+- **Rejected:** an accumulator machine (V8 Ignition: smaller code, but
+  every op has an implicit operand, which complicates copy-and-patch
+  stencils and SSA building); fixed-width 32-bit instructions (Lua: simple
+  decode but wasteful and caps register counts at 255 or forces awkward
+  extension ops); stack bytecode (more instructions per expression, and
+  the plan names register bytecode).
+- **Why:** fewer instructions than a stack machine, explicit operands for
+  every tier, compact common case.
+
+## D-020 Op definitions: one declarative X-macro, handlers generic over a context
+- **Status:** Accepted (autopilot, 2026-11-20)
+- **Choice:** every op is defined once in `ferrojs-bytecode/src/ops.rs` in
+  a single `macro_rules!` X-macro: name, operands with kinds, flags
+  (`may_throw`, `may_gc`, `has_ic`, jump/terminator), doc, and a handler
+  body generic over an `OpCtx` trait. The macro generates the opcode enum,
+  encoder, decoder, disassembler, verifier table, metadata, and the
+  interpreter dispatch; Phase 3 instantiates the same handler bodies as
+  copy-and-patch stencils; Phase 5 adds optional `lower` clauses. Handlers
+  hold only the fast path and call named runtime functions for the rest.
+  The interpreter is a `loop { match }` in safe Rust for now.
+- **Rejected:** a procedural macro crate (needs `syn`, slower builds,
+  harder for later runs to debug; revisit only if `macro_rules!` can't
+  express something, with a decision); a build-script code generator
+  reading a separate op table file (the definitions would stop being
+  ordinary Rust that rust-analyzer and rustc check in place); writing the
+  interpreter and JIT by hand separately (tiers would drift apart).
+- **Why:** the plan's "single op definitions" rule, in the simplest form
+  that covers all planned tiers.
+
+## D-021 Frames: one shared layout on an index-linked frame stack; proper tail calls
+- **Status:** Accepted (autopilot, 2026-11-20)
+- **Choice:** one frame stack per engine instance, a fixed reservation of
+  64-bit slots outside the heap cage (default 1 Mi slots), frames linked by
+  slot index. Layout: 8 header slots (callee, this, new.target,
+  environment as Values; caller fp, return pc, return info, argc as raw
+  words), then registers with parameters first, then extra arguments.
+  Every register always holds a valid Value (filled with `undefined` at
+  entry), so frames are scanned precisely without stack maps. Calls copy
+  arguments into the new frame. Interpreter, native and baseline-JIT
+  frames share the layout. Strict-mode tail calls (`TailCall` ops)
+  overwrite the current frame in place, keeping its return linkage, so the
+  stack never grows; elided frames are absent from `Error.stack`.
+  Generators save and restore their frame's Value slots in their heap
+  object. Details: ARCHITECTURE.md §3.
+- **Rejected:** overlapping caller/callee register windows (LuaJIT style:
+  saves a copy but makes missing/extra argument handling and in-place tail
+  calls messy); reversed argument order below `fp` (V8 style: needs
+  argument adaptation for under-application); using the Rust stack for JS
+  frames (no proper tail calls, no generator frame copying, deep
+  recursion overflows the native stack); shadow-stack trampolines for tail
+  calls only in some tiers (tiers would disagree).
+- **Why:** proper tail calls are the plan's named hardest accuracy item;
+  a simple fixed-offset layout makes them, generators, precise scanning
+  and the shared interpreter/baseline layout cheap.
+
+## D-022 Heap layout: byte offsets, size-class chunks, side mark bitmaps
+- **Status:** Accepted (autopilot, 2026-11-20)
+- **Choice:** the 4 GB cage (D-002) is reserved `PROT_NONE` with a 64 KB
+  trailing guard; the low 64 KB is never committed (offset 0 is null).
+  References are 8-byte-aligned byte offsets. The cage is split into
+  256 KB chunks: small-object chunks per size class (16 B up to 8 KB,
+  about 1.5× steps) with bump allocation then free lists after sweeping,
+  and large-object chunk runs. Mark bits are in a per-chunk side bitmap.
+  Every cell starts with an 8-byte header: `CellKind` byte, flags byte,
+  16 kind-specific bits, and a 32-bit Shape offset for objects. Cells
+  hold no raw addresses and no Rust-owned collections. Details:
+  ARCHITECTURE.md §5.
+- **Rejected:** mark bits in headers (more memory touched by sweep, races
+  with later concurrent marking, GC state inside snapshots); scaled
+  offsets now (byte offsets are simpler while the cage is 4 GB; the free
+  low 3 bits keep a 32 GB mode open); a single free-list allocator
+  without size classes (fragmentation and slow allocation).
+- **Why:** fast allocation now, and a layout the Phase 5 nursery and
+  compactor can slot into.
+
+## D-023 GC interface: borrow-checked unrooted handles plus scoped roots
+- **Status:** Accepted (autopilot, 2026-11-20)
+- **Choice:** collection may happen at any allocation or any call that can
+  run JavaScript; such functions take `&mut Cx`. Unrooted handles
+  (`Gc<'a, T>`, `JsValue<'a>`) are `Copy` and borrow a `NoGc<'a>` token
+  from `Cx`, so the borrow checker rejects holding one across anything
+  that may collect. May-collect functions return `#[must_use] Unbound<T>`,
+  usable only through `.bind(cx.nogc())`. Values kept across a collection
+  are rooted on a scoped handle stack (`Root<'s, T>`) or in a global root
+  table (`Global<T>`). All reference writes into cells go through a
+  write-barrier API in `ferrojs-core` (empty in Phase 1). Phase 1
+  collector: precise, stop-the-world, non-moving mark-sweep, with GC
+  stress (collect on every allocation), a debug heap verifier and
+  poisoned freed cells. Details: ARCHITECTURE.md §6.
+- **Rejected:** pure gc-arena (collection only between `mutate` calls:
+  every built-in that can call user code, i.e. almost all of them via
+  ToPrimitive, would have to be a resumable state machine); runtime-checked
+  rooting with reference-counted roots (Boa style: rooting mistakes become
+  runtime bugs, and counted roots block moving); conservative stack
+  scanning (can't move objects it finds, defeats Phase 5).
+- **Why:** keeps the plan's compile-time rooting goal and makes moving
+  collection possible later without changing any caller. The known hole
+  (an `Unbound` stored instead of bound) is caught by stress mode.
+
+## D-024 Shapes with prototype, and CacheIR-format inline caches
+- **Status:** Accepted (autopilot, 2026-11-20)
+- **Choice:** hidden-class `Shape` cells form transition trees and carry
+  the prototype, so one shape check covers layout and prototype. Objects
+  have inline slots (default 4), out-of-line slots, and a separate elements
+  store (packed, holey, sparse). Dictionary mode on non-last delete,
+  more than 128 properties or attribute changes. Inline caches live in a
+  per-function feedback vector (Uninit, Mono, Poly ≤ 4, Mega); a stub is a
+  small CacheIR program plus a side array of stub fields, so stub code is
+  shared and compiled once; the interpreter runs stubs with a CacheIR
+  interpreter and a fast path for shape-guarded slot loads. Megamorphic
+  sites use a per-engine (shape, key) cache. Details: ARCHITECTURE.md §7.
+- **Rejected:** prototype outside the shape (prototype-chain ICs would
+  need a second guard per level); per-tier IC formats (contradicts D-003);
+  self-modifying patched IC code in the interpreter (needs executable
+  memory before Phase 3).
+- **Why:** follows D-003; one IC format for the interpreter, baseline JIT
+  and Warp.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

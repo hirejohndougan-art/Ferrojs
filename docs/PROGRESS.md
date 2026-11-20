@@ -62,3 +62,16 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 0 (+0; engine can't run JS yet)
 - Next: 1.1 architecture spec. Weekly report runs should regenerate the
   dashboard with `tools/dashboard.sh` (D-017).
+
+## 2026-11-20 09:23 UTC — 1.1 Architecture spec
+- Result: merged
+- Changed: new `docs/ARCHITECTURE.md` (crates, frames and tail calls,
+  bytecode and op-definition macro, heap cage and cells, GC handles and
+  roots, shapes and CacheIR inline caches, environments, host hooks).
+  Roadmap 1.3 and 1.5 point at the new decisions. Docs only.
+- Decisions: D-018 parser (oxc, pinned by MSRV), D-019 bytecode, D-020 op
+  definitions, D-021 frames and tail calls, D-022 heap layout, D-023 GC
+  interface, D-024 shapes and ICs
+- Test262: 0 (+0; engine can't run JS yet)
+- Next: 1.2 heap cage (risky; core change, needs CI Miri). Note oxc 0.159
+  needs rustc 1.98; the sandbox has 1.97 (see D-018 for 1.5).
