@@ -89,7 +89,7 @@ Order matters: each task builds on the ones above it.
   `Global` table, the write-barrier API, and GC stress mode (collect on
   every allocation) wired into `Cx`; no code may assume objects stay put.
   Compile-fail tests for the rooting rules. needs: 1.3a
-- [~] (claimed 2026-11-21 09:15 UTC) 1.4 Op-definition language: a Rust macro that defines each bytecode
+- [x] 1.4 (2026-11-21) Op-definition language: a Rust macro that defines each bytecode
   op once and generates the interpreter handler (later also the
   copy-and-patch stencil and optimizer lowering). needs: 1.1
 - [ ] 1.5 Parser integration: oxc AST in, plus an early-error pass. Run

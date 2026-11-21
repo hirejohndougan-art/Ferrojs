@@ -126,3 +126,22 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 0 (+0; engine can't run JS yet)
 - Next: 1.4 op-definition language (1.5 parser is also unblocked; 1.8
   objects and shapes now too). Tomorrow is Sunday: the weekly report is due.
+
+## 2026-11-21 10:05 UTC — 1.4 Op-definition language
+- Result: merged
+- Changed: new `ferrojs-bytecode` crate: `define_ops!` generates from
+  one op list the opcode enum and metadata, operand structs, decoded
+  `Instruction`, encoder/decoder, an `Assembler` method per op (jump
+  widths fixed at `finish`), and a generic handler per op over `OpCtx`
+  plus `execute`. Verifier (ranges, jump targets on boundaries, only
+  `JumpLoop` jumps backward, no fall-through at the end) and
+  disassembler. 19 starter ops (loads, arithmetic, compare, jumps, env).
+  Numbers-only `testing::ToyCtx` drives tests, new `bytecode` benchmarks
+  (decode, dispatch loop) and the `bytecode_verify` fuzz target.
+  `ferrojs-value` gains `as_int32` / `as_bool`. Not risky and
+  `ferrojs-core` unchanged, so no independent review or CI Miri needed.
+- Decisions: D-031
+- Test262: 0 (+0; engine can't run JS yet)
+- Next: 1.5 parser integration (oxc; check D-018 pinning against the
+  toolchain), or 1.8 objects and shapes. Tomorrow is Sunday: the weekly
+  report is due first.
