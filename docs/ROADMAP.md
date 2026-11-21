@@ -84,7 +84,7 @@ Order matters: each task builds on the ones above it.
   `Trace` callback for cell layouts, heap verifier, and a randomized
   collect-on-every-allocation stress test. Roots are passed in by the
   caller. needs: 1.2
-- [ ] 1.3b (risky) Lifetime-branded handles on top of 1.3a (D-023): `Cx`,
+- [~] (claimed 2026-11-21 07:14 UTC) 1.3b (risky) Lifetime-branded handles on top of 1.3a (D-023): `Cx`,
   `NoGc`, `Gc<'a, T>`, `Unbound<T>`, scoped `Root`s on a handle stack,
   `Global` table, the write-barrier API, and GC stress mode (collect on
   every allocation) wired into `Cx`; no code may assume objects stay put.
