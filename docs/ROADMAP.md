@@ -102,7 +102,7 @@ Order matters: each task builds on the ones above it.
   labels, `break`/`continue`, `return`, `throw`. Adds the arithmetic,
   comparison, equality and bitwise ops it needs. Anything else is a
   clean "unsupported" error. needs: 1.4, 1.5
-- [~] (claimed 2026-11-21 13:40 UTC) 1.6b Bytecode compiler, part 1b: the TDZ marker value
+- [x] 1.6b (2026-11-21) Bytecode compiler, part 1b: the TDZ marker value
   and run-time TDZ checks where the compiler can't prove them away,
   assignment to `const` (TypeError), `switch`. needs: 1.6a
 - [ ] 1.6c Bytecode compiler, part 1c: `try`/`catch`/`finally` with the

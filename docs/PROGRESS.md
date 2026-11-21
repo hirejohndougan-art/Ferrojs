@@ -177,3 +177,15 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-033
 - Test262: 8699 (+0; the runner doesn't execute code until 1.10)
 - Next: 1.6b nested functions, calls, environments, TDZ marker.
+
+## 2026-11-21 14:30 UTC — 1.6b TDZ, const assignment, switch (1.6b–d re-split)
+- Result: merged
+- Changed: `Value::UNINITIALIZED` marker; ops `LoadUninitialized`,
+  `CheckInitialized`, `ThrowConstAssign`; the compiler checks the TDZ at
+  run time only for bindings with an early use or declared in a `switch`
+  case block, throws `TypeError` on `const` assignment in spec order, and
+  compiles `switch`. 30 more Node.js-checked cases. Remaining 1.6 work
+  re-split: 1.6c try/catch/finally, 1.6d functions, closures, globals.
+- Decisions: D-034
+- Test262: 8699 (+0; the runner doesn't execute code until 1.10)
+- Next: 1.6c try/catch/finally.
