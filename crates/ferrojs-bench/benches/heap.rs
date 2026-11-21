@@ -8,7 +8,7 @@
 use std::hint::black_box;
 
 #[cfg(target_os = "linux")]
-use ferrojs_core::gc::{Cx, CxOptions, NoEdges};
+use ferrojs_core::gc::{Cx, CxOptions, NoEdges, Scope};
 #[cfg(target_os = "linux")]
 use ferrojs_core::{Cage, CollectStats, Heap, HeapOptions, Trace};
 #[cfg(target_os = "linux")]
@@ -106,20 +106,26 @@ fn warm_cx() -> Cx {
 #[library_benchmark]
 #[bench::mixed(setup = warm_cx)]
 fn cx_alloc(mut cx: Cx) -> u64 {
-    cx.scope(|s| {
-        let mut acc = 0u64;
-        for i in 0..CELLS {
-            let size = 16 + (i % 4) * 8;
-            let cell = s.alloc::<()>(black_box(size)).expect("alloc");
-            let cell = cell.bind(s.nogc());
-            s.nogc().write_u64(cell, 0, i as u64);
-            if i % 8 == 0 {
-                s.root(cell);
-            }
-            acc = acc.wrapping_add(cell.offset() as u64);
+    cx.scope(alloc_rooted)
+}
+
+/// Kept out of line: with the loop inlined into the scope closure,
+/// Callgrind attributed none of it to the benchmark.
+#[cfg(target_os = "linux")]
+#[inline(never)]
+fn alloc_rooted(s: &mut Scope<'_>) -> u64 {
+    let mut acc = 0u64;
+    for i in 0..CELLS {
+        let size = 16 + (i % 4) * 8;
+        let cell = s.alloc::<()>(black_box(size)).expect("alloc");
+        let cell = cell.bind(s.nogc());
+        s.nogc().write_u64(cell, 0, i as u64);
+        if i % 8 == 0 {
+            s.root(cell);
         }
-        acc
-    })
+        acc = acc.wrapping_add(cell.offset() as u64);
+    }
+    acc
 }
 
 #[cfg(target_os = "linux")]
