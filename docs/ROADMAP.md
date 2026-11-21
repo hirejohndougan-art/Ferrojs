@@ -117,9 +117,23 @@ Order matters: each task builds on the ones above it.
   (`LoadName`/`StoreName`), strings in the constant pool, `this`. Also
   accept sloppy-mode call expressions as assignment targets (runtime
   `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6d, 1.8
+- [ ] 1.7a (risky) Core handle API for the interpreter: a checked way to
+  turn a raw cell offset held in a register `Value` into a `Gc` handle
+  (`NoGc::handle(offset) -> Option<Gc>`, live-cell check under the
+  verifier), with tests. Every VM task needs it: registers hold raw
+  values (ARCHITECTURE.md §2) and cells are only readable and writable
+  through `Gc` handles. Core change: CI Miri required. needs: 1.3b
 - [ ] 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
   layout; proper tail calls designed in. Dispatch cost must not grow
-  with the number of ops (D-036): benchmark it. needs: 1.3b, 1.6d
+  with the number of ops (D-036): benchmark it. Plan (from the 1.6d
+  run): new `ferrojs-vm` crate; the frame stack is shared `Cell<u64>`
+  slots outside the cage, made a GC root by a small anchor cell held in
+  a `Global` whose trace callback pushes every reference on the live
+  part of the stack (raw header slots stay below 2^48, so they never
+  look like references); closures and environments are heap cells;
+  templates stay in a Rust-side table indexed from the closure header
+  (no raw pointers in cells, D-009); reuse the compiler's Node.js cases
+  and run them under GC stress. needs: 1.6d, 1.7a needs: 1.3b, 1.6d
 - [ ] 1.8 Objects and shapes (hidden classes), property get/set, prototype
   chains. needs: 1.3b
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that

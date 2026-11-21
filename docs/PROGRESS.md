@@ -221,3 +221,15 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 8699 (+0; the runner doesn't execute code until 1.10)
 - Next: 1.7 interpreter loop (needs 1.3b, 1.6d: both done), or 1.8
   objects and shapes.
+
+## 2026-11-21 17:20 UTC — planning: 1.7 split
+- Result: review
+- Changed: roadmap only. Planning 1.7 showed the interpreter can't read or
+  write cells referenced from registers without a core API (`Gc` handles
+  can only come from allocation, roots or cell fields), so 1.7a adds it as
+  a risky core task. That needs a CI Miri run, which this session (a
+  scheduled run continued at John's request) has no tool to check, so it
+  stopped here. 1.7 records the design worked out for the VM.
+- Decisions: none
+- Test262: 8699 (+0)
+- Next: 1.7a core handle API (risky; independent review and CI Miri).
