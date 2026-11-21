@@ -108,3 +108,21 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 0 (+0; engine can't run JS yet)
 - Next: 1.3b branded handles (risky; core change, needs CI Miri). 1.4
   and 1.5 are also unblocked.
+
+## 2026-11-21 07:40 UTC — 1.3b Branded handles
+- Result: merged
+- Changed: new `ferrojs-core::gc`: `Cx` (heap, tracer, handle stack,
+  global table), `NoGc` token, `Gc<'a, T>`, `Unbound<T>`, scoped
+  `Root<'s, T>` via `cx.scope`, `Global<T>`, `write_ref` /
+  `write_value_bits` with an empty write barrier, GC stress mode
+  (`FERROJS_GC_STRESS=1`). Heap writes now take `&self` through
+  crate-private cage stores. Compile-fail doctests for the rooting rules
+  (each with a passing twin), a model-checked random-graph stress test,
+  new `cx_alloc` benchmark. Independent review: no memory-safety bugs;
+  one rooting hole (swapping a `Cx` out of a scope truncated the wrong
+  stack) and a stress-mode gap, both fixed with tests.
+  Miri: passed in CI run 44880468300.
+- Decisions: D-030
+- Test262: 0 (+0; engine can't run JS yet)
+- Next: 1.4 op-definition language (1.5 parser is also unblocked; 1.8
+  objects and shapes now too). Tomorrow is Sunday: the weekly report is due.
