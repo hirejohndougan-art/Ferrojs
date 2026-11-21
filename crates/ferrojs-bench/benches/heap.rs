@@ -8,6 +8,8 @@
 use std::hint::black_box;
 
 #[cfg(target_os = "linux")]
+use ferrojs_core::gc::{Cx, CxOptions, NoEdges};
+#[cfg(target_os = "linux")]
 use ferrojs_core::{Cage, CollectStats, Heap, HeapOptions, Trace};
 #[cfg(target_os = "linux")]
 use gungraun::prelude::*;
@@ -87,8 +89,44 @@ fn collect((mut heap, root): (Heap, u32)) -> CollectStats {
     heap.collect([black_box(root)], &ListTracer)
 }
 
+/// A context over a warm heap (as in `bump_alloc`), stress mode off.
 #[cfg(target_os = "linux")]
-library_benchmark_group!(name = heap_alloc, benchmarks = [bump_alloc, collect]);
+fn warm_cx() -> Cx {
+    Cx::new(
+        warm_heap(),
+        Box::new(NoEdges),
+        CxOptions { gc_stress: false },
+    )
+}
+
+// The same allocations through the engine context's branded handles
+// (D-023, D-030): allocate, bind, write the header through the token, and
+// root every eighth cell in a scope.
+#[cfg(target_os = "linux")]
+#[library_benchmark]
+#[bench::mixed(setup = warm_cx)]
+fn cx_alloc(mut cx: Cx) -> u64 {
+    cx.scope(|s| {
+        let mut acc = 0u64;
+        for i in 0..CELLS {
+            let size = 16 + (i % 4) * 8;
+            let cell = s.alloc::<()>(black_box(size)).expect("alloc");
+            let cell = cell.bind(s.nogc());
+            s.nogc().write_u64(cell, 0, i as u64);
+            if i % 8 == 0 {
+                s.root(cell);
+            }
+            acc = acc.wrapping_add(cell.offset() as u64);
+        }
+        acc
+    })
+}
+
+#[cfg(target_os = "linux")]
+library_benchmark_group!(
+    name = heap_alloc,
+    benchmarks = [bump_alloc, collect, cx_alloc]
+);
 
 #[cfg(target_os = "linux")]
 main!(library_benchmark_groups = heap_alloc);

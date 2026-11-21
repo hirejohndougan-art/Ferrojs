@@ -10,13 +10,17 @@
 //!   accessors (D-002, D-022, D-027).
 //! - [`heap`]: cell allocation in size-class chunks and the mark-sweep
 //!   collector.
+//! - [`gc`]: the engine context, lifetime-branded handles, roots and the
+//!   write barrier on top of the collector (D-023, D-030).
 
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 pub mod cage;
+pub mod gc;
 pub mod heap;
 
 pub use cage::{Cage, CageError};
+pub use gc::{Cx, CxOptions, Gc, Global, NoGc, Root, Scope, Unbound};
 pub use heap::{AllocError, CollectStats, Heap, HeapOptions, Trace};
 
 #[cfg(test)]

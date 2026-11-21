@@ -478,6 +478,52 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
 - **Why:** more progress per week without loosening any check. It uses
   more of John's usage on Sunday nights, which he chose knowingly.
 
+## D-030 Branded handles: writes through the shared token, roots through scopes
+- **Status:** Accepted (autopilot, 2026-11-21)
+- **Choice:** task 1.3b implements D-023 in `ferrojs-core::gc`. `Cx` owns
+  the `Heap`, a boxed `Trace`, the handle stack and the global table.
+  `Cx::alloc` and `Cx::collect` take `&mut Cx`; allocation collects first
+  in stress mode (`CxOptions::gc_stress`, default from
+  `FERROJS_GC_STRESS=1`), when `Heap::wants_collection`, and once more on
+  out-of-memory. Reading and writing cell fields goes through the
+  `NoGc<'a>` token (a shared borrow of `Cx`), so code can write while
+  holding unrooted `Gc<'a, T>` handles; for that, `Heap`'s checked
+  writes take `&self`, and the cage got crate-private `store_*` writes
+  through `&self` (the public `Cage` writes still take `&mut self`). This
+  is sound because the cage is not `Sync` and nothing ever borrows cage
+  memory: every access copies through a raw pointer from the base.
+  Reference stores use `write_ref` / `write_value_bits`, which call the
+  (empty) write barrier; plain `write_u*` is for data. Roots:
+  `cx.scope(|s| …)` takes a closure generic over the scope lifetime
+  `'s` (invariant), `s.root(h)` returns a `Copy` `Root<'s, T>` (an index
+  plus the context's id) that can't leave the closure; opening a nested
+  scope borrows the outer `Scope` mutably, so roots only go on the
+  innermost scope and truncating on exit (also on unwind, in `Drop`) is
+  always correct. `Global<T>` shares the table through `Rc<RefCell<…>>`
+  and frees its slot on drop. The handle stack and the global table are
+  `RefCell`s, so rooting needs only `&Scope`. `T` in `Gc<'a, T>` is a
+  type marker only; layouts are checked by `ferrojs-vm`'s `cells!`
+  table. `JsValue<'a>` and rooting of values (not just cell references)
+  come with the value-carrying layers (1.7, 1.8). Compile-fail tests are
+  `compile_fail` doctests on `gc::RootingRules`, each with a passing
+  twin, because rustdoc checks error codes only on nightly.
+- **Accepted costs:** a `Gc` doesn't know its context (4 bytes), so a
+  handle used with the wrong `Cx` is caught only by the checked
+  accessors; `Root` and `Global` check at run time. A stale `Unbound` is
+  detected by `bind` (with the verifier on) only if its slot wasn't
+  reused by then; generation tags could close this later if it bites.
+  `RefCell` flag checks on rooting; the frame stack, not the handle
+  stack, will hold most roots.
+- **Rejected:** writes through `&mut Cx` (every write would first have to
+  drop all live handles); a separate GC token not borrowing `Cx` (the
+  Nova design: contradicts D-023's "handles borrow `Cx` shared" and lets
+  `&mut Cx` code run while handles are live); `trybuild` for compile-fail
+  tests (a new dependency, and slower); `RefCell<Heap>` (a flag check on
+  every field access in the interpreter's hot path).
+- **Why:** the borrow checker enforces the rooting rules of D-023 with no
+  new `unsafe` beyond three-line `&self` stores, and moving collection
+  later only changes what `Root::get` and `Global::get` read.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

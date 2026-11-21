@@ -258,7 +258,10 @@ impl Heap {
     // Writes go through the heap rather than a `&mut Cage`, so callers can
     // neither commit chunks behind the allocator's back nor swap its cage,
     // and every write is checked to land inside one live cell: never in a
-    // chunk header (mark bits), a freed cell or unallocated memory.
+    // chunk header (mark bits), a freed cell or unallocated memory. They
+    // take `&self` so the GC handles (`gc`, D-030) can write while
+    // unrooted handles hold the heap borrowed shared; writing never
+    // allocates or collects.
 
     /// Panics unless `len` bytes at `offset` are cell memory: always
     /// checked is that they are outside chunk headers (mark bits) and
@@ -332,40 +335,40 @@ impl Heap {
     }
 
     /// Writes one byte into a live cell.
-    pub fn write_u8(&mut self, offset: u32, value: u8) {
+    pub fn write_u8(&self, offset: u32, value: u8) {
         self.check_cell_write(offset, 1);
-        self.cage.write_u8(offset, value)
+        self.cage.store_u8(offset, value)
     }
 
     /// Writes a `u32` into a live cell at a 4-byte-aligned offset.
-    pub fn write_u32(&mut self, offset: u32, value: u32) {
+    pub fn write_u32(&self, offset: u32, value: u32) {
         self.check_cell_write(offset, 4);
-        self.cage.write_u32(offset, value)
+        self.cage.store_u32(offset, value)
     }
 
     /// Writes a `u64` into a live cell at an 8-byte-aligned offset.
-    pub fn write_u64(&mut self, offset: u32, value: u64) {
+    pub fn write_u64(&self, offset: u32, value: u64) {
         self.check_cell_write(offset, 8);
-        self.cage.write_u64(offset, value)
+        self.cage.store_u64(offset, value)
     }
 
     /// Copies `src` into a live cell.
-    pub fn write_bytes(&mut self, offset: u32, src: &[u8]) {
+    pub fn write_bytes(&self, offset: u32, src: &[u8]) {
         if src.is_empty() {
             return;
         }
         let len = u32::try_from(src.len()).expect("write larger than the cage");
         self.check_cell_write(offset, len);
-        self.cage.write_bytes(offset, src)
+        self.cage.store_bytes(offset, src)
     }
 
     /// Sets `len` bytes of a live cell to `byte`.
-    pub fn fill(&mut self, offset: u32, len: u32, byte: u8) {
+    pub fn fill(&self, offset: u32, len: u32, byte: u8) {
         if len == 0 {
             return;
         }
         self.check_cell_write(offset, len);
-        self.cage.fill(offset, len, byte)
+        self.cage.store_fill(offset, len, byte)
     }
 
     /// Bytes in allocated cells (slot sizes), including garbage not yet

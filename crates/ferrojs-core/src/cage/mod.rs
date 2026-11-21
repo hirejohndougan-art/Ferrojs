@@ -90,8 +90,10 @@ impl std::error::Error for CageError {}
 /// A reserved region of address space that heap offsets point into.
 ///
 /// Not `Send` or `Sync`: a cage belongs to one engine instance on one
-/// thread. Reads take `&self` and writes take `&mut self`, so the borrow
-/// checker rules out data races and aliasing on cage memory.
+/// thread, so cage memory is never accessed concurrently. Safe code never
+/// borrows cage memory: every read and write copies through a raw pointer
+/// derived from the base. Public writes take `&mut self`; the heap also
+/// writes through `&self` (crate-private `store_*`, D-030).
 pub struct Cage {
     /// Start of the reservation. Every pointer into the cage is derived
     /// from this one (strict provenance), never made from an integer.
@@ -226,8 +228,9 @@ impl Cage {
     pub fn read_u8(&self, offset: u32) -> u8 {
         let p = self.checked_ptr(offset, 1, 1);
         // SAFETY: `checked_ptr` proved the byte is inside a committed
-        // chunk. Cage memory is only written through `&mut self`, so no
-        // write can race with this read.
+        // chunk. The cage is neither `Send` nor `Sync` and safe code never
+        // holds a Rust reference into cage memory (every access copies), so
+        // no write can race with or alias this read.
         unsafe { p.read() }
     }
 
@@ -236,7 +239,8 @@ impl Cage {
         let p = self.checked_ptr(offset, 4, 4);
         // SAFETY: four committed bytes at a 4-aligned offset from a
         // page-aligned base, so the pointer is aligned for `u32`; every bit
-        // pattern is a valid `u32`. No concurrent writes (`&mut self`).
+        // pattern is a valid `u32`. No racing or aliasing access, as in
+        // `read_u8`.
         unsafe { p.cast::<u32>().read() }
     }
 
@@ -247,26 +251,89 @@ impl Cage {
         unsafe { p.cast::<u64>().read() }
     }
 
+    // Writes come in two forms. The public ones take `&mut self`, so code
+    // outside this crate that holds a `&Cage` (a `Trace` callback, say) can
+    // only read. The `store_*` forms take `&self` for the heap's checked
+    // writes through shared GC handles (D-030). Both are sound for the
+    // same reason as the reads: the cage is not `Sync`, so all access is
+    // on one thread, and cage memory is only ever reached through raw
+    // pointers derived from `base`, never through Rust references, so a
+    // write through `&self` invalidates nothing.
+
     /// Writes one byte.
     pub fn write_u8(&mut self, offset: u32, value: u8) {
-        let p = self.checked_ptr(offset, 1, 1);
-        // SAFETY: the byte is inside a committed (writable) chunk, and
-        // `&mut self` means no other access to cage memory is live.
-        unsafe { p.write(value) }
+        self.store_u8(offset, value)
     }
 
     /// Writes a `u32` at a 4-byte-aligned offset.
     pub fn write_u32(&mut self, offset: u32, value: u32) {
-        let p = self.checked_ptr(offset, 4, 4);
-        // SAFETY: four committed bytes, aligned for `u32`; exclusive access.
-        unsafe { p.cast::<u32>().write(value) }
+        self.store_u32(offset, value)
     }
 
     /// Writes a `u64` at an 8-byte-aligned offset.
     pub fn write_u64(&mut self, offset: u32, value: u64) {
+        self.store_u64(offset, value)
+    }
+
+    /// Copies `src` into the cage starting at `offset`.
+    pub fn write_bytes(&mut self, offset: u32, src: &[u8]) {
+        self.store_bytes(offset, src)
+    }
+
+    /// Sets `len` bytes starting at `offset` to `byte` (zeroing, poisoning
+    /// freed cells).
+    pub fn fill(&mut self, offset: u32, len: u32, byte: u8) {
+        self.store_fill(offset, len, byte)
+    }
+
+    /// [`Cage::write_u8`] through a shared reference.
+    pub(crate) fn store_u8(&self, offset: u32, value: u8) {
+        let p = self.checked_ptr(offset, 1, 1);
+        // SAFETY: the byte is inside a committed (writable) chunk. One
+        // thread only (`!Sync`) and no Rust reference points into cage
+        // memory, so nothing else observes or aliases it during the write.
+        unsafe { p.write(value) }
+    }
+
+    /// [`Cage::write_u32`] through a shared reference.
+    pub(crate) fn store_u32(&self, offset: u32, value: u32) {
+        let p = self.checked_ptr(offset, 4, 4);
+        // SAFETY: four committed bytes, aligned for `u32`; no racing or
+        // aliasing access, as in `store_u8`.
+        unsafe { p.cast::<u32>().write(value) }
+    }
+
+    /// [`Cage::write_u64`] through a shared reference.
+    pub(crate) fn store_u64(&self, offset: u32, value: u64) {
         let p = self.checked_ptr(offset, 8, 8);
-        // SAFETY: eight committed bytes, aligned for `u64`; exclusive access.
+        // SAFETY: eight committed bytes, aligned for `u64`; no racing or
+        // aliasing access, as in `store_u8`.
         unsafe { p.cast::<u64>().write(value) }
+    }
+
+    /// [`Cage::write_bytes`] through a shared reference.
+    pub(crate) fn store_bytes(&self, offset: u32, src: &[u8]) {
+        if src.is_empty() {
+            return;
+        }
+        let len = u32::try_from(src.len()).expect("write larger than the cage");
+        let p = self.checked_ptr(offset, len, 1);
+        // SAFETY: `len` committed, writable bytes start at `p`; `src` is a
+        // Rust buffer, and safe code never borrows cage memory, so `src`
+        // is outside the cage and the ranges don't overlap. No racing
+        // access, as in `store_u8`.
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), p, src.len()) }
+    }
+
+    /// [`Cage::fill`] through a shared reference.
+    pub(crate) fn store_fill(&self, offset: u32, len: u32, byte: u8) {
+        if len == 0 {
+            return;
+        }
+        let p = self.checked_ptr(offset, len, 1);
+        // SAFETY: `len` committed, writable bytes start at `p`; no racing
+        // or aliasing access, as in `store_u8`.
+        unsafe { std::ptr::write_bytes(p, byte, len as usize) }
     }
 
     /// Copies `dst.len()` bytes starting at `offset` out of the cage.
@@ -280,30 +347,6 @@ impl Cage {
         // Rust buffer (it cannot point into the cage, which safe code never
         // borrows), so the ranges don't overlap.
         unsafe { std::ptr::copy_nonoverlapping(p, dst.as_mut_ptr(), dst.len()) }
-    }
-
-    /// Copies `src` into the cage starting at `offset`.
-    pub fn write_bytes(&mut self, offset: u32, src: &[u8]) {
-        if src.is_empty() {
-            return;
-        }
-        let len = u32::try_from(src.len()).expect("write larger than the cage");
-        let p = self.checked_ptr(offset, len, 1);
-        // SAFETY: `len` committed, writable bytes start at `p`; `src` is a
-        // Rust buffer outside the cage, so the ranges don't overlap.
-        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), p, src.len()) }
-    }
-
-    /// Sets `len` bytes starting at `offset` to `byte` (zeroing, poisoning
-    /// freed cells).
-    pub fn fill(&mut self, offset: u32, len: u32, byte: u8) {
-        if len == 0 {
-            return;
-        }
-        let p = self.checked_ptr(offset, len, 1);
-        // SAFETY: `len` committed, writable bytes start at `p`; exclusive
-        // access through `&mut self`.
-        unsafe { std::ptr::write_bytes(p, byte, len as usize) }
     }
 }
 

@@ -356,6 +356,11 @@ JavaScript**. Rooting mistakes are caught by the borrow checker:
 - `Global<T>` is a root in a table that outlives scopes, for embedders and
   engine caches; dropping it frees the slot.
 
+- Cell reads and writes go through the `NoGc` token (they never
+  allocate), so code can write while it holds unrooted handles;
+  reference stores use `write_ref` / `write_value_bits` (§6.4). Roots
+  go only on the innermost open scope (D-030).
+
 Known hole: an `Unbound<T>` stored in a variable instead of bound
 immediately can outlive a collection. Mitigations: `Unbound` has no
 accessors, and the stress mode below catches the bug in tests.
