@@ -162,3 +162,18 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Next: 1.8 objects and shapes (risky? touches core heap cells) or 1.6
   bytecode compiler part 1. Tomorrow is Sunday: the weekly report is due
   first.
+
+## 2026-11-21 13:30 UTC — 1.6a Bytecode compiler, part 1a (1.6 split into 1.6a–c)
+- Result: merged
+- Changed: `ferrojs_compiler::codegen` compiles function bodies with
+  parameters and uncaptured locals in registers (numbers, booleans,
+  null/undefined; all unary/binary/logical/conditional/assignment/update
+  operators; if, loops, labels, break/continue, return, throw); anything
+  else is a clean "unsupported". 22 new ops; number semantics shared in
+  `ferrojs_bytecode::number`. Tests compare ~90 compiled calls bit-exact
+  with Node.js; the `parse` fuzz target also compiles, verifies and runs.
+  Bench baseline rewritten: `decode` +10%, `dispatch` +6% from the larger
+  op list (D-033). Started at John's request ("keep going").
+- Decisions: D-033
+- Test262: 8699 (+0; the runner doesn't execute code until 1.10)
+- Next: 1.6b nested functions, calls, environments, TDZ marker.

@@ -95,7 +95,7 @@ Order matters: each task builds on the ones above it.
 - [x] 1.5 (2026-11-21) Parser integration: oxc AST in, plus an early-error pass. Run
   Test262's syntax (negative parse) tests through it. Pin oxc per D-018
   (newest release whose `rust-version` the toolchain meets). needs: 1.1
-- [~] (claimed 2026-11-21 12:10 UTC) 1.6a Bytecode compiler, part 1a: function bodies with
+- [x] 1.6a (2026-11-21) Bytecode compiler, part 1a: function bodies with
   parameters and uncaptured locals in registers; number, boolean, null
   and `undefined` literals; unary, binary, logical, conditional,
   assignment, compound assignment and update expressions; `if`, loops,
