@@ -95,12 +95,24 @@ Order matters: each task builds on the ones above it.
 - [x] 1.5 (2026-11-21) Parser integration: oxc AST in, plus an early-error pass. Run
   Test262's syntax (negative parse) tests through it. Pin oxc per D-018
   (newest release whose `rust-version` the toolchain meets). needs: 1.1
-- [ ] 1.6 Bytecode compiler, part 1: expressions, variables, functions,
-  control flow; register-based bytecode. Also accept sloppy-mode call
-  expressions as assignment targets (runtime `ReferenceError`; the 7
-  Annex B failures, D-032). needs: 1.4, 1.5
+- [~] (claimed 2026-11-21 12:10 UTC) 1.6a Bytecode compiler, part 1a: function bodies with
+  parameters and uncaptured locals in registers; number, boolean, null
+  and `undefined` literals; unary, binary, logical, conditional,
+  assignment, compound assignment and update expressions; `if`, loops,
+  labels, `break`/`continue`, `return`, `throw`. Adds the arithmetic,
+  comparison, equality and bitwise ops it needs. Anything else is a
+  clean "unsupported" error. needs: 1.4, 1.5
+- [ ] 1.6b Bytecode compiler, part 1b: nested functions and calls
+  (`Call`/`Return` ops per ARCHITECTURE.md §3.3), captured variables in
+  `Environment` slots, the TDZ marker value and TDZ checks, assignment
+  to `const`, per-iteration `let` bindings. needs: 1.6a
+- [ ] 1.6c Bytecode compiler, part 1c: script top level and globals
+  (`LoadName`/`StoreName`), `switch`, `try`/`catch`/`finally` with the
+  exception table (§3.6), strings in the constant pool. Also accept
+  sloppy-mode call expressions as assignment targets (runtime
+  `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6b
 - [ ] 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
-  layout; proper tail calls designed in. needs: 1.3b, 1.6
+  layout; proper tail calls designed in. needs: 1.3b, 1.6c
 - [ ] 1.8 Objects and shapes (hidden classes), property get/set, prototype
   chains. needs: 1.3b
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
@@ -109,7 +121,7 @@ Order matters: each task builds on the ones above it.
   `print`, `$262` host object. First real baseline. needs: 1.9
 - [ ] 1.11 Host hooks for randomness, clocks and job ordering (D-008).
 - [ ] 1.12 Bytecode compiler, part 2: classes, destructuring, spread,
-  closures, generators and async (state machines). needs: 1.6
+  closures, generators and async (state machines). needs: 1.6c
 - [ ] 1.13 Basic built-ins: Object, Function, Error types, Array, String,
   Number, Boolean, Math, JSON (hand-written; spec generation comes in 2).
 - [ ] 1.14 Promise and the job queue.
