@@ -431,3 +431,69 @@ fn stress_random_graph_matches_its_model() {
     cx.collect();
     assert_eq!(cx.allocated_bytes(), 0);
 }
+
+#[test]
+fn swapping_the_context_out_of_a_scope_panics_instead_of_unrooting() {
+    let mut a = checked(8, false);
+    let mut b = checked(8, false);
+    let err = catch_unwind(AssertUnwindSafe(|| {
+        b.scope(|sb| {
+            let x = node(sb, 1, 0).bind(sb.nogc());
+            sb.root(x);
+            a.scope(|sa| std::mem::swap(&mut **sa, &mut **sb));
+        })
+    }))
+    .unwrap_err();
+    let msg = panic_msg(err);
+    assert!(msg.contains("different context"), "{msg}");
+    // Nothing of the other context's stack was truncated.
+    assert_eq!(a.handle_count() + b.handle_count(), 1);
+}
+
+#[test]
+fn rooting_through_a_scope_whose_context_was_swapped_panics() {
+    let mut a = checked(8, false);
+    let mut b = checked(8, false);
+    let err = catch_unwind(AssertUnwindSafe(|| {
+        a.scope(|sa| {
+            std::mem::swap(&mut **sa, &mut b);
+            let x = node(sa, 1, 0).bind(sa.nogc());
+            sa.root(x);
+        })
+    }))
+    .unwrap_err();
+    assert!(panic_msg(err).contains("swapped out"));
+}
+
+#[test]
+fn stress_mode_checks_binding_even_with_the_verifier_off() {
+    let cage = Cage::new(8 * C).expect("reserve a heap");
+    let heap = Heap::from_cage(
+        cage,
+        HeapOptions {
+            poison: false,
+            verify: false,
+        },
+    );
+    let mut cx = Cx::new(heap, Box::new(TestTracer), CxOptions { gc_stress: true });
+    let stale = node(&mut cx, 1, 0);
+    let _ = node(&mut cx, 2, 8);
+    let err = catch_unwind(AssertUnwindSafe(|| stale.bind(cx.nogc()))).unwrap_err();
+    assert!(panic_msg(err).contains("stale handle"));
+}
+
+#[test]
+fn an_outer_root_can_be_set_while_an_inner_scope_is_open() {
+    let mut cx = checked(8, false);
+    cx.scope(|outer| {
+        let a = node(outer, 1, 0).bind(outer.nogc());
+        let r = outer.root(a);
+        outer.scope(|inner| {
+            let b = node(inner, 2, 0).bind(inner.nogc());
+            r.set(inner.nogc(), b);
+        });
+        outer.collect();
+        assert_eq!(id_of(outer.nogc(), r.get(outer.nogc())), 2);
+        assert_eq!(outer.allocated_bytes(), 16);
+    });
+}

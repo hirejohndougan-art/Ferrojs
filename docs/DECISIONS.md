@@ -498,8 +498,11 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
   `'s` (invariant), `s.root(h)` returns a `Copy` `Root<'s, T>` (an index
   plus the context's id) that can't leave the closure; opening a nested
   scope borrows the outer `Scope` mutably, so roots only go on the
-  innermost scope and truncating on exit (also on unwind, in `Drop`) is
-  always correct. `Global<T>` shares the table through `Rc<RefCell<…>>`
+  innermost scope, and the scope truncates the stack on exit (also on
+  unwind, in `Drop`). Because `Scope` derefs mutably to `Cx`, safe code
+  can `mem::swap` another context in; a scope remembers its context's id
+  and panics on rooting or closing through a swapped context instead of
+  truncating the wrong stack (found by the independent review). `Global<T>` shares the table through `Rc<RefCell<…>>`
   and frees its slot on drop. The handle stack and the global table are
   `RefCell`s, so rooting needs only `&Scope`. `T` in `Gc<'a, T>` is a
   type marker only; layouts are checked by `ferrojs-vm`'s `cells!`
@@ -510,7 +513,8 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
 - **Accepted costs:** a `Gc` doesn't know its context (4 bytes), so a
   handle used with the wrong `Cx` is caught only by the checked
   accessors; `Root` and `Global` check at run time. A stale `Unbound` is
-  detected by `bind` (with the verifier on) only if its slot wasn't
+  detected by `bind` (with the verifier or stress mode on) only if its
+  slot wasn't
   reused by then; generation tags could close this later if it bites.
   `RefCell` flag checks on rooting; the frame stack, not the handle
   stack, will hold most roots.

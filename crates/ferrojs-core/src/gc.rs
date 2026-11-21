@@ -116,7 +116,8 @@ struct GlobalSlots {
 
 /// The engine context: the heap, its roots and the cell tracer.
 ///
-/// Not `Send` or `Sync` (it owns a [`Heap`]).
+/// Not `Send` or `Sync` (it owns a [`Heap`]). The tracer must not create
+/// or drop roots: it runs while the root tables are borrowed.
 pub struct Cx {
     heap: Heap,
     tracer: Box<dyn Trace>,
@@ -225,9 +226,11 @@ impl Cx {
     /// leave as an [`Unbound`] and be bound by the caller.
     pub fn scope<R>(&mut self, f: impl for<'s> FnOnce(&mut Scope<'s>) -> R) -> R {
         let base = self.handles.borrow().len();
+        let id = self.id;
         let mut scope = Scope {
             cx: self,
             base,
+            id,
             _brand: PhantomData,
         };
         f(&mut scope)
@@ -240,12 +243,19 @@ pub struct Scope<'s> {
     cx: &'s mut Cx,
     /// Handle stack length when the scope opened.
     base: usize,
+    /// The id of the context the scope opened on. `DerefMut` lets safe
+    /// code swap another context in; rooting and closing check this.
+    id: u64,
     _brand: Brand<'s>,
 }
 
 impl<'s> Scope<'s> {
     /// Roots `handle` until this scope ends.
     pub fn root<T>(&self, handle: Gc<'_, T>) -> Root<'s, T> {
+        assert_eq!(
+            self.cx.id, self.id,
+            "scope used after its context was swapped out"
+        );
         let mut handles = self.cx.handles.borrow_mut();
         let index = u32::try_from(handles.len()).expect("handle stack overflow");
         handles.push(handle.offset());
@@ -273,7 +283,13 @@ impl DerefMut for Scope<'_> {
 
 impl Drop for Scope<'_> {
     fn drop(&mut self) {
-        self.cx.handles.borrow_mut().truncate(self.base);
+        let mut handles = self.cx.handles.borrow_mut();
+        if self.cx.id == self.id && handles.len() >= self.base {
+            handles.truncate(self.base);
+        } else if !std::thread::panicking() {
+            // Truncating another context's stack would unroot its cells.
+            panic!("scope closed on a different context than it opened on");
+        }
     }
 }
 
@@ -526,11 +542,11 @@ impl<T> Unbound<T> {
         }
     }
 
-    /// Gives the reference the token's lifetime. With the heap verifier on,
-    /// panics if the cell is no longer live (an `Unbound` was kept across
-    /// a collection).
+    /// Gives the reference the token's lifetime. With the heap verifier or
+    /// stress mode on, panics if the cell is no longer live (an `Unbound`
+    /// was kept across a collection).
     pub fn bind(self, nogc: NoGc<'_>) -> Gc<'_, T> {
-        if nogc.cx.heap.options().verify {
+        if nogc.cx.options.gc_stress || nogc.cx.heap.options().verify {
             assert!(
                 nogc.cx.heap.is_live_cell(self.offset.get()),
                 "bound a stale handle: {:#x} is not a live cell",
@@ -636,8 +652,8 @@ impl<T> fmt::Debug for Global<T> {
     }
 }
 
-/// Compile-fail tests for the rooting rules. Each `compile_fail` block has
-/// a passing twin below it, so a block can't pass by failing for an
+/// Compile-fail tests for the rooting rules. Each `compile_fail` block of
+/// rules 1–6 has a passing twin next to it, so a block can't pass by failing for an
 /// unrelated reason (rustdoc only checks error codes on nightly).
 ///
 /// Shared setup, hidden in each block:
@@ -792,7 +808,8 @@ impl<T> fmt::Debug for Global<T> {
 /// let _ = cx.alloc::<()>(8).unwrap();
 /// ```
 ///
-/// 7. The context and its handles stay on one thread:
+/// 7. The context (and so every `NoGc` token, without which a handle can't
+///    be used) stays on one thread:
 ///
 /// ```compile_fail
 /// fn send<T: Send>(_: T) {}

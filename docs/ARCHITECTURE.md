@@ -338,7 +338,7 @@ interface below**, which is why no code may assume an object stays put.
 Collection may happen at **any allocation and any call that can run
 JavaScript**. Rooting mistakes are caught by the borrow checker:
 
-- `Cx<'h>` is the engine context. Anything that may collect takes
+- `Cx` is the engine context. Anything that may collect takes
   `&mut Cx`.
 - `cx.nogc()` returns a `NoGc<'a>` token borrowing `cx` shared.
 - `Gc<'a, T>` and `JsValue<'a>` are unrooted handles: `Copy`, a 32-bit
@@ -349,8 +349,8 @@ JavaScript**. Rooting mistakes are caught by the borrow checker:
   operations except `.bind(cx.nogc())`. This is how a fresh result gets a
   lifetime without keeping `cx` mutably borrowed.
 - To keep something across a possible collection, root it:
-  `let r: Root<'s, T> = cx.root(handle)` pushes it on the **handle stack**
-  inside a `cx.scope(|cx| …)` block; `r.get(cx.nogc())` gives back an
+  `let r: Root<'s, T> = s.root(handle)` pushes it on the **handle stack**
+  inside a `cx.scope(|s| …)` block; `r.get(cx.nogc())` gives back an
   unrooted handle (updated if the object moved). Leaving the scope
   truncates the handle stack.
 - `Global<T>` is a root in a table that outlives scopes, for embedders and
@@ -394,7 +394,7 @@ call back into JavaScript, which pure gc-arena (collection only between
 
 ### 6.5 Self-checks
 
-- **GC stress mode** (`EngineOptions::gc_stress`, or
+- **GC stress mode** (`CxOptions::gc_stress`, or
   `FERROJS_GC_STRESS=1`): collect on every allocation. Part of the test
   suite from task 1.3; later run nightly over Test262.
 - Debug builds run a **heap verifier** after each collection: every
