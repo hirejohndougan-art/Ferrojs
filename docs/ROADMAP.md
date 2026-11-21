@@ -108,7 +108,7 @@ Order matters: each task builds on the ones above it.
 - [x] 1.6c (2026-11-21) Bytecode compiler, part 1c: `try`/`catch`/`finally` with the
   exception table (ARCHITECTURE.md §3.6), including `break`, `continue`
   and `return` through `finally`. needs: 1.6b
-- [~] (claimed 2026-11-21 15:30 UTC) 1.6d Bytecode compiler, part 1d: nested functions,
+- [x] 1.6d (2026-11-21) Bytecode compiler, part 1d: nested functions,
   closures and calls (`CreateClosure`, `Call`/`TailCall` returning to
   the dispatch loop per ARCHITECTURE.md §3.3–3.4), captured variables in
   environments, per-iteration `let` bindings; the toy context grows

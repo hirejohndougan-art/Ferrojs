@@ -203,3 +203,21 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Next: 1.6d functions, calls, closures, globals, strings. It needs
   function objects and calls in some form before the interpreter (1.7):
   consider splitting it, or doing 1.8 objects and shapes first.
+
+## 2026-11-21 17:00 UTC — 1.6d Functions, closures, calls (1.6d/e re-split)
+- Result: merged
+- Changed: nested functions (hoisted declarations, expressions, arrows)
+  compile into a template tree (`Func` operand, `CreateClosure`,
+  `LoadClosure`); captured bindings live in per-scope environments
+  (`PushEnv`/`PopEnv`/`CopyEnv`, `GetEnv`/`SetEnv` for handlers);
+  `Call`/`TailCall` return `Flow::Call` to the dispatch loop; proper
+  tail calls in strict tail positions. The toy context runs whole
+  programs with frames, closures and environments. 32 more Node.js-
+  checked cases plus a 100,000-deep tail recursion. Bench baseline
+  rewritten (`decode` +12%, toy `dispatch` +29% from 54 ops; 1.7 must
+  design dispatch so it doesn't scale with op count, D-036). 1.6e (script
+  top level, globals, strings, `this`) now waits for 1.8 objects.
+- Decisions: D-036
+- Test262: 8699 (+0; the runner doesn't execute code until 1.10)
+- Next: 1.7 interpreter loop (needs 1.3b, 1.6d: both done), or 1.8
+  objects and shapes.
