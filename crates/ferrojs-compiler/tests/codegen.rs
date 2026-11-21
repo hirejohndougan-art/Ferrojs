@@ -2,13 +2,21 @@
 //! the verifier, and running it on the toy context gives exactly what
 //! Node.js gives for the same call.
 
-use ferrojs_bytecode::testing::{run, run_with_handlers, Outcome, ToyCtx};
+use ferrojs_bytecode::testing::{
+    run, run_program, run_with_handlers, Outcome, ToyCtx, ToyFunction,
+};
 use ferrojs_bytecode::{disassemble, verify, verify_handlers, ErrorKind};
 use ferrojs_compiler::{compile_function_source, CompileError, CompiledFunction};
 use ferrojs_value::{Kind, Value};
 
 fn compile(src: &str) -> CompiledFunction {
     let f = compile_function_source(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+    check_tree(src, &f);
+    f
+}
+
+/// Every function in the tree passes the verifier.
+fn check_tree(src: &str, f: &CompiledFunction) {
     let checked = verify(&f.code, &f.limits())
         .and_then(|()| verify_handlers(&f.code, &f.handlers, &f.limits()));
     if let Err(e) = checked {
@@ -18,7 +26,25 @@ fn compile(src: &str) -> CompiledFunction {
             f.handlers
         );
     }
-    f
+    for g in &f.functions {
+        check_tree(src, g);
+    }
+}
+
+/// The function tree as a flat toy program; the root is index 0.
+fn flatten(f: &CompiledFunction, out: &mut Vec<ToyFunction>) -> usize {
+    let index = out.len();
+    out.push(ToyFunction::default());
+    let functions = f.functions.iter().map(|g| flatten(g, out)).collect();
+    out[index] = ToyFunction {
+        code: f.code.clone(),
+        handlers: f.handlers.clone(),
+        constants: f.constant_values(),
+        limits: f.limits(),
+        params: f.params,
+        functions,
+    };
+    index
 }
 
 fn call(f: &CompiledFunction, args: &[f64]) -> Outcome {
@@ -26,12 +52,11 @@ fn call(f: &CompiledFunction, args: &[f64]) -> Outcome {
 }
 
 fn call_toy(f: &CompiledFunction, args: &[f64]) -> (Outcome, ToyCtx) {
-    let mut cx = ToyCtx::new(&f.limits());
-    cx.constants = f.constant_values();
-    for (i, &a) in args.iter().enumerate().take(f.params as usize) {
-        cx.regs[i] = Value::number(a);
-    }
-    let out = run_with_handlers(&f.code, &f.handlers, &mut cx, 10_000_000);
+    let mut program = Vec::new();
+    flatten(f, &mut program);
+    let mut cx = ToyCtx::default();
+    let args: Vec<Value> = args.iter().map(|&a| Value::number(a)).collect();
+    let out = run_program(&program, 0, &args, &mut cx, 10_000_000);
     (out, cx)
 }
 
@@ -54,7 +79,8 @@ fn show_outcome((o, cx): (Outcome, ToyCtx)) -> String {
         // The toy has no error objects; it records which error was thrown.
         Outcome::Threw(v) => match cx.last_error {
             Some(ErrorKind::UninitializedBinding) => "throw:ReferenceError".into(),
-            Some(ErrorKind::ConstAssignment) => "throw:TypeError".into(),
+            Some(ErrorKind::ConstAssignment | ErrorKind::NotCallable) => "throw:TypeError".into(),
+            Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
             None => format!("throw:{}", show(v)),
         },
         Outcome::StepLimit => "step limit".into(),
@@ -163,6 +189,39 @@ const CASES: &[(&str, &[&[f64]])] = &[
     ("function f(a) { try { } finally { a += 1; } try { } catch (e) { a = 0; } return a; }", &[&[1.0]]),
     ("function f(n) { let s = 0; for (let i = 0; i < n; i++) { try { switch (i) { case 1: continue; case 2: break; default: s += i; } s += 10; } finally { s += 100; } } return s; }", &[&[4.0]]),
     ("function f(e) { try { throw 1; } catch (e) { e += 5; } return e; }", &[&[3.0]]),
+    // functions, closures and calls (1.6d)
+    ("function f(a) { function sq(x) { return x * x; } return sq(a) + sq(2); }", &[&[3.0]]),
+    ("function f(a) { const add = (x, y) => x + y; return add(a, 1) * add(2, 3); }", &[&[4.0]]),
+    ("function f(a) { function g(x, y) { return y; } return g(a) === undefined && g(1, 2, 3) === 2; }", &[&[1.0]]),
+    ("function f(n) { function fact(k) { return k <= 1 ? 1 : k * fact(k - 1); } return fact(n); }", &[&[5.0], &[20.0]]),
+    ("function f(n) { var fib = function me(k) { return k < 2 ? k : me(k - 1) + me(k - 2); }; return fib(n); }", &[&[15.0]]),
+    ("function f(a) { let count = 0; const inc = () => { count += a; return count; }; inc(); inc(); return inc() * 100 + count; }", &[&[2.0]]),
+    ("function f(a) { function counter() { let c = 0; return () => ++c; } const x = counter(), y = counter(); x(); x(); y(); return x() * 10 + y(); }", &[&[0.0]]),
+    ("function f(a) { function mk(k) { return (j) => k * 10 + j; } return mk(a)(3) + mk(7)(1); }", &[&[2.0]]),
+    ("function f(a) { let g1, g2; for (let i = 0; i < 2; i++) { if (i === 0) g1 = () => i; else g2 = () => i; } return g1() * 10 + g2(); }", &[&[0.0]]),
+    ("function f(a) { let g1, g2; for (var i = 0; i < 2; i++) { if (i === 0) g1 = () => i; else g2 = () => i; } return g1() * 10 + g2(); }", &[&[0.0]]),
+    ("function f(a) { let g1, g2; for (let i = 0; i < 3; i++) { let k = i * 2; if (i === 0) g1 = () => k + i; if (i === 2) g2 = () => k + i; } return g1() * 100 + g2(); }", &[&[0.0]]),
+    ("function f(a) { let g; for (let i = 0; i < 3; i++) { g = () => i; i++; } return g(); }", &[&[0.0]]),
+    ("function f(a) { const g = () => x; try { g(); } catch (e) { a += 100; } let x = 5; return g() + a; }", &[&[1.0]]),
+    ("function f(a) { const g = () => { c = 2; }; const c = 1; try { g(); } catch (e) { return c * 7; } }", &[&[0.0]]),
+    ("function f(a) { let r = 0; { let z = a; const h = () => z * 2; r = h(); } return r; }", &[&[21.0]]),
+    ("function f(a) { function g() { throw a + 1; } try { g(); } catch (e) { return e * 2; } }", &[&[4.0]]),
+    ("function f(a) { function g() { try { throw 1; } finally { a += 10; } } try { g(); } catch (e) { return a + e; } }", &[&[4.0]]),
+    ("function f(a) { function g(n) { return n > 0 ? g(n - 1) + 1 : 0; } return g(a); }", &[&[500.0]]),
+    ("function f(a) { function g(n) { return g(n + 1); } return g(0); }", &[&[0.0]]),
+    ("function f(a) { let x = 1; return x(); }", &[&[0.0]]),
+    ("function f(a) { 'use strict'; function loop(n, acc) { return n === 0 ? acc : loop(n - 1, acc + n); } return loop(a, 0); }", &[&[10.0]]),
+    ("function f(a) { let s = 0; const add = (k) => { s += k; }; for (let i = 0; i < a; i++) add(i); return s; }", &[&[10.0]]),
+    ("function f(a) { const g = function h() { h = 5; return h; }; return g() === g; }", &[&[0.0]]),
+    ("function f(a) { 'use strict'; const g = function h() { h = 5; }; g(); }", &[&[0.0]]),
+    ("function f(a) { switch (a) { case 0: let v = 1; return (() => v)(); case 1: return (() => v)(); } }", &[&[0.0], &[1.0]]),
+    ("function f(a) { try { throw 3; } catch (e) { const g = () => e * 2; return g(); } }", &[&[0.0]]),
+    ("function f(a) { let r = 0; outer: for (let i = 0; i < 4; i++) { const g = () => i; for (let j = 0; j < 4; j++) { const h = () => j; if (h() > g()) continue outer; if (g() === 3) break outer; r += g() * 10 + h(); } } return r; }", &[&[0.0]]),
+    ("function f(a) { let r = 0; for (let i = 0; i < 3; i++) { const g = () => i; try { if (i === 1) continue; r += g(); } finally { r += 100; } } return r; }", &[&[0.0]]),
+    ("function f(a) { function g() { return h(); } function h() { return a * 3; } return g(); }", &[&[5.0]]),
+    ("function f(a) { return g(); function g() { return a + 1; } }", &[&[1.0]]),
+    ("function f(a) { var g = 1; function g() {} return g; }", &[&[0.0]]),
+    ("function f(a) { return ((x) => (y) => (z) => x * 100 + y * 10 + z)(1)(2)(3); }", &[&[0.0]]),
 ];
 
 fn node_results() -> Option<Vec<String>> {
@@ -294,11 +353,12 @@ fn unsupported(src: &str) -> String {
 fn everything_else_is_unsupported_not_miscompiled() {
     for src in [
         "function f() { return 'str'; }",
-        "function f() { return g(); }",
         "function f() { return x; }",
+        "function f() { return g(); }",
+        "function f() { if (1) { function g() {} } }",
+        "function f() { return { a: 1 }.a; }",
+        "function f() { return new f(); }",
         "function f() { x = 1; }",
-        "function f() { return function () {}; }",
-        "function f() { function g() {} }",
         "function f(a = 1) {}",
         "function f(...r) {}",
         "function f({ a }) {}",
@@ -321,4 +381,43 @@ fn everything_else_is_unsupported_not_miscompiled() {
         compile_function_source("function f( {"),
         Err(CompileError::Syntax(_))
     ));
+}
+
+#[test]
+fn proper_tail_calls_keep_the_stack_flat() {
+    // 100,000 calls deep: a RangeError without tail calls (the toy stops
+    // at 10,000 frames), fine with them. Node.js doesn't implement proper
+    // tail calls, so this one is checked by hand.
+    let src = "function f(n) { 'use strict'; function loop(k, acc) { return k === 0 ? acc : loop(k - 1, acc + 1); } return loop(n, 0); }";
+    let f = compile(src);
+    assert_eq!(
+        call(&f, &[100_000.0]),
+        Outcome::Returned(Value::from_i32(100_000))
+    );
+    // Sloppy code has no tail calls; neither does a call inside `try`.
+    for src in [
+        "function f(n) { function loop(k, acc) { return k === 0 ? acc : loop(k - 1, acc + 1); } return loop(n, 0); }",
+        "function f(n) { 'use strict'; function loop(k) { return k === 0 ? 0 : 1 + loop(k - 1); } return loop(n); }",
+    ] {
+        let f = compile(src);
+        let (out, cx) = call_toy(&f, &[100_000.0]);
+        assert!(matches!(out, Outcome::Threw(_)), "{src}");
+        assert_eq!(cx.last_error, Some(ErrorKind::StackOverflow), "{src}");
+    }
+    // A return inside `try` isn't in tail position: the deepest frame
+    // overflows and its handler sees the RangeError.
+    let f = compile("function f(n) { 'use strict'; function loop(k) { try { return k === 0 ? 0 : loop(k - 1); } catch (e) { return -1; } } return loop(n); }");
+    assert_eq!(
+        call(&f, &[100_000.0]),
+        Outcome::Returned(Value::from_i32(-1))
+    );
+}
+
+#[test]
+fn nested_functions_are_compiled_into_the_tree() {
+    let f = compile("function f(a) { function g() { return () => a; } return g()(); }");
+    assert_eq!(f.functions.len(), 1);
+    assert_eq!(f.functions[0].name, "g");
+    assert_eq!(f.functions[0].functions.len(), 1);
+    assert_eq!(call(&f, &[7.0]), Outcome::Returned(Value::from_i32(7)));
 }

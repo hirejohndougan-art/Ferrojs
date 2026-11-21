@@ -1,27 +1,59 @@
 //! A reference context and dispatch loop over plain values, for tests,
-//! benchmarks and fuzzing of the op definitions before the real
-//! interpreter (task 1.7) exists. Primitives only: the slow paths convert
-//! `undefined`, `null`, booleans and numbers as ToNumber does, and throw
-//! `undefined` for heap values (strings, objects, symbols), which the toy
-//! can't look inside.
+//! benchmarks and fuzzing of the op definitions and the compiler before
+//! the real interpreter (task 1.7) exists. Primitives only: the slow paths
+//! convert `undefined`, `null`, booleans and numbers as ToNumber does, and
+//! throw `undefined` for heap values (strings, objects, symbols), which the
+//! toy can't look inside. Functions, closures and environments live in
+//! vectors; [`run_program`] runs calls with a frame stack, the way the
+//! interpreter will (ARCHITECTURE.md §3.3–3.4), without Rust recursion.
 
-use ferrojs_value::{Kind, Value};
+use ferrojs_value::{HeapRef, Kind, Value};
 
 use crate::number::{self, CompareOp, NumericOp, UnaryOp};
-use crate::Handler;
 use crate::{
-    decode, execute, Completion, Const, EnvSlot, ErrorKind, Feedback, Flow, Ic, Limits, OpCtx, Reg,
-    Thrown,
+    decode, execute, CallSite, Completion, Const, Count, EnvSlot, ErrorKind, Feedback, Flow, Func,
+    Handler, Ic, Limits, OpCtx, Reg, Thrown,
 };
 
-/// Registers, constants, feedback and an environment chain in vectors.
+/// Toy closures are object values with this bit set in the reference.
+const CLOSURE_BIT: u32 = 1 << 30;
+/// Toy environments are object values with this bit set.
+const ENV_BIT: u32 = 1 << 29;
+/// The most slots one toy environment may have (fuzzed code can ask for
+/// 2^32).
+const MAX_ENV_SLOTS: u32 = 1 << 16;
+
+/// One function of a program for [`run_program`].
+#[derive(Clone, Debug, Default)]
+pub struct ToyFunction {
+    pub code: Vec<u8>,
+    pub handlers: Vec<Handler>,
+    pub constants: Vec<Value>,
+    pub limits: Limits,
+    /// Declared parameter count: arguments land in `r0..params`.
+    pub params: u32,
+    /// The program index of each nested function (`Func` operands).
+    pub functions: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct ToyEnv {
+    parent: Option<usize>,
+    slots: Vec<Value>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ToyClosure {
+    func: usize,
+    env: Option<usize>,
+}
+
+/// Registers, constants, feedback, environments and closures in vectors.
 #[derive(Debug, Default)]
 pub struct ToyCtx {
     pub regs: Vec<Value>,
     pub constants: Vec<Value>,
     pub feedback: Vec<Feedback>,
-    /// Innermost environment last; `depth` 0 is the innermost.
-    pub envs: Vec<Vec<Value>>,
     pub exception: Option<Value>,
     /// The interrupt check terminates once this many checks have passed.
     pub interrupt_after: Option<u64>,
@@ -29,12 +61,20 @@ pub struct ToyCtx {
     /// How many times each slow path ran (for tests of the fast paths).
     pub slow_calls: u64,
     /// Set when the interrupt check terminated execution: termination is
-    /// not catchable, so [`run_with_handlers`] doesn't unwind into
-    /// handlers then.
+    /// not catchable, so the run loops don't unwind into handlers then.
     pub terminating: bool,
     /// The kind of the last error a runtime function threw, if any (the
     /// toy has no error objects; the exception value is `undefined`).
     pub last_error: Option<ErrorKind>,
+    /// Frames [`run_program`] may stack before a `RangeError` (default
+    /// 10,000 when zero).
+    pub max_depth: usize,
+    env: Option<usize>,
+    env_store: Vec<ToyEnv>,
+    closures: Vec<ToyClosure>,
+    closure: Option<Value>,
+    /// The running function's nested-function table.
+    functions: Vec<usize>,
 }
 
 impl ToyCtx {
@@ -48,11 +88,43 @@ impl ToyCtx {
         }
     }
 
+    /// Makes `chain` (outermost first) the current environment chain.
+    pub fn set_env_chain(&mut self, chain: Vec<Vec<Value>>) {
+        self.env = None;
+        for slots in chain {
+            self.env_store.push(ToyEnv {
+                parent: self.env,
+                slots,
+            });
+            self.env = Some(self.env_store.len() - 1);
+        }
+    }
+
+    /// The slots of the environment `depth` levels out from the current one.
+    pub fn env_slots(&self, depth: usize) -> Option<&[Value]> {
+        let mut e = self.env?;
+        for _ in 0..depth {
+            e = self.env_store[e].parent?;
+        }
+        Some(&self.env_store[e].slots)
+    }
+
     fn env_index(&self, slot: EnvSlot) -> Option<(usize, usize)> {
-        let depth = slot.depth as usize;
-        let e = self.envs.len().checked_sub(depth + 1)?;
+        let mut e = self.env?;
+        for _ in 0..slot.depth {
+            e = self.env_store[e].parent?;
+        }
         let s = slot.slot as usize;
-        (s < self.envs[e].len()).then_some((e, s))
+        (s < self.env_store[e].slots.len()).then_some((e, s))
+    }
+
+    fn closure_of(&self, v: Value) -> Option<ToyClosure> {
+        match v.kind() {
+            Kind::Object(HeapRef(r)) if r & CLOSURE_BIT != 0 => {
+                self.closures.get((r & !CLOSURE_BIT) as usize).copied()
+            }
+            _ => None,
+        }
     }
 
     /// ToNumber for the primitives the toy understands.
@@ -70,6 +142,7 @@ impl ToyCtx {
     }
 
     fn fail<T>(&mut self) -> Result<T, Thrown> {
+        self.last_error = None;
         self.exception = Some(Value::UNDEFINED);
         Err(Thrown)
     }
@@ -106,6 +179,7 @@ impl OpCtx for ToyCtx {
         *slot = slot.union(fb);
     }
     fn throw(&mut self, v: Value) -> Flow {
+        self.last_error = None;
         self.exception = Some(v);
         Flow::Throw
     }
@@ -120,7 +194,7 @@ impl OpCtx for ToyCtx {
     }
     fn env_get(&mut self, slot: EnvSlot) -> Completion {
         match self.env_index(slot) {
-            Some((e, s)) => Ok(self.envs[e][s]),
+            Some((e, s)) => Ok(self.env_store[e].slots[s]),
             None => {
                 self.exception = Some(Value::UNDEFINED);
                 Err(Thrown)
@@ -130,13 +204,85 @@ impl OpCtx for ToyCtx {
     fn env_set(&mut self, slot: EnvSlot, v: Value) -> Result<(), Thrown> {
         match self.env_index(slot) {
             Some((e, s)) => {
-                self.envs[e][s] = v;
+                self.env_store[e].slots[s] = v;
                 Ok(())
             }
             None => {
                 self.exception = Some(Value::UNDEFINED);
                 Err(Thrown)
             }
+        }
+    }
+    fn rt_create_closure(&mut self, f: Func) -> Completion {
+        let Some(&func) = self.functions.get(f.0 as usize) else {
+            return self.fail();
+        };
+        let i = u32::try_from(self.closures.len()).unwrap_or(u32::MAX);
+        if i >= ENV_BIT {
+            return self.fail();
+        }
+        self.closures.push(ToyClosure {
+            func,
+            env: self.env,
+        });
+        Ok(Value::object(HeapRef(CLOSURE_BIT | i)))
+    }
+    fn current_closure(&self) -> Value {
+        self.closure.unwrap_or(Value::UNDEFINED)
+    }
+    fn push_env(&mut self, slots: Count) -> Result<(), Thrown> {
+        if slots.0 > MAX_ENV_SLOTS || self.env_store.len() >= ENV_BIT as usize {
+            return self.fail();
+        }
+        self.env_store.push(ToyEnv {
+            parent: self.env,
+            slots: vec![Value::UNDEFINED; slots.0 as usize],
+        });
+        self.env = Some(self.env_store.len() - 1);
+        Ok(())
+    }
+    fn pop_env(&mut self) -> Result<(), Thrown> {
+        match self.env {
+            Some(e) => {
+                self.env = self.env_store[e].parent;
+                Ok(())
+            }
+            None => self.fail(),
+        }
+    }
+    fn copy_env(&mut self) -> Result<(), Thrown> {
+        match self.env {
+            Some(e) if self.env_store.len() < ENV_BIT as usize => {
+                let copy = self.env_store[e].clone();
+                self.env_store.push(copy);
+                self.env = Some(self.env_store.len() - 1);
+                Ok(())
+            }
+            _ => self.fail(),
+        }
+    }
+    fn env_value(&self) -> Value {
+        match self.env {
+            Some(e) => Value::object(HeapRef(ENV_BIT | e as u32)),
+            None => Value::UNDEFINED,
+        }
+    }
+    fn set_env(&mut self, v: Value) -> Result<(), Thrown> {
+        match v.kind() {
+            Kind::Undefined => {
+                self.env = None;
+                Ok(())
+            }
+            Kind::Object(HeapRef(r)) if r & ENV_BIT != 0 && r & CLOSURE_BIT == 0 => {
+                let e = (r & !ENV_BIT) as usize;
+                if e < self.env_store.len() {
+                    self.env = Some(e);
+                    Ok(())
+                } else {
+                    self.fail()
+                }
+            }
+            _ => self.fail(),
         }
     }
     fn rt_add(&mut self, a: Value, b: Value) -> Completion {
@@ -208,7 +354,8 @@ pub enum Outcome {
 }
 
 /// Runs verified bytecode from offset 0 for at most `max_steps`
-/// instructions.
+/// instructions, with the context's registers and constants as they are.
+/// Calls throw (there is no program to call into; see [`run_program`]).
 ///
 /// # Panics
 /// If the code doesn't decode or a jump leaves it: the verifier rules
@@ -233,18 +380,17 @@ pub fn run_with_handlers(
     let mut pc = 0usize;
     for _ in 0..max_steps {
         let (insn, len) = decode(code, pc).expect("verified bytecode decodes");
-        match execute(cx, insn) {
+        let mut flow = execute(cx, insn);
+        if let Flow::Call = flow {
+            flow = cx.rt_throw_error(ErrorKind::NotCallable);
+        }
+        match flow {
             Flow::Next => pc += len,
-            Flow::Jump(l) => {
-                pc = usize::try_from(pc as i64 + l.0 as i64).expect("verified jump target");
-            }
+            Flow::Jump(l) => pc = jump_target(pc, l.0),
             Flow::Return(v) => return Outcome::Returned(v),
             Flow::Throw => {
                 let exception = cx.exception.take().expect("a throw sets the exception");
-                let handler = handlers
-                    .iter()
-                    .find(|h| (h.start as usize..h.end as usize).contains(&pc));
-                match handler {
+                match find_handler(handlers, pc) {
                     Some(h) if !cx.terminating => {
                         cx.set(h.exception, exception);
                         pc = h.target as usize;
@@ -252,7 +398,201 @@ pub fn run_with_handlers(
                     _ => return Outcome::Threw(exception),
                 }
             }
+            Flow::Call => unreachable!("turned into a throw above"),
         }
     }
     Outcome::StepLimit
+}
+
+fn jump_target(pc: usize, offset: i32) -> usize {
+    usize::try_from(pc as i64 + offset as i64).expect("verified jump target")
+}
+
+fn find_handler(handlers: &[Handler], pc: usize) -> Option<&Handler> {
+    handlers
+        .iter()
+        .find(|h| (h.start as usize..h.end as usize).contains(&pc))
+}
+
+/// A caller's frame, saved while its callee runs.
+struct Saved {
+    func: usize,
+    /// The pc of the call instruction (for unwinding) and after it.
+    call_pc: usize,
+    resume_pc: usize,
+    dst: Reg,
+    regs: Vec<Value>,
+    feedback: Vec<Feedback>,
+    env: Option<usize>,
+    closure: Option<Value>,
+}
+
+/// Runs `program[entry]` as a function called with `args`, for at most
+/// `max_steps` instructions, following calls through a frame stack.
+/// Every function must have passed [`verify`](crate::verify) and
+/// [`verify_handlers`](crate::verify_handlers) against its limits, and its
+/// nested-function table must index into `program`.
+///
+/// Calls copy up to `params` arguments into the callee's first registers
+/// (the rest of its registers start as `undefined`), check for interrupts
+/// at entry (D-007), and throw a `RangeError` past [`ToyCtx::max_depth`]
+/// frames. A tail call replaces the caller's frame. A throw unwinds
+/// through handlers and then callers; a termination unwinds everything.
+///
+/// # Panics
+/// If the program breaks the rules above.
+pub fn run_program(
+    program: &[ToyFunction],
+    entry: usize,
+    args: &[Value],
+    cx: &mut ToyCtx,
+    max_steps: u64,
+) -> Outcome {
+    let max_depth = if cx.max_depth == 0 {
+        10_000
+    } else {
+        cx.max_depth
+    };
+    let mut frames: Vec<Saved> = Vec::new();
+    cx.closures.push(ToyClosure {
+        func: entry,
+        env: None,
+    });
+    let closure = Value::object(HeapRef(CLOSURE_BIT | (cx.closures.len() as u32 - 1)));
+    let mut func = entry;
+    enter(cx, program, entry, closure, None, args);
+    let mut pc = 0usize;
+    for _ in 0..max_steps {
+        let f = &program[func];
+        let (insn, len) = decode(&f.code, pc).expect("verified bytecode decodes");
+        let mut flow = execute(cx, insn);
+        if let Flow::Call = flow {
+            let site = CallSite::of(&insn).expect("only calls return Flow::Call");
+            flow = call(
+                cx,
+                program,
+                &mut frames,
+                &mut func,
+                &mut pc,
+                len,
+                site,
+                max_depth,
+            );
+            if flow == Flow::Next {
+                // `call` switched to the callee at pc 0.
+                continue;
+            }
+        }
+        match flow {
+            Flow::Next => pc += len,
+            Flow::Jump(l) => pc = jump_target(pc, l.0),
+            Flow::Return(v) => match frames.pop() {
+                None => return Outcome::Returned(v),
+                Some(saved) => {
+                    pc = saved.resume_pc;
+                    let dst = saved.dst;
+                    func = restore(cx, program, saved);
+                    cx.set(dst, v);
+                }
+            },
+            Flow::Throw => {
+                let exception = cx.exception.take().expect("a throw sets the exception");
+                loop {
+                    let handler = find_handler(&program[func].handlers, pc).copied();
+                    match handler {
+                        Some(h) if !cx.terminating => {
+                            cx.set(h.exception, exception);
+                            pc = h.target as usize;
+                            break;
+                        }
+                        _ => match frames.pop() {
+                            Some(saved) if !cx.terminating => {
+                                pc = saved.call_pc;
+                                func = restore(cx, program, saved);
+                            }
+                            _ => return Outcome::Threw(exception),
+                        },
+                    }
+                }
+            }
+            Flow::Call => unreachable!("handled above"),
+        }
+    }
+    Outcome::StepLimit
+}
+
+/// Starts running `program[func]` as `closure` in the current context.
+fn enter(
+    cx: &mut ToyCtx,
+    program: &[ToyFunction],
+    func: usize,
+    closure: Value,
+    env: Option<usize>,
+    args: &[Value],
+) {
+    let f = &program[func];
+    cx.regs = vec![Value::UNDEFINED; f.limits.registers as usize];
+    for (r, &a) in cx.regs.iter_mut().zip(args).take(f.params as usize) {
+        *r = a;
+    }
+    cx.constants = f.constants.clone();
+    cx.feedback = vec![Feedback::NONE; f.limits.ics as usize];
+    cx.functions = f.functions.clone();
+    cx.env = env;
+    cx.closure = Some(closure);
+}
+
+fn restore(cx: &mut ToyCtx, program: &[ToyFunction], saved: Saved) -> usize {
+    let f = &program[saved.func];
+    cx.regs = saved.regs;
+    cx.feedback = saved.feedback;
+    cx.constants = f.constants.clone();
+    cx.functions = f.functions.clone();
+    cx.env = saved.env;
+    cx.closure = saved.closure;
+    saved.func
+}
+
+/// Performs a call: on success switches the context to the callee at
+/// pc 0 and returns `Flow::Next`; otherwise returns `Flow::Throw`.
+#[allow(clippy::too_many_arguments)]
+fn call(
+    cx: &mut ToyCtx,
+    program: &[ToyFunction],
+    frames: &mut Vec<Saved>,
+    func: &mut usize,
+    pc: &mut usize,
+    len: usize,
+    site: CallSite,
+    max_depth: usize,
+) -> Flow {
+    let callee = cx.reg(site.callee);
+    let Some(closure) = cx.closure_of(callee) else {
+        return cx.rt_throw_error(ErrorKind::NotCallable);
+    };
+    if !site.tail && frames.len() >= max_depth {
+        return cx.rt_throw_error(ErrorKind::StackOverflow);
+    }
+    if let Flow::Throw = cx.check_interrupt() {
+        return Flow::Throw;
+    }
+    let args: Vec<Value> = (0..site.argc.0)
+        .map(|i| cx.reg(Reg(site.args.0 + i)))
+        .collect();
+    if !site.tail {
+        frames.push(Saved {
+            func: *func,
+            call_pc: *pc,
+            resume_pc: *pc + len,
+            dst: site.dst,
+            regs: std::mem::take(&mut cx.regs),
+            feedback: std::mem::take(&mut cx.feedback),
+            env: cx.env,
+            closure: cx.closure,
+        });
+    }
+    enter(cx, program, closure.func, callee, closure.env, &args);
+    *func = closure.func;
+    *pc = 0;
+    Flow::Next
 }

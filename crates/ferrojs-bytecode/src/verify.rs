@@ -5,7 +5,9 @@
 //!
 //! - it decodes (valid opcode, not truncated, at most one prefix);
 //! - every `Reg` is below the register count, every `Const` below the
-//!   constant count, every `Ic` below the feedback-slot count;
+//!   constant count, every `Ic` below the feedback-slot count, every
+//!   `Func` below the nested-function count, and a call's argument range
+//!   `args .. args + argc` ends within the registers;
 //! - every jump target lands on the first byte of an instruction (its
 //!   prefix, if any) inside the code;
 //! - only `loop_edge` ops jump backward (offset ≤ 0), and they never jump
@@ -20,7 +22,7 @@ use core::fmt::Write as _;
 
 use crate::encode::{instructions, DecodeError, DecodeErrorKind};
 use crate::operand::{OperandValue, Reg};
-use crate::{Flags, Opcode};
+use crate::{Flags, Instruction, Opcode};
 
 /// Sizes the verifier checks operands against.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -28,6 +30,8 @@ pub struct Limits {
     pub registers: u32,
     pub constants: u32,
     pub ics: u32,
+    /// Nested function templates (`Func` operands).
+    pub functions: u32,
 }
 
 /// Why bytecode failed verification.
@@ -38,6 +42,9 @@ pub enum VerifyErrorKind {
     RegisterOutOfRange(u32),
     ConstantOutOfRange(u32),
     IcOutOfRange(u32),
+    FunctionOutOfRange(u32),
+    /// A call's argument registers run past the register count.
+    ArgumentsOutOfRange,
     /// The target is outside the code.
     JumpOutOfBounds(i64),
     /// The target is inside an instruction.
@@ -84,6 +91,8 @@ impl fmt::Display for VerifyError {
             VerifyErrorKind::RegisterOutOfRange(r) => write!(f, "register r{r} out of range"),
             VerifyErrorKind::ConstantOutOfRange(c) => write!(f, "constant c{c} out of range"),
             VerifyErrorKind::IcOutOfRange(i) => write!(f, "feedback slot ic{i} out of range"),
+            VerifyErrorKind::FunctionOutOfRange(i) => write!(f, "function fn{i} out of range"),
+            VerifyErrorKind::ArgumentsOutOfRange => write!(f, "arguments past the last register"),
             VerifyErrorKind::JumpOutOfBounds(t) => write!(f, "jump target {t} outside the code"),
             VerifyErrorKind::JumpIntoInstruction(t) => {
                 write!(f, "jump target {t} is inside an instruction")
@@ -132,6 +141,9 @@ pub fn verify(code: &[u8], limits: &Limits) -> Result<(), VerifyError> {
                 OperandValue::Ic(i) if i.0 >= limits.ics => {
                     Some(VerifyErrorKind::IcOutOfRange(i.0))
                 }
+                OperandValue::Func(i) if i.0 >= limits.functions => {
+                    Some(VerifyErrorKind::FunctionOutOfRange(i.0))
+                }
                 OperandValue::Label(l) => {
                     if loop_edge && l.0 > 0 {
                         Some(VerifyErrorKind::ForwardLoopEdge)
@@ -145,6 +157,17 @@ pub fn verify(code: &[u8], limits: &Limits) -> Result<(), VerifyError> {
                 _ => None,
             };
         });
+        // A call reads `argc` registers starting at `args`.
+        let call_args = match insn {
+            Instruction::Call(o) => Some((o.args, o.argc)),
+            Instruction::TailCall(o) => Some((o.args, o.argc)),
+            _ => None,
+        };
+        if let Some((args, argc)) = call_args {
+            if u64::from(args.0) + u64::from(argc.0) > u64::from(limits.registers) {
+                err = err.or(Some(VerifyErrorKind::ArgumentsOutOfRange));
+            }
+        }
         if let Some(kind) = err {
             return Err(VerifyError { pc, kind });
         }

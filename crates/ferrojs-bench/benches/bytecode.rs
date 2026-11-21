@@ -20,6 +20,7 @@ const LIMITS: Limits = Limits {
     registers: 300,
     constants: 0,
     ics: 3,
+    functions: 0,
 };
 
 /// `sum = 0; for (n = 1000; 0 < n; n--) sum += n; return sum`.

@@ -76,6 +76,8 @@ pub enum OperandKind {
     Count,
     /// A (depth, slot) pair addressing a captured variable; two units.
     EnvSlot,
+    /// An index into the function's table of nested function templates.
+    Func,
 }
 
 impl OperandKind {
@@ -107,6 +109,9 @@ pub struct Label(pub i32);
 /// An argument or element count.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Count(pub u32);
+/// An index into the function's nested-function table.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct Func(pub u32);
 /// A captured variable: `depth` environments out, slot `slot`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct EnvSlot {
@@ -131,6 +136,7 @@ pub enum OperandValue {
     Label(Label),
     Count(Count),
     EnvSlot(EnvSlot),
+    Func(Func),
 }
 
 /// Implemented by each operand type; the op-definition macro uses it to
@@ -202,6 +208,7 @@ simple_operand!(Imm, Imm, signed);
 simple_operand!(Const, Const, unsigned);
 simple_operand!(Ic, Ic, unsigned);
 simple_operand!(Count, Count, unsigned);
+simple_operand!(Func, Func, unsigned);
 
 impl Operand for Label {
     const KIND: OperandKind = OperandKind::Label;
@@ -278,6 +285,12 @@ impl fmt::Display for Count {
         write!(f, "#{}", self.0)
     }
 }
+impl fmt::Display for Func {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "fn{}", self.0)
+    }
+}
+
 impl fmt::Display for EnvSlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "env[{}:{}]", self.depth, self.slot)
@@ -293,6 +306,7 @@ impl fmt::Display for OperandValue {
             OperandValue::Label(x) => x.fmt(f),
             OperandValue::Count(x) => x.fmt(f),
             OperandValue::EnvSlot(x) => x.fmt(f),
+            OperandValue::Func(x) => x.fmt(f),
         }
     }
 }

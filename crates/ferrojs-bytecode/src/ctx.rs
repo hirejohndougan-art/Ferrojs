@@ -12,7 +12,7 @@ use core::fmt;
 use ferrojs_value::Value;
 
 use crate::number::{CompareOp, NumericOp, UnaryOp};
-use crate::operand::{Const, EnvSlot, Ic, Label, Reg};
+use crate::operand::{Const, Count, EnvSlot, Func, Ic, Label, Reg};
 
 /// What the dispatch loop does after a handler.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -25,6 +25,51 @@ pub enum Flow {
     Return(Value),
     /// An exception is pending in the context; unwind.
     Throw,
+    /// Call a function: the dispatch loop reads the instruction's
+    /// operands ([`CallSite::of`]), pushes (or, for a tail call, replaces)
+    /// the frame and continues in the callee (ARCHITECTURE.md §3.3–3.4).
+    /// Handlers never recurse into the callee themselves. It carries no
+    /// data so `Flow` stays small on the hot path.
+    Call,
+}
+
+/// The operands of a `Call` or `TailCall`, for the dispatch loop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CallSite {
+    /// Where the result goes (unused for tail calls).
+    pub dst: Reg,
+    pub callee: Reg,
+    pub this: Reg,
+    /// First of `argc` consecutive argument registers.
+    pub args: Reg,
+    pub argc: Count,
+    /// A proper tail call: the callee replaces the current frame.
+    pub tail: bool,
+}
+
+impl CallSite {
+    /// The call operands of `insn`, if it is a `Call` or `TailCall`.
+    pub fn of(insn: &crate::Instruction) -> Option<CallSite> {
+        match *insn {
+            crate::Instruction::Call(o) => Some(CallSite {
+                dst: o.dst,
+                callee: o.callee,
+                this: o.this,
+                args: o.args,
+                argc: o.argc,
+                tail: false,
+            }),
+            crate::Instruction::TailCall(o) => Some(CallSite {
+                dst: Reg(0),
+                callee: o.callee,
+                this: o.this,
+                args: o.args,
+                argc: o.argc,
+                tail: true,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// Marker: an exception was thrown and is pending in the context.
@@ -38,6 +83,10 @@ pub enum ErrorKind {
     UninitializedBinding,
     /// `TypeError`: assignment to a `const` binding.
     ConstAssignment,
+    /// `TypeError`: the callee is not a function.
+    NotCallable,
+    /// `RangeError`: too much recursion.
+    StackOverflow,
 }
 
 /// The result of a runtime function that may throw.
@@ -91,6 +140,25 @@ pub trait OpCtx {
     /// Checks the interrupt flag (D-007): [`Flow::Next`] to go on, or
     /// [`Flow::Throw`] with a termination pending.
     fn check_interrupt(&mut self) -> Flow;
+
+    /// Creates a closure of nested function `f` over the current
+    /// environment.
+    fn rt_create_closure(&mut self, f: Func) -> Completion;
+    /// The function object being run (the frame's callee).
+    fn current_closure(&self) -> Value;
+    /// Makes a new environment with `slots` slots (each holding
+    /// `undefined`) whose parent is the current one, and enters it.
+    fn push_env(&mut self, slots: Count) -> Result<(), Thrown>;
+    /// Leaves the current environment for its parent.
+    fn pop_env(&mut self) -> Result<(), Thrown>;
+    /// Replaces the current environment with a copy of it (same parent,
+    /// same slot values): CreatePerIterationEnvironment.
+    fn copy_env(&mut self) -> Result<(), Thrown>;
+    /// The current environment as a value (to save in a register).
+    fn env_value(&self) -> Value;
+    /// Makes `v`, a value from [`env_value`](Self::env_value), the current
+    /// environment again.
+    fn set_env(&mut self, v: Value) -> Result<(), Thrown>;
 
     /// Reads a captured variable (may throw: TDZ, or a bad slot).
     fn env_get(&mut self, slot: EnvSlot) -> Completion;

@@ -115,6 +115,13 @@ Rust recursion). If it is a native function, the interpreter pushes a
 frame with the same layout (so stack traces, scanning and `argc` work the
 same) and calls the Rust function with a view of its arguments.
 
+As built (1.6d, D-036): the `Call` and `TailCall` handlers don't call
+anything; they return `Flow::Call(CallSite)` and the dispatch loop does
+the frame work, so handlers stay the same in every tier and nothing
+recurses on the Rust stack. The toy context's `run_program` is the
+reference loop: it checks for interrupts at function entry, copies up
+to `P` arguments, and throws a `RangeError` past its frame limit.
+
 `Return src` writes the result to the caller's register named in
 `return info`, pops the frame and resumes at `return pc`. The entry
 frame's return hands the value back to the Rust caller.
@@ -494,6 +501,17 @@ Phase 3, in this format.
   binding lives: bindings never captured by a closure are registers;
   captured ones are slots in heap `Environment` cells (parent reference +
   slots), addressed with `EnvSlot` operands.
+- As built (1.6d, D-036): a binding is captured if any reference to it
+  is owned by another function. Each scope with captured bindings has an
+  environment (slots in symbol order) that is pushed on entry
+  (`PushEnv n`) and popped on the normal exit (`PopEnv`); jumps out pop
+  statically, and exception handlers restore the environment saved with
+  `GetEnv` at the `try`. Depth counts the environment scopes between the
+  use and the declaration, through enclosing functions (a closure keeps
+  the environment current where it was created). A `for (let …)` with
+  captured variables copies its environment (`CopyEnv`) after the
+  initializer and before each update. Captured lexical bindings start as
+  the TDZ marker and every use checks them.
 - `with`, sloppy-mode direct `eval` and the global scope use dynamic
   lookup ops (`LoadName`, `StoreName`) that walk environment records,
   including object environments.

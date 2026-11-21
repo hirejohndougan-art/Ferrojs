@@ -21,6 +21,7 @@ fuzz_target!(|data: &[u8]| {
         registers: u32::from(*r % 16),
         constants: u32::from(*c % 4),
         ics: u32::from(*i % 4),
+        functions: u32::from(*i / 4 % 4),
     };
     if verify(code, &limits).is_err() {
         return;
@@ -33,7 +34,7 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(decode(&out, 0).expect("re-encoded"), (insn, out.len()));
     }
     let mut cx = ToyCtx::new(&limits);
-    cx.envs = vec![vec![Value::UNDEFINED; 4]; 2];
+    cx.set_env_chain(vec![vec![Value::UNDEFINED; 4]; 2]);
     cx.interrupt_after = Some(1_000);
     let _ = run(code, &mut cx, 10_000);
 });

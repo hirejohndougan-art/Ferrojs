@@ -733,3 +733,55 @@ planning document and gets logged here as each is implemented.
 - **Rejected:** duplicating the finally block at every exit (code size
   grows with exits and nesting); subroutine-style `jsr`/`ret` (needs an
   indirect jump the verifier can't check); backward handler targets.
+
+## D-036 Calls return to the dispatch loop; captured bindings in per-scope environments
+- **Status:** Accepted (autopilot, 2026-11-21)
+- **Choice:** task 1.6d compiles nested functions, closures and calls.
+  - A `CompiledFunction` owns its nested templates (`functions`), indexed
+    by a new operand kind `Func` (`Limits.functions` bounds it).
+    `CreateClosure dst, func` closes over the current environment;
+    `LoadClosure dst` reads the running function (a named function
+    expression's own name).
+  - `Call dst, callee, this, args, argc` and `TailCall callee, this,
+    args, argc` return `Flow::Call(CallSite)`: the dispatch loop pushes or
+    replaces the frame (ARCHITECTURE.md §3.3–3.4), never the handler. The
+    verifier checks `args + argc <= R`. `this` is `undefined` until 1.6e.
+  - Tail calls (D-021): `return` of a call in tail position (through
+    `?:`, `&&`, `||`, `??`, `,` and parentheses) in strict code, outside
+    any `try` block and outside the `catch` of a `try … finally`.
+  - Environments: a binding is captured when a reference to it belongs
+    to another function. Captured bindings get slots in their scope's
+    environment (symbol order); every scope with such bindings pushes an
+    environment on entry and pops it on normal exit; `break`/`continue`
+    pop the difference statically, `return` doesn't need to (the frame
+    goes), and handlers restore the environment saved by `GetEnv` at the
+    `try` (`SetEnv`). `for (let …)` with captured variables uses
+    `CopyEnv` for per-iteration bindings. Captured `let`/`const` are
+    always TDZ-checked; uncaptured ones keep D-034's static analysis.
+  - Hoisting: function declarations at function-body level are created
+    at entry, after parameters are copied into the environment. Block-
+    level function declarations (Annex B semantics) are unsupported.
+  - The compiler refuses, rather than guesses, whenever a depth would
+    cross a scope it doesn't enter, and closures may only be created
+    where every environment scope up to their function is entered.
+  - oxc binds a catch parameter in the catch body's block scope; the
+    compiler enters that scope at the handler and binds it there.
+- **Toy context:** `run_program` runs a flat table of `ToyFunction`s
+  with a frame stack, closures and an environment tree, so compiled
+  calls are checked against Node.js (deep recursion gives the same
+  `RangeError`); `ErrorKind` gains `NotCallable` and `StackOverflow`.
+- **Benchmarks:** `Flow::Call` carries no data (the loop reads the
+  operands back from the decoded instruction with `CallSite::of`), so
+  `Flow` stays small. Even so, growing the op list to 54 makes the
+  generic `decode` +12% and the toy `dispatch` loop +29% in instruction
+  counts (LLVM compiles the larger generated matches differently). Like
+  D-033's, these benchmarks measure the 1.4 scaffolding; the baseline is
+  rewritten here, and task 1.7 must design the real dispatch loop (for
+  example decoding inside each handler instead of one generic `decode`
+  plus `execute`) against its own benchmarks, so its cost doesn't grow
+  with the number of ops.
+- **Rejected:** handlers that recurse into the callee (Rust stack depth
+  tied to JS depth, and tiers would differ); one environment per
+  function holding every captured binding (wrong for per-iteration and
+  block-scoped closures); boxing captured variables individually (more
+  allocations, and the architecture already plans environment cells).

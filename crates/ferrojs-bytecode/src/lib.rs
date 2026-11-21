@@ -24,7 +24,7 @@
 //! a.ret(sum);
 //! let code = a.finish().unwrap();
 //!
-//! let limits = Limits { registers: 5, constants: 0, ics: 3 };
+//! let limits = Limits { registers: 5, constants: 0, ics: 3, functions: 0 };
 //! verify(&code, &limits).unwrap();
 //! let mut cx = testing::ToyCtx::new(&limits);
 //! let out = testing::run(&code, &mut cx, 1_000);
@@ -41,7 +41,7 @@ mod ops;
 pub mod testing;
 mod verify;
 
-pub use ctx::{Completion, ErrorKind, Feedback, Flow, OpCtx, Thrown};
+pub use ctx::{CallSite, Completion, ErrorKind, Feedback, Flow, OpCtx, Thrown};
 pub use define::{Flags, OpInfo};
 pub use encode::{
     decode, instructions, label_offset, AsmError, Assembler, DecodeError, DecodeErrorKind,
@@ -49,7 +49,8 @@ pub use encode::{
 };
 pub use number::{CompareOp, NumericOp, UnaryOp};
 pub use operand::{
-    AsmLabel, Const, Count, EnvSlot, Ic, Imm, Label, Operand, OperandKind, OperandValue, Reg, Width,
+    AsmLabel, Const, Count, EnvSlot, Func, Ic, Imm, Label, Operand, OperandKind, OperandValue, Reg,
+    Width,
 };
 pub(crate) use ops::decode_operands;
 pub use ops::{execute, handlers, operands, Instruction, Opcode};

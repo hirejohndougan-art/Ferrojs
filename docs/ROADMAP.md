@@ -118,7 +118,8 @@ Order matters: each task builds on the ones above it.
   accept sloppy-mode call expressions as assignment targets (runtime
   `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6d, 1.8
 - [ ] 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
-  layout; proper tail calls designed in. needs: 1.3b, 1.6d
+  layout; proper tail calls designed in. Dispatch cost must not grow
+  with the number of ops (D-036): benchmark it. needs: 1.3b, 1.6d
 - [ ] 1.8 Objects and shapes (hidden classes), property get/set, prototype
   chains. needs: 1.3b
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that

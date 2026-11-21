@@ -13,7 +13,7 @@ use ferrojs_value::Value;
 use crate::number::{self, CompareOp, NumericOp, UnaryOp};
 #[allow(unused_imports)]
 use crate::{
-    Completion, Const, Count, EnvSlot, ErrorKind, Feedback, Flow, Ic, Imm, Label, OpCtx, Reg,
+    Completion, Const, Count, EnvSlot, ErrorKind, Feedback, Flow, Func, Ic, Imm, Label, OpCtx, Reg,
     Thrown,
 };
 
@@ -508,5 +508,94 @@ define_ops! {
         flags(terminator, may_throw, may_gc)
         handler(cx) {
             cx.rt_throw_error(ErrorKind::ConstAssignment)
+        }
+
+    /// `dst = ` a new closure of nested function `func` over the current
+    /// environment.
+    CreateClosure(create_closure) { dst: Reg, func: Func }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let c = cx.rt_create_closure(func);
+            cx.complete(dst, c)
+        }
+
+    /// `dst = ` the function being run (for a named function expression's
+    /// own name).
+    LoadClosure(load_closure) { dst: Reg }
+        flags()
+        handler(cx) {
+            let v = cx.current_closure();
+            cx.set(dst, v);
+            Flow::Next
+        }
+
+    /// `dst = callee(args .. args + argc)` with `this`; the dispatch loop
+    /// does the call.
+    Call(call) { dst: Reg, callee: Reg, this: Reg, args: Reg, argc: Count }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let _ = (dst, callee, this, args, argc);
+            Flow::Call
+        }
+
+    /// `return callee(args .. args + argc)` as a proper tail call (D-021):
+    /// the callee replaces this frame.
+    TailCall(tail_call) { callee: Reg, this: Reg, args: Reg, argc: Count }
+        flags(terminator, may_throw, may_gc)
+        handler(cx) {
+            let _ = (callee, this, args, argc);
+            Flow::Call
+        }
+
+    /// Enters a new environment with `slots` slots.
+    PushEnv(push_env) { slots: Count }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            match cx.push_env(slots) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// Leaves the current environment.
+    PopEnv(pop_env) {}
+        flags(may_throw)
+        handler(cx) {
+            match cx.pop_env() {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// Replaces the current environment with a copy (per-iteration
+    /// `let` bindings).
+    CopyEnv(copy_env) {}
+        flags(may_throw, may_gc)
+        handler(cx) {
+            match cx.copy_env() {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// `dst = ` the current environment.
+    GetEnv(get_env) { dst: Reg }
+        flags()
+        handler(cx) {
+            let v = cx.env_value();
+            cx.set(dst, v);
+            Flow::Next
+        }
+
+    /// Makes the environment saved in `src` current again (after a
+    /// throw lands in a handler).
+    SetEnv(set_env) { src: Reg }
+        flags(may_throw)
+        handler(cx) {
+            let v = cx.reg(src);
+            match cx.set_env(v) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
         }
 }

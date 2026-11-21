@@ -246,6 +246,7 @@ fn labels_resolve_and_widen() {
         registers: 3,
         constants: 0,
         ics: 0,
+        functions: 0,
     };
     verify(&code, &limits).unwrap();
 }
@@ -280,6 +281,7 @@ fn widening_reaches_a_fixed_point() {
                 registers: 1,
                 constants: 0,
                 ics: 0,
+                functions: 0,
             },
         )
         .unwrap();
@@ -312,6 +314,7 @@ fn limits(registers: u32, constants: u32, ics: u32) -> Limits {
         registers,
         constants,
         ics,
+        functions: 0,
     }
 }
 
@@ -663,11 +666,16 @@ fn environments() {
             a.ret(Reg(1));
         },
         limits(2, 0, 0),
-        |cx| cx.envs = vec![vec![Value::from_i32(7)], vec![Value::NULL, Value::NULL]],
+        |cx| {
+            cx.set_env_chain(vec![
+                vec![Value::from_i32(7)],
+                vec![Value::NULL, Value::NULL],
+            ])
+        },
     );
     // depth 2 doesn't exist: the toy's env_get throws.
     assert_eq!(o, Outcome::Threw(Value::UNDEFINED));
-    assert_eq!(cx.envs[1][1], Value::from_i32(7));
+    assert_eq!(cx.env_slots(0).unwrap()[1], Value::from_i32(7));
     assert_eq!(cx.regs[0], Value::from_i32(7));
 }
 
@@ -741,7 +749,7 @@ fn random_bytes_never_break_verified_execution() {
             verified += 1;
             disassemble(&code).unwrap();
             let mut cx = ToyCtx::new(&l);
-            cx.envs = vec![vec![Value::UNDEFINED; 2]];
+            cx.set_env_chain(vec![vec![Value::UNDEFINED; 2]]);
             cx.interrupt_after = Some(100);
             let _ = run(&code, &mut cx, 1_000);
         }
@@ -785,4 +793,36 @@ fn exception_tables_are_verified() {
     let out = ferrojs_bytecode::testing::run_with_handlers(&code, &[h(0, 5, 5, 1)], &mut cx, 100);
     assert_eq!(out, Outcome::Returned(Value::from_i32(1)));
     assert_eq!(cx.regs[1], Value::from_i32(1));
+}
+
+#[test]
+fn calls_and_closures_are_verified() {
+    use ferrojs_bytecode::{Count, Func, VerifyErrorKind};
+    let code = |f: &dyn Fn(&mut Assembler)| {
+        let mut a = Assembler::new();
+        f(&mut a);
+        a.ret(Reg(0));
+        a.finish().unwrap()
+    };
+    let mut l = limits(4, 0, 0);
+    l.functions = 1;
+    let ok = code(&|a| {
+        a.create_closure(Reg(0), Func(0));
+        a.call(Reg(0), Reg(0), Reg(1), Reg(2), Count(2));
+    });
+    assert!(verify(&ok, &l).is_ok());
+    let bad_func = code(&|a| a.create_closure(Reg(0), Func(1)));
+    assert_eq!(
+        verify(&bad_func, &l).unwrap_err().kind,
+        VerifyErrorKind::FunctionOutOfRange(1)
+    );
+    let bad_args = code(&|a| a.call(Reg(0), Reg(0), Reg(1), Reg(3), Count(2)));
+    assert_eq!(
+        verify(&bad_args, &l).unwrap_err().kind,
+        VerifyErrorKind::ArgumentsOutOfRange
+    );
+    // Without a program, the toy's single-function loop throws on calls.
+    let mut cx = ToyCtx::new(&l);
+    let o = run(&ok, &mut cx, 100);
+    assert!(matches!(o, Outcome::Threw(_)));
 }

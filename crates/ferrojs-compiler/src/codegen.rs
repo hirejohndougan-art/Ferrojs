@@ -1,16 +1,22 @@
-//! Bytecode generation, parts 1a and 1b (tasks 1.6a/b, D-033, D-034).
+//! Bytecode generation, task 1.6 (D-033 to D-036).
 //!
-//! Compiles one function body to register bytecode (D-019): parameters
-//! are `r0..rP`, every other binding of the function gets a fixed register
-//! after them, and temporaries are allocated stack-wise above the locals.
-//! This handles functions whose bindings are all uncaptured locals, with
-//! number, boolean, `null` and `undefined` values, the operators on them,
-//! structured control flow and `switch`. `let`/`const` bindings that may
-//! be used in their temporal dead zone hold the uninitialized marker until
-//! declared and are checked at every use; the rest are proven safe at
-//! compile time. Assigning a `const` throws a `TypeError`. Everything else
-//! is reported as [`CompileError::Unsupported`], never miscompiled: nested
-//! functions, closures, calls, objects, strings, globals and `try`.
+//! Compiles a function and the functions nested in it to register
+//! bytecode (D-019): parameters are `r0..rP`, every binding of the function
+//! that no nested function uses gets a fixed register after them, and
+//! temporaries are allocated stack-wise above the locals. Bindings that
+//! nested functions use ("captured") live in environment slots instead
+//! (D-036): every scope with captured bindings pushes an environment when
+//! entered, and a use addresses its slot as (depth, slot) through the
+//! chain of environments.
+//!
+//! Values are numbers, booleans, `null`, `undefined` and functions; the
+//! code has the usual operators, structured control flow, `switch`,
+//! `try`/`catch`/`finally`, nested functions, closures and calls (proper
+//! tail calls in strict code). `let`/`const` bindings that may be used in
+//! their temporal dead zone hold the uninitialized marker until declared
+//! and are checked at every use. Everything else is reported as
+//! [`CompileError::Unsupported`], never miscompiled: objects, strings,
+//! `this`, globals, block-level function declarations, destructuring.
 //!
 //! Register-writing contract: `expr_to(e, dst)` may write `dst` before it
 //! has finished reading `e`'s operands, so `dst` must be a register `e`
@@ -19,7 +25,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ferrojs_bytecode::{label_offset, AsmLabel, Assembler, Const, Handler, Ic, Imm, Limits, Reg};
+use ferrojs_bytecode::{
+    label_offset, AsmLabel, Assembler, Const, Count, EnvSlot, Func, Handler, Ic, Imm, Limits, Reg,
+};
 use ferrojs_value::Value;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{walk, Visit};
@@ -37,7 +45,7 @@ pub struct CompiledFunction {
     pub params: u32,
     /// Register count `R`, parameters included.
     pub registers: u32,
-    /// Number constants; strings join them in 1.6c.
+    /// Number constants; strings join them in 1.6e.
     pub constants: Vec<f64>,
     /// Feedback slots.
     pub ics: u32,
@@ -45,6 +53,8 @@ pub struct CompiledFunction {
     pub code: Vec<u8>,
     /// The exception table, innermost ranges first.
     pub handlers: Vec<Handler>,
+    /// Nested function templates, indexed by `Func` operands.
+    pub functions: Vec<CompiledFunction>,
 }
 
 impl CompiledFunction {
@@ -54,6 +64,7 @@ impl CompiledFunction {
             registers: self.registers,
             constants: self.constants.len() as u32,
             ics: self.ics,
+            functions: self.functions.len() as u32,
         }
     }
 
@@ -100,7 +111,7 @@ fn unsupported<T>(what: impl Into<String>, span: oxc_span::Span) -> CResult<T> {
 
 /// Parses `source` as a script and compiles its first top-level function
 /// declaration. Convenience for tests and tools until scripts compile as a
-/// whole (task 1.6c).
+/// whole (task 1.6e).
 pub fn compile_function_source(source: &str) -> CResult<CompiledFunction> {
     let allocator = Allocator::default();
     let parsed = parse(&allocator, source, Goal::Script).map_err(CompileError::Syntax)?;
@@ -119,25 +130,204 @@ pub fn compile_function_source(source: &str) -> CResult<CompiledFunction> {
     compile_function(&parsed, func)
 }
 
-/// Compiles `func`, which must belong to `parsed`.
+/// Compiles `func`, which must belong to `parsed`, with the functions
+/// nested in it. A use of a binding outside `func` is unsupported.
 pub fn compile_function<'a>(parsed: &Parsed<'a>, func: &Function<'a>) -> CResult<CompiledFunction> {
-    if func.generator || func.r#async {
-        return unsupported("generator and async functions", func.span);
-    }
-    let Some(body) = &func.body else {
-        return unsupported("function without a body", func.span);
-    };
     let scoping = parsed.semantic.scoping();
-    let scope = func.scope_id.get().expect("semantic analysis ran");
-    let mut g = Gen::new(scoping, scope);
+    let f = FnLike::function(func)?;
+    let an = Analysis::new(scoping, f.scope);
+    compile_fn(&an, &f, None)
+}
+
+/// Which bindings live in environments, and where (D-036).
+struct Analysis<'s> {
+    scoping: &'s Scoping,
+    /// Bindings used from a function other than the one that declares
+    /// them.
+    captured: HashSet<SymbolId>,
+    /// For each scope with captured bindings: those bindings, in slot
+    /// order.
+    env_slots: HashMap<ScopeId, Vec<SymbolId>>,
+    slot_of: HashMap<SymbolId, u32>,
+    /// The scope of the function being compiled: bindings outside it are
+    /// out of reach.
+    root: ScopeId,
+}
+
+impl<'s> Analysis<'s> {
+    fn new(scoping: &'s Scoping, root: ScopeId) -> Analysis<'s> {
+        let mut captured = HashSet::new();
+        for sym in scoping.symbol_ids() {
+            let home = owner(scoping, scoping.symbol_scope_id(sym));
+            let used_elsewhere = scoping
+                .get_resolved_reference_ids(sym)
+                .iter()
+                .any(|&r| owner(scoping, scoping.get_reference(r).scope_id()) != home);
+            if used_elsewhere {
+                captured.insert(sym);
+            }
+        }
+        let mut env_slots: HashMap<ScopeId, Vec<SymbolId>> = HashMap::new();
+        let mut slot_of = HashMap::new();
+        let mut ordered: Vec<SymbolId> = captured.iter().copied().collect();
+        ordered.sort();
+        for sym in ordered {
+            let slots = env_slots.entry(scoping.symbol_scope_id(sym)).or_default();
+            slot_of.insert(sym, slots.len() as u32);
+            slots.push(sym);
+        }
+        Analysis {
+            scoping,
+            captured,
+            env_slots,
+            slot_of,
+            root,
+        }
+    }
+
+    /// Is `scope` the root function's scope or inside it?
+    fn in_root(&self, mut scope: ScopeId) -> bool {
+        loop {
+            if scope == self.root {
+                return true;
+            }
+            match self.scoping.scope_parent_id(scope) {
+                Some(p) => scope = p,
+                None => return false,
+            }
+        }
+    }
+
+    fn has_env(&self, scope: ScopeId) -> bool {
+        self.env_slots.contains_key(&scope)
+    }
+}
+
+/// The function scope that owns `scope`: the nearest enclosing scope that
+/// is a function (arrows included) or the top level.
+fn owner(scoping: &Scoping, mut scope: ScopeId) -> ScopeId {
+    loop {
+        if scoping
+            .scope_flags(scope)
+            .intersects(ScopeFlags::Function | ScopeFlags::Top)
+        {
+            return scope;
+        }
+        match scoping.scope_parent_id(scope) {
+            Some(p) => scope = p,
+            None => return scope,
+        }
+    }
+}
+
+/// A function body: statements, or an arrow's expression.
+#[derive(Clone, Copy)]
+enum Body<'b, 'a> {
+    Block(&'b FunctionBody<'a>),
+    Expr(&'b Expression<'a>),
+}
+
+/// What the compiler needs from a function, arrow or not.
+struct FnLike<'b, 'a> {
+    name: String,
+    span: oxc_span::Span,
+    params: &'b FormalParameters<'a>,
+    body: Body<'b, 'a>,
+    scope: ScopeId,
+    /// A named function expression's own name binding.
+    own_name: Option<SymbolId>,
+}
+
+impl<'b, 'a> FnLike<'b, 'a> {
+    fn function(f: &'b Function<'a>) -> CResult<FnLike<'b, 'a>> {
+        if f.generator || f.r#async {
+            return unsupported("generator and async functions", f.span);
+        }
+        let Some(body) = &f.body else {
+            return unsupported("function without a body", f.span);
+        };
+        let own_name = match (&f.id, f.r#type) {
+            (Some(id), FunctionType::FunctionExpression) => Some(symbol_of(id)),
+            _ => None,
+        };
+        Ok(FnLike {
+            name: f
+                .id
+                .as_ref()
+                .map(|id| id.name.as_str().to_owned())
+                .unwrap_or_default(),
+            span: f.span,
+            params: &f.params,
+            body: Body::Block(body),
+            scope: f.scope_id.get().expect("semantic analysis ran"),
+            own_name,
+        })
+    }
+
+    fn arrow(f: &'b ArrowFunctionExpression<'a>) -> CResult<FnLike<'b, 'a>> {
+        if f.r#async {
+            return unsupported("async functions", f.span);
+        }
+        let body = match &f.body {
+            ArrowFunctionBody::FunctionBody(b) => Body::Block(b),
+            e => Body::Expr(e.to_expression()),
+        };
+        Ok(FnLike {
+            name: String::new(),
+            span: f.span,
+            params: &f.params,
+            body,
+            scope: f.scope_id.get().expect("semantic analysis ran"),
+            own_name: None,
+        })
+    }
+}
+
+/// Compiles one function. `parent_stack` is the enclosing function's
+/// stack of entered environment scopes, for the closure-creation check.
+fn compile_fn(
+    an: &Analysis<'_>,
+    f: &FnLike<'_, '_>,
+    parent_stack: Option<&[ScopeId]>,
+) -> CResult<CompiledFunction> {
+    let scoping = an.scoping;
+    // Every environment scope between the function and its parent
+    // function must be entered where the closure is created, or depths
+    // computed through it would be wrong.
+    if let Some(stack) = parent_stack {
+        let mut s = scoping.scope_parent_id(f.scope);
+        while let Some(scope) = s {
+            if an.has_env(scope) && !stack.contains(&scope) {
+                return unsupported(
+                    "a closure inside a scope this compiler doesn't enter",
+                    f.span,
+                );
+            }
+            if scoping
+                .scope_flags(scope)
+                .intersects(ScopeFlags::Function | ScopeFlags::Top)
+            {
+                break;
+            }
+            s = scoping.scope_parent_id(scope);
+        }
+    }
+    if let Some(own) = f.own_name {
+        if scoping.symbol_scope_id(own) != f.scope {
+            return unsupported("a function name bound outside its function", f.span);
+        }
+    }
+    let mut g = Gen::new(an, f.scope);
+    g.own_name = f.own_name;
 
     // Parameters first, in order: r0..rP. A repeated name (sloppy mode)
     // binds the last parameter with that name.
-    let params = &func.params;
+    let params = f.params;
     if let Some(rest) = &params.rest {
         return unsupported("rest parameters", rest.span);
     }
     let count = params.items.len() as u32;
+    let mut param_syms = Vec::new();
     for (i, p) in params.items.iter().enumerate() {
         if p.initializer.is_some() {
             return unsupported("default parameter values", p.span);
@@ -146,19 +336,46 @@ pub fn compile_function<'a>(parsed: &Parsed<'a>, func: &Function<'a>) -> CResult
             return unsupported("destructuring parameters", p.span);
         };
         g.locals.insert(symbol_of(id), Reg(i as u32));
+        param_syms.push((symbol_of(id), Reg(i as u32)));
     }
     g.next_reg = count;
     g.claim_locals(count);
-    g.find_early_references(body);
+    g.find_early_references(f.body);
 
-    g.enter_lexical(body.statements.iter());
-    for stmt in &body.statements {
-        g.statement(stmt)?;
+    // Entry: the function's environment, captured parameters copied in
+    // (the last one wins for repeated names), the TDZ marker in lexical
+    // bindings, the function's own name, then hoisted declarations.
+    let fn_scope_pushed = g.enter_scope(f.scope)?;
+    for &(sym, r) in &param_syms {
+        if an.captured.contains(&sym) {
+            let slot = EnvSlot {
+                depth: 0,
+                slot: an.slot_of[&sym],
+            };
+            g.asm.store_env(slot, r);
+        }
     }
-    let r = g.temp()?;
-    g.asm.load_undefined(r);
-    g.asm.ret(r);
-    g.free(r);
+    if let Some(own) = f.own_name {
+        let t = g.temp()?;
+        g.asm.load_closure(t);
+        g.init_binding(own, f.scope, t);
+        g.free(t);
+    }
+    match f.body {
+        Body::Block(body) => {
+            g.enter_lexical(body.statements.iter());
+            g.hoist_functions(&body.statements)?;
+            for stmt in &body.statements {
+                g.statement(stmt)?;
+            }
+            let r = g.temp()?;
+            g.asm.load_undefined(r);
+            g.asm.ret(r);
+            g.free(r);
+        }
+        Body::Expr(e) => g.return_expression(e)?,
+    }
+    let _ = fn_scope_pushed;
 
     let (code, labels) = g
         .asm
@@ -178,18 +395,15 @@ pub fn compile_function<'a>(parsed: &Parsed<'a>, func: &Function<'a>) -> CResult
         .filter(|h| h.start < h.end)
         .collect();
     Ok(CompiledFunction {
-        name: func
-            .id
-            .as_ref()
-            .map(|id| id.name.as_str().to_owned())
-            .unwrap_or_default(),
+        name: f.name.clone(),
         params: count,
         registers: g.max_reg.max(count),
         constants: g.constants,
         ics: g.ics,
-        strict: scoping.scope_flags(scope).is_strict_mode(),
+        strict: scoping.scope_flags(f.scope).is_strict_mode(),
         code,
         handlers,
+        functions: g.functions,
     })
 }
 
@@ -208,6 +422,8 @@ struct Breakable {
     /// How many `finally` blocks were open when it was entered: a jump to
     /// it from deeper runs the ones in between first.
     finally_depth: usize,
+    /// How many environments were entered at its targets.
+    env_depth: usize,
 }
 
 /// An open `try … finally`. Jumps leaving it set `kind` and `value`, jump
@@ -221,6 +437,8 @@ struct Finally {
     returns: bool,
     /// (breakable index, is continue) pairs routed through this block.
     jumps: Vec<(usize, bool)>,
+    /// How many environments were entered at the `try`.
+    env_depth: usize,
 }
 
 const K_NORMAL: i32 = 0;
@@ -228,18 +446,46 @@ const K_THROW: i32 = 1;
 const K_RETURN: i32 = 2;
 const K_JUMPS: i32 = 3;
 
+/// Where a binding's value lives.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Loc {
+    Reg(Reg),
+    Env(EnvSlot),
+}
+
+/// What a store to a binding does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WriteMode {
+    Normal,
+    /// `const`, or a named function expression's name in strict code:
+    /// throws a `TypeError`.
+    Const,
+    /// A named function expression's name in sloppy code: ignored.
+    Ignore,
+}
+
 /// Where an assignment stores, and what it must check first.
 #[derive(Clone, Copy)]
 struct Target {
-    reg: Reg,
+    loc: Loc,
     sym: SymbolId,
     /// Lexical binding that may be in its TDZ: check before storing.
     tdz: bool,
-    /// `const`: the store throws a `TypeError`.
-    constant: bool,
+    mode: WriteMode,
+}
+
+impl Target {
+    /// A plain register store with no checks.
+    fn simple_reg(&self) -> Option<Reg> {
+        match self.loc {
+            Loc::Reg(r) if !self.tdz && self.mode == WriteMode::Normal => Some(r),
+            _ => None,
+        }
+    }
 }
 
 struct Gen<'s> {
+    an: &'s Analysis<'s>,
     scoping: &'s Scoping,
     scope: ScopeId,
     asm: Assembler,
@@ -247,8 +493,8 @@ struct Gen<'s> {
     /// Lexical bindings (`let`, `const`) whose declaration has been
     /// compiled.
     initialized: HashSet<SymbolId>,
-    /// Lexical bindings that may be used in their TDZ: they start as the
-    /// marker and every use checks it (D-034). The rest are proven safe.
+    /// Lexical bindings in registers that may be used in their TDZ: they
+    /// start as the marker and every use checks it (D-034).
     needs_tdz: HashSet<SymbolId>,
     next_reg: u32,
     max_reg: u32,
@@ -264,14 +510,28 @@ struct Gen<'s> {
     finallies: Vec<Finally>,
     /// Names of the catch parameters around the code being compiled.
     catch_names: Vec<String>,
+    /// Scopes whose environments are entered here, innermost last.
+    scope_stack: Vec<ScopeId>,
+    functions: Vec<CompiledFunction>,
+    /// Function declarations already created at their scope's entry.
+    hoisted: HashSet<u32>,
+    own_name: Option<SymbolId>,
+    /// Inside a `try` block (or the `catch` of a `try … finally`): no
+    /// tail calls.
+    no_tail: u32,
+    /// Whether any scope of this function has an environment (then `try`
+    /// saves and restores the current one).
+    uses_envs: bool,
 }
 
 const MAX_OPERAND: u32 = i32::MAX as u32;
 
 impl<'s> Gen<'s> {
-    fn new(scoping: &'s Scoping, scope: ScopeId) -> Gen<'s> {
+    fn new(an: &'s Analysis<'s>, scope: ScopeId) -> Gen<'s> {
+        let uses_envs = an.env_slots.keys().any(|&s| owner(an.scoping, s) == scope);
         Gen {
-            scoping,
+            an,
+            scoping: an.scoping,
             scope,
             asm: Assembler::new(),
             locals: HashMap::new(),
@@ -287,36 +547,33 @@ impl<'s> Gen<'s> {
             handlers: Vec::new(),
             finallies: Vec::new(),
             catch_names: Vec::new(),
+            scope_stack: Vec::new(),
+            functions: Vec::new(),
+            hoisted: HashSet::new(),
+            own_name: None,
+            no_tail: 0,
+            uses_envs,
         }
     }
 
-    /// The function scope that owns `scope`: the nearest enclosing scope
-    /// that is a function (or the top level).
-    fn owner(&self, mut scope: ScopeId) -> ScopeId {
-        loop {
-            if self
-                .scoping
-                .scope_flags(scope)
-                .intersects(ScopeFlags::Function | ScopeFlags::Top)
-            {
-                return scope;
-            }
-            match self.scoping.scope_parent_id(scope) {
-                Some(p) => scope = p,
-                None => return scope,
-            }
-        }
+    fn env_depth(&self) -> usize {
+        self.scope_stack.len()
+    }
+
+    fn strict(&self) -> bool {
+        self.scoping.scope_flags(self.scope).is_strict_mode()
     }
 
     /// Gives every binding declared in this function (outside its nested
-    /// functions) a register after the parameters, in symbol order.
+    /// functions) that no nested function uses a register after the
+    /// parameters, in symbol order.
     fn claim_locals(&mut self, params: u32) {
         let mut next = params;
         for sym in self.scoping.symbol_ids() {
-            if self.locals.contains_key(&sym) {
+            if self.locals.contains_key(&sym) || self.an.captured.contains(&sym) {
                 continue;
             }
-            if self.owner(self.scoping.symbol_scope_id(sym)) == self.scope {
+            if owner(self.scoping, self.scoping.symbol_scope_id(sym)) == self.scope {
                 self.locals.insert(sym, Reg(next));
                 next += 1;
             }
@@ -325,17 +582,20 @@ impl<'s> Gen<'s> {
         self.max_reg = next;
     }
 
-    /// Finds the lexical bindings with a use that comes textually before
-    /// the end of their declaration (so it may run in the TDZ). Within one
-    /// function without closures, textual order is execution order for
-    /// everything except `switch`, which [`Gen::switch`] handles.
-    fn find_early_references(&mut self, body: &FunctionBody<'_>) {
+    /// Finds the register-held lexical bindings with a use that comes
+    /// textually before the end of their declaration (so it may run in the
+    /// TDZ). Within one function, textual order is execution order for
+    /// bindings no closure uses, except in `switch` ([`Gen::switch`]).
+    fn find_early_references(&mut self, body: Body<'_, '_>) {
         let mut v = UseOrder {
             scoping: self.scoping,
             first_use: HashMap::new(),
             decl_end: HashMap::new(),
         };
-        v.visit_function_body(body);
+        match body {
+            Body::Block(b) => v.visit_function_body(b),
+            Body::Expr(e) => v.visit_expression(e),
+        }
         for (sym, end) in v.decl_end {
             if v.first_use.get(&sym).is_some_and(|&start| start < end)
                 && is_lexical(self.scoping.symbol_flags(sym))
@@ -345,8 +605,49 @@ impl<'s> Gen<'s> {
         }
     }
 
-    /// At the start of a scope: puts the TDZ marker into the lexical
-    /// bindings declared directly in `stmts` that need run-time checks.
+    /// Enters `scope`'s environment if it has one: pushes it and puts the
+    /// TDZ marker in its lexical bindings. Returns whether it pushed.
+    fn enter_scope(&mut self, scope: ScopeId) -> CResult<bool> {
+        let Some(slots) = self.an.env_slots.get(&scope) else {
+            return Ok(false);
+        };
+        let n = u32::try_from(slots.len())
+            .map_err(|_| CompileError::TooLarge("environment slots".into()))?;
+        self.asm.push_env(Count(n));
+        self.scope_stack.push(scope);
+        let lexical: Vec<u32> = slots
+            .iter()
+            .filter(|&&s| is_lexical(self.scoping.symbol_flags(s)))
+            .map(|s| self.an.slot_of[s])
+            .collect();
+        if !lexical.is_empty() {
+            let t = self.temp()?;
+            self.asm.load_uninitialized(t);
+            for slot in lexical {
+                self.asm.store_env(EnvSlot { depth: 0, slot }, t);
+            }
+            self.free(t);
+        }
+        Ok(true)
+    }
+
+    /// Leaves a scope entered by [`Gen::enter_scope`] on the normal path.
+    fn leave_scope(&mut self, pushed: bool) {
+        if pushed {
+            self.asm.pop_env();
+            self.scope_stack.pop();
+        }
+    }
+
+    /// Emits `n` `PopEnv`s (for a jump out of `n` entered scopes).
+    fn pop_envs(&mut self, n: usize) {
+        for _ in 0..n {
+            self.asm.pop_env();
+        }
+    }
+
+    /// At the start of a scope: puts the TDZ marker into the register-held
+    /// lexical bindings declared directly in `stmts` that need checks.
     fn enter_lexical<'b, 'c: 'b>(&mut self, stmts: impl Iterator<Item = &'b Statement<'c>>) {
         for s in stmts {
             if let Statement::VariableDeclaration(d) = s {
@@ -369,6 +670,33 @@ impl<'s> Gen<'s> {
                 }
             }
         }
+    }
+
+    /// Creates the closures of the function declarations in `stmts` (a
+    /// function body) and stores them in their bindings.
+    fn hoist_functions(&mut self, stmts: &[Statement<'_>]) -> CResult<()> {
+        for s in stmts {
+            if let Statement::FunctionDeclaration(fd) = s {
+                let f = FnLike::function(fd)?;
+                let id = fd.id.as_ref().expect("declarations have names");
+                let func = self.nested(&f)?;
+                let t = self.temp()?;
+                self.asm.create_closure(t, func);
+                self.init_binding(symbol_of(id), self.scope, t);
+                self.free(t);
+                self.hoisted.insert(fd.span.start);
+            }
+        }
+        Ok(())
+    }
+
+    /// Compiles a nested function and returns its index.
+    fn nested(&mut self, f: &FnLike<'_, '_>) -> CResult<Func> {
+        let compiled = compile_fn(self.an, f, Some(&self.scope_stack))?;
+        let i = u32::try_from(self.functions.len())
+            .map_err(|_| CompileError::TooLarge("nested functions".into()))?;
+        self.functions.push(compiled);
+        Ok(Func(i))
     }
 
     fn temp(&mut self) -> CResult<Reg> {
@@ -424,40 +752,76 @@ impl<'s> Gen<'s> {
 
     // ---- bindings ----
 
-    /// The register of the local an identifier reference resolves to.
+    /// The binding an identifier reference resolves to, and the scope the
+    /// reference is in.
     fn resolve(&self, id: &IdentifierReference<'_>) -> Option<SymbolId> {
         let rid = id.reference_id.get()?;
         self.scoping.get_reference(rid).symbol_id()
     }
 
-    fn local_for(&self, sym: SymbolId, span: oxc_span::Span) -> CResult<Reg> {
-        match self.locals.get(&sym) {
-            Some(&r) => Ok(r),
-            None => unsupported("variables of an enclosing function (closures)", span),
-        }
+    fn reference_scope(&self, id: &IdentifierReference<'_>) -> ScopeId {
+        let rid = id.reference_id.get().expect("semantic analysis ran");
+        self.scoping.get_reference(rid).scope_id()
     }
 
-    /// The register to read for `id`, after its TDZ check.
-    fn read_local(&mut self, id: &IdentifierReference<'_>) -> CResult<Option<Reg>> {
-        let Some(sym) = self.resolve(id) else {
-            return Ok(None);
-        };
-        let r = self.local_for(sym, id.span)?;
-        if self.binding_kind(sym, id.span)? {
-            self.asm.check_initialized(r);
+    /// Where `sym` lives, seen from code in scope `from`.
+    fn locate(&self, sym: SymbolId, from: ScopeId, span: oxc_span::Span) -> CResult<Loc> {
+        if !self.an.captured.contains(&sym) {
+            return match self.locals.get(&sym) {
+                Some(&r) => Ok(Loc::Reg(r)),
+                None => unsupported("a binding outside the compiled function", span),
+            };
         }
-        Ok(Some(r))
+        let home = self.scoping.symbol_scope_id(sym);
+        if !self.an.in_root(home) {
+            return unsupported("a binding outside the compiled function", span);
+        }
+        let mut depth = 0u32;
+        let mut s = from;
+        let mut in_this_function = true;
+        loop {
+            if s == home {
+                break;
+            }
+            if self.an.has_env(s) {
+                if in_this_function && !self.scope_stack.contains(&s) {
+                    return unsupported("a scope this compiler doesn't enter", span);
+                }
+                depth += 1;
+            }
+            if s == self.scope {
+                in_this_function = false;
+            }
+            match self.scoping.scope_parent_id(s) {
+                Some(p) => s = p,
+                None => return unsupported("a binding outside the compiled function", span),
+            }
+        }
+        // A binding of an enclosing function is on the closure's chain
+        // (checked when the closure was created); one of this function must
+        // be in an entered scope.
+        if in_this_function && !self.scope_stack.contains(&home) {
+            return unsupported("a scope this compiler doesn't enter", span);
+        }
+        Ok(Loc::Env(EnvSlot {
+            depth,
+            slot: self.an.slot_of[&sym],
+        }))
     }
 
     /// Rejects bindings this part can't handle; returns whether a use
     /// needs a run-time TDZ check.
-    fn binding_kind(&self, sym: SymbolId, span: oxc_span::Span) -> CResult<bool> {
+    fn binding_kind(&self, sym: SymbolId, loc: Loc, span: oxc_span::Span) -> CResult<bool> {
         let flags = self.scoping.symbol_flags(sym);
-        if flags.intersects(SymbolFlags::Function | SymbolFlags::Class) {
-            return unsupported("function and class bindings", span);
+        if flags.intersects(SymbolFlags::Class) {
+            return unsupported("class bindings", span);
         }
         if !is_lexical(flags) {
             return Ok(false);
+        }
+        if let Loc::Env(_) = loc {
+            // Closures can run at any time: always check.
+            return Ok(true);
         }
         if self.needs_tdz.contains(&sym) {
             return Ok(true);
@@ -469,56 +833,127 @@ impl<'s> Gen<'s> {
         Ok(false)
     }
 
+    /// Reads `id` into a register (its own, for a register local), after
+    /// its TDZ check. `None` for a global.
+    fn read_binding(&mut self, id: &IdentifierReference<'_>) -> CResult<Option<Operand>> {
+        let Some(sym) = self.resolve(id) else {
+            return Ok(None);
+        };
+        let loc = self.locate(sym, self.reference_scope(id), id.span)?;
+        let check = self.binding_kind(sym, loc, id.span)?;
+        Ok(Some(match loc {
+            Loc::Reg(r) => {
+                if check {
+                    self.asm.check_initialized(r);
+                }
+                Operand {
+                    reg: r,
+                    temp: false,
+                }
+            }
+            Loc::Env(slot) => {
+                let t = self.temp()?;
+                self.asm.load_env(t, slot);
+                if check {
+                    self.asm.check_initialized(t);
+                }
+                Operand { reg: t, temp: true }
+            }
+        }))
+    }
+
+    /// Initializes `sym` (seen from `from`) with `v`: no TDZ or const
+    /// checks.
+    fn init_binding(&mut self, sym: SymbolId, from: ScopeId, v: Reg) {
+        let loc = self
+            .locate(sym, from, oxc_span::Span::default())
+            .expect("a binding of this function");
+        match loc {
+            Loc::Reg(r) if r != v => self.asm.mov(r, v),
+            Loc::Reg(_) => {}
+            Loc::Env(slot) => self.asm.store_env(slot, v),
+        }
+    }
+
     /// Where an assignment to `id` stores.
     fn write_target(&self, id: &IdentifierReference<'_>) -> CResult<Target> {
         let Some(sym) = self.resolve(id) else {
             return unsupported("assignment to a global variable", id.span);
         };
-        let reg = self.local_for(sym, id.span)?;
-        let tdz = self.binding_kind(sym, id.span)?;
-        let constant = self
-            .scoping
-            .symbol_flags(sym)
-            .contains(SymbolFlags::ConstVariable);
+        let loc = self.locate(sym, self.reference_scope(id), id.span)?;
+        let tdz = self.binding_kind(sym, loc, id.span)?;
+        let flags = self.scoping.symbol_flags(sym);
+        let own_name = self.own_name == Some(sym)
+            || (flags.contains(SymbolFlags::FunctionExpression)
+                && !flags.intersects(SymbolFlags::Variable));
+        let mode = if flags.contains(SymbolFlags::ConstVariable) {
+            WriteMode::Const
+        } else if own_name {
+            // The name of a named function expression is immutable.
+            if self.strict() {
+                WriteMode::Const
+            } else {
+                WriteMode::Ignore
+            }
+        } else {
+            WriteMode::Normal
+        };
         Ok(Target {
-            reg,
+            loc,
             sym,
             tdz,
-            constant,
+            mode,
         })
     }
 
     /// Reads an assignment target's current value (with its TDZ check),
     /// for compound and logical assignments and updates.
-    fn read_target(&mut self, t: Target) {
-        if t.tdz {
-            self.asm.check_initialized(t.reg);
-        }
+    fn read_target(&mut self, t: Target) -> CResult<Operand> {
+        Ok(match t.loc {
+            Loc::Reg(r) => {
+                if t.tdz {
+                    self.asm.check_initialized(r);
+                }
+                Operand {
+                    reg: r,
+                    temp: false,
+                }
+            }
+            Loc::Env(slot) => {
+                let v = self.temp()?;
+                self.asm.load_env(v, slot);
+                if t.tdz {
+                    self.asm.check_initialized(v);
+                }
+                Operand { reg: v, temp: true }
+            }
+        })
     }
 
-    /// Stores `e`'s value in `t`: SetMutableBinding, after `e` ran.
-    fn store(&mut self, t: Target, e: &Expression<'_>) -> CResult<()> {
-        if t.constant || t.tdz {
-            let v = self.temp()?;
-            self.expr_to(e, v)?;
-            self.store_reg(t, v);
-            self.free(v);
-            Ok(())
-        } else {
-            self.assign_local(t.reg, t.sym, e)
-        }
-    }
-
-    /// Stores register `v` in `t`.
-    fn store_reg(&mut self, t: Target, v: Reg) {
+    /// Stores register `v` in `t`: SetMutableBinding (TDZ check, then the
+    /// const check).
+    fn store_reg(&mut self, t: Target, v: Reg) -> CResult<()> {
         if t.tdz {
-            self.asm.check_initialized(t.reg);
+            match t.loc {
+                Loc::Reg(r) => self.asm.check_initialized(r),
+                Loc::Env(slot) => {
+                    let c = self.temp()?;
+                    self.asm.load_env(c, slot);
+                    self.asm.check_initialized(c);
+                    self.free(c);
+                }
+            }
         }
-        if t.constant {
-            self.asm.throw_const_assign();
-        } else if v != t.reg {
-            self.asm.mov(t.reg, v);
+        match t.mode {
+            WriteMode::Const => self.asm.throw_const_assign(),
+            WriteMode::Ignore => {}
+            WriteMode::Normal => match t.loc {
+                Loc::Reg(r) if r != v => self.asm.mov(r, v),
+                Loc::Reg(_) => {}
+                Loc::Env(slot) => self.asm.store_env(slot, v),
+            },
         }
+        Ok(())
     }
 
     // ---- statements ----
@@ -540,6 +975,7 @@ impl<'s> Gen<'s> {
                     continue_to: None,
                     unlabeled_break: false,
                     finally_depth: self.finallies.len(),
+                    env_depth: self.env_depth(),
                 });
                 let r = self.statement(&l.body);
                 self.breakables.pop();
@@ -551,6 +987,10 @@ impl<'s> Gen<'s> {
             Statement::EmptyStatement(_) | Statement::DebuggerStatement(_) => Ok(()),
             Statement::ExpressionStatement(e) => self.effect(&e.expression),
             Statement::VariableDeclaration(d) => self.declaration(d),
+            Statement::FunctionDeclaration(f) if self.hoisted.contains(&f.span.start) => Ok(()),
+            Statement::FunctionDeclaration(f) => {
+                unsupported("function declarations in blocks (Annex B)", f.span)
+            }
             Statement::IfStatement(i) => {
                 let cond = self.expr_any(&i.test)?;
                 let else_ = self.asm.new_label();
@@ -591,30 +1031,7 @@ impl<'s> Gen<'s> {
                 self.asm.bind(done);
                 Ok(())
             }
-            Statement::ForStatement(f) => {
-                match &f.init {
-                    None => {}
-                    Some(ForStatementInit::VariableDeclaration(d)) => {
-                        self.mark_uninitialized(d);
-                        self.declaration(d)?
-                    }
-                    Some(init) => self.effect(init.to_expression())?,
-                }
-                let top = self.asm.new_label();
-                let (cont, done) = (self.asm.new_label(), self.asm.new_label());
-                self.asm.bind(top);
-                if let Some(test) = &f.test {
-                    self.branch_if_false(test, done)?;
-                }
-                self.loop_body(labels, &f.body, done, cont)?;
-                self.asm.bind(cont);
-                if let Some(update) = &f.update {
-                    self.effect(update)?;
-                }
-                self.asm.jump_loop(top);
-                self.asm.bind(done);
-                Ok(())
-            }
+            Statement::ForStatement(f) => self.for_statement(f, labels),
             Statement::BreakStatement(b) => {
                 let target = self.find_target(b.label.as_ref(), false, b.span)?;
                 self.jump_to(target, false)
@@ -623,31 +1040,22 @@ impl<'s> Gen<'s> {
                 let target = self.find_target(c.label.as_ref(), true, c.span)?;
                 self.jump_to(target, true)
             }
-            Statement::ReturnStatement(r) => {
-                if self.finallies.is_empty() {
-                    match &r.argument {
-                        Some(e) => {
-                            let v = self.expr_any(e)?;
-                            self.asm.ret(v.reg);
-                            self.release(v);
-                        }
-                        None => {
-                            let t = self.temp()?;
-                            self.asm.load_undefined(t);
-                            self.asm.ret(t);
-                            self.free(t);
-                        }
+            Statement::ReturnStatement(r) => match &r.argument {
+                Some(e) => self.return_expression(e),
+                None => {
+                    if self.finallies.is_empty() {
+                        let t = self.temp()?;
+                        self.asm.load_undefined(t);
+                        self.asm.ret(t);
+                        self.free(t);
+                    } else {
+                        let value = self.finallies.last().expect("checked").value;
+                        self.asm.load_undefined(value);
+                        self.return_value(value);
                     }
-                    return Ok(());
+                    Ok(())
                 }
-                let value = self.finallies.last().expect("checked").value;
-                match &r.argument {
-                    Some(e) => self.expr_to(e, value)?,
-                    None => self.asm.load_undefined(value),
-                }
-                self.return_value(value);
-                Ok(())
-            }
+            },
             Statement::TryStatement(t) => self.try_statement(t),
             Statement::ThrowStatement(t) => {
                 let v = self.expr_any(&t.argument)?;
@@ -666,6 +1074,120 @@ impl<'s> Gen<'s> {
         Ok(())
     }
 
+    /// `return e`: a proper tail call when `e` is a call in tail position
+    /// of strict code (D-021), else evaluate and return (through any open
+    /// `finally`).
+    fn return_expression(&mut self, e: &Expression<'_>) -> CResult<()> {
+        if self.strict() && self.finallies.is_empty() && self.no_tail == 0 {
+            return self.tail_return(e);
+        }
+        if self.finallies.is_empty() {
+            let v = self.expr_any(e)?;
+            self.asm.ret(v.reg);
+            self.release(v);
+        } else {
+            let value = self.finallies.last().expect("checked").value;
+            self.expr_to(e, value)?;
+            self.return_value(value);
+        }
+        Ok(())
+    }
+
+    /// `return e` where `e` is in tail position: calls in tail position
+    /// within it (through `?:`, `&&`, `||`, `??` and `,`) become tail calls.
+    fn tail_return(&mut self, e: &Expression<'_>) -> CResult<()> {
+        match e {
+            Expression::ParenthesizedExpression(p) => self.tail_return(&p.expression),
+            Expression::CallExpression(c) => {
+                let call = self.call_operands(c)?;
+                self.asm
+                    .tail_call(call.callee, call.this, call.args, call.argc);
+                self.free_call(call);
+                Ok(())
+            }
+            Expression::ConditionalExpression(c) => {
+                let else_ = self.asm.new_label();
+                self.branch_if_false(&c.test, else_)?;
+                self.tail_return(&c.consequent)?;
+                self.asm.bind(else_);
+                self.tail_return(&c.alternate)
+            }
+            Expression::LogicalExpression(l) => {
+                let v = self.temp()?;
+                self.expr_to(&l.left, v)?;
+                let right = self.asm.new_label();
+                match l.operator {
+                    LogicalOperator::And => self.asm.jump_if_true(v, right),
+                    LogicalOperator::Or => self.asm.jump_if_false(v, right),
+                    LogicalOperator::Coalesce => {
+                        let done = self.asm.new_label();
+                        self.asm.jump_if_not_nullish(v, done);
+                        self.asm.jump(right);
+                        self.asm.bind(done);
+                    }
+                }
+                self.asm.ret(v);
+                self.free(v);
+                self.asm.bind(right);
+                self.tail_return(&l.right)
+            }
+            Expression::SequenceExpression(s) => {
+                let (last, rest) = s.expressions.split_last().expect("at least two");
+                for e in rest {
+                    self.effect(e)?;
+                }
+                self.tail_return(last)
+            }
+            _ => {
+                let v = self.expr_any(e)?;
+                self.asm.ret(v.reg);
+                self.release(v);
+                Ok(())
+            }
+        }
+    }
+
+    fn for_statement(&mut self, f: &ForStatement<'_>, labels: Vec<String>) -> CResult<()> {
+        let scope = f.scope_id.get().expect("semantic analysis ran");
+        let pushed = self.enter_scope(scope)?;
+        match &f.init {
+            None => {}
+            Some(ForStatementInit::VariableDeclaration(d)) => {
+                self.mark_uninitialized(d);
+                self.declaration(d)?
+            }
+            Some(init) => self.effect(init.to_expression())?,
+        }
+        // Closures in the body capture this iteration's copy of the loop
+        // variables (CreatePerIterationEnvironment).
+        if pushed {
+            self.asm.copy_env();
+        }
+        let top = self.asm.new_label();
+        let (cont, exit, done) = (
+            self.asm.new_label(),
+            self.asm.new_label(),
+            self.asm.new_label(),
+        );
+        self.asm.bind(top);
+        if let Some(test) = &f.test {
+            self.branch_if_false(test, exit)?;
+        }
+        self.loop_body(labels, &f.body, exit, cont)?;
+        self.asm.bind(cont);
+        if pushed {
+            self.asm.copy_env();
+        }
+        if let Some(update) = &f.update {
+            self.effect(update)?;
+        }
+        self.asm.jump_loop(top);
+        self.asm.bind(exit);
+        self.leave_scope(pushed);
+        self.asm.bind(done);
+        Ok(())
+    }
+
     fn switch(&mut self, sw: &SwitchStatement<'_>, labels: Vec<String>) -> CResult<()> {
         // The discriminant is evaluated before the case block's scope
         // exists, and kept in a temporary the cases can't assign.
@@ -679,6 +1201,7 @@ impl<'s> Gen<'s> {
                 self.needs_tdz.insert(sym);
             }
         }
+        let pushed = self.enter_scope(scope)?;
         self.enter_lexical(sw.cases.iter().flat_map(|c| c.consequent.iter()));
 
         let bodies: Vec<AsmLabel> = sw.cases.iter().map(|_| self.asm.new_label()).collect();
@@ -703,6 +1226,7 @@ impl<'s> Gen<'s> {
             continue_to: None,
             unlabeled_break: true,
             finally_depth: self.finallies.len(),
+            env_depth: self.env_depth(),
         });
         let mut result = Ok(());
         for (case, &body) in sw.cases.iter().zip(&bodies) {
@@ -715,6 +1239,7 @@ impl<'s> Gen<'s> {
         self.breakables.pop();
         result?;
         self.asm.bind(end);
+        self.leave_scope(pushed);
         self.free(d);
         Ok(())
     }
@@ -732,6 +1257,7 @@ impl<'s> Gen<'s> {
             continue_to: Some(continue_to),
             unlabeled_break: true,
             finally_depth: self.finallies.len(),
+            env_depth: self.env_depth(),
         });
         let r = self.statement(body);
         self.breakables.pop();
@@ -763,8 +1289,9 @@ impl<'s> Gen<'s> {
         unsupported("break or continue outside the compiled function", span)
     }
 
-    /// Jumps to breakable `index` (its continue or break label), running
-    /// the `finally` blocks in between first.
+    /// Jumps to breakable `index` (its continue or break label), leaving
+    /// the environments entered since and running the `finally` blocks in
+    /// between first.
     fn jump_to(&mut self, index: usize, is_continue: bool) -> CResult<()> {
         let b = &self.breakables[index];
         let label = if is_continue {
@@ -773,9 +1300,12 @@ impl<'s> Gen<'s> {
             b.break_to
         };
         if b.finally_depth == self.finallies.len() {
+            let pops = self.env_depth() - b.env_depth;
+            self.pop_envs(pops);
             self.asm.jump(label);
             return Ok(());
         }
+        let depth = self.env_depth();
         let f = self.finallies.last_mut().expect("deeper than the target");
         let i = match f.jumps.iter().position(|&j| j == (index, is_continue)) {
             Some(i) => i,
@@ -784,10 +1314,11 @@ impl<'s> Gen<'s> {
                 f.jumps.len() - 1
             }
         };
-        let (kind, fin) = (f.kind, f.fin);
+        let (kind, fin, f_depth) = (f.kind, f.fin, f.env_depth);
         let k = K_JUMPS
             .checked_add(i32::try_from(i).unwrap_or(i32::MAX))
             .ok_or_else(|| CompileError::TooLarge("jumps out of finally".into()))?;
+        self.pop_envs(depth - f_depth);
         self.asm.load_int(kind, Imm(k));
         self.asm.jump(fin);
         Ok(())
@@ -796,16 +1327,29 @@ impl<'s> Gen<'s> {
     /// Returns the value in register `value`, which must be the innermost
     /// open finally's value register if there is one.
     fn return_value(&mut self, value: Reg) {
+        let depth = self.env_depth();
         match self.finallies.last_mut() {
             None => self.asm.ret(value),
             Some(f) => {
                 debug_assert_eq!(f.value, value);
                 f.returns = true;
-                let (kind, fin) = (f.kind, f.fin);
+                let (kind, fin, f_depth) = (f.kind, f.fin, f.env_depth);
+                self.pop_envs(depth - f_depth);
                 self.asm.load_int(kind, Imm(K_RETURN));
                 self.asm.jump(fin);
             }
         }
+    }
+
+    /// When this function has environments: a register holding the
+    /// current one, for handlers to restore.
+    fn save_env(&mut self) -> CResult<Option<Reg>> {
+        if !self.uses_envs {
+            return Ok(None);
+        }
+        let r = self.temp()?;
+        self.asm.get_env(r);
+        Ok(Some(r))
     }
 
     fn try_statement(&mut self, t: &TryStatement<'_>) -> CResult<()> {
@@ -813,6 +1357,7 @@ impl<'s> Gen<'s> {
             let handler = t.handler.as_ref().expect("try has catch or finally");
             return self.try_catch(&t.block, handler);
         };
+        let saved = self.save_env()?;
         let kind = self.temp()?;
         let value = self.temp()?;
         let (start, end, handler, fin) = (
@@ -827,12 +1372,15 @@ impl<'s> Gen<'s> {
             value,
             returns: false,
             jumps: Vec::new(),
+            env_depth: self.env_depth(),
         });
         self.asm.bind(start);
+        self.no_tail += 1;
         let body = match &t.handler {
             Some(c) => self.try_catch(&t.block, c),
             None => self.block(&t.block),
         };
+        self.no_tail -= 1;
         let f = self.finallies.pop().expect("pushed above");
         body?;
         self.asm.bind(end);
@@ -841,6 +1389,9 @@ impl<'s> Gen<'s> {
         // A throw anywhere in the try block or the catch block lands here.
         self.handlers.push((start, end, handler, value));
         self.asm.bind(handler);
+        if let Some(saved) = saved {
+            self.asm.set_env(saved);
+        }
         self.asm.load_int(kind, Imm(K_THROW));
         self.asm.bind(fin);
         self.block(finalizer)?;
@@ -881,20 +1432,27 @@ impl<'s> Gen<'s> {
         self.free(t);
         self.free(value);
         self.free(kind);
+        if let Some(saved) = saved {
+            self.free(saved);
+        }
         Ok(())
     }
 
     fn try_catch(&mut self, block: &BlockStatement<'_>, c: &CatchClause<'_>) -> CResult<()> {
-        let (exception, temp, name) = match &c.param {
-            None => (self.temp()?, true, None),
+        let catch_scope = c.scope_id.get().expect("semantic analysis ran");
+        // The exception lands in a temporary; the parameter is bound once
+        // the catch scope (and maybe its environment) exists.
+        let exception = self.temp()?;
+        let param = match &c.param {
+            None => None,
             Some(p) => {
                 let BindingPattern::BindingIdentifier(id) = &p.pattern else {
                     return unsupported("destructuring catch parameters", p.span);
                 };
-                let r = self.local_for(symbol_of(id), id.span)?;
-                (r, false, Some(id.name.as_str().to_owned()))
+                Some((symbol_of(id), id.name.as_str().to_owned()))
             }
         };
+        let saved = self.save_env()?;
         let (start, end, handler, done) = (
             self.asm.new_label(),
             self.asm.new_label(),
@@ -902,30 +1460,57 @@ impl<'s> Gen<'s> {
             self.asm.new_label(),
         );
         self.asm.bind(start);
-        self.block(block)?;
+        self.no_tail += 1;
+        let r = self.block(block);
+        self.no_tail -= 1;
+        r?;
         self.asm.bind(end);
         self.asm.jump(done);
         self.handlers.push((start, end, handler, exception));
         self.asm.bind(handler);
-        let pushed = name.is_some();
+        if let Some(saved) = saved {
+            self.asm.set_env(saved);
+        }
+        // oxc binds the parameter in the catch body's block scope.
+        let body_scope = c.body.scope_id.get().expect("semantic analysis ran");
+        let pushed_clause = self.enter_scope(catch_scope)?;
+        let pushed_body = self.enter_scope(body_scope)?;
+        self.enter_lexical(c.body.body.iter());
+        let mut name = None;
+        if let Some((sym, n)) = param {
+            let home = self.scoping.symbol_scope_id(sym);
+            if home != body_scope && home != catch_scope {
+                return unsupported("a catch parameter in an unexpected scope", c.span);
+            }
+            self.init_binding(sym, home, exception);
+            name = Some(n);
+        }
+        let named = name.is_some();
         if let Some(n) = name {
             self.catch_names.push(n);
         }
-        let r = self.block(&c.body);
-        if pushed {
+        let r = self.statements(&c.body.body);
+        if named {
             self.catch_names.pop();
         }
         r?;
+        self.leave_scope(pushed_body);
+        self.leave_scope(pushed_clause);
         self.asm.bind(done);
-        if temp {
-            self.free(exception);
+        if let Some(saved) = saved {
+            self.free(saved);
         }
+        self.free(exception);
         Ok(())
     }
 
     fn block(&mut self, b: &BlockStatement<'_>) -> CResult<()> {
+        let scope = b.scope_id.get().expect("semantic analysis ran");
+        let pushed = self.enter_scope(scope)?;
         self.enter_lexical(b.body.iter());
-        self.statements(&b.body)
+        self.statements(&b.body)?;
+        self.leave_scope(pushed);
+        Ok(())
     }
 
     fn declaration(&mut self, d: &VariableDeclaration<'_>) -> CResult<()> {
@@ -948,13 +1533,26 @@ impl<'s> Gen<'s> {
                 return unsupported("`var` redeclaring a catch parameter", id.span);
             }
             let sym = symbol_of(id);
-            let r = self.local_for(sym, id.span)?;
-            match &decl.init {
-                Some(init) => self.assign_local(r, sym, init)?,
+            let home = self.scoping.symbol_scope_id(sym);
+            let loc = self.locate(sym, home, id.span)?;
+            match (&decl.init, loc) {
+                (Some(init), Loc::Reg(r)) => self.assign_local(r, sym, init)?,
+                (Some(init), Loc::Env(slot)) => {
+                    let t = self.temp()?;
+                    self.expr_to(init, t)?;
+                    self.asm.store_env(slot, t);
+                    self.free(t);
+                }
                 // `let x;` sets undefined each time it runs (loops!); `var x;`
                 // does nothing.
-                None if d.kind != VariableDeclarationKind::Var => self.asm.load_undefined(r),
-                None => {}
+                (None, _) if d.kind == VariableDeclarationKind::Var => {}
+                (None, Loc::Reg(r)) => self.asm.load_undefined(r),
+                (None, Loc::Env(slot)) => {
+                    let t = self.temp()?;
+                    self.asm.load_undefined(t);
+                    self.asm.store_env(slot, t);
+                    self.free(t);
+                }
             }
             if d.kind != VariableDeclarationKind::Var {
                 self.initialized.insert(sym);
@@ -1017,11 +1615,8 @@ impl<'s> Gen<'s> {
             return self.expr_any(&p.expression);
         }
         if let Expression::Identifier(id) = e {
-            if let Some(r) = self.read_local(id)? {
-                return Ok(Operand {
-                    reg: r,
-                    temp: false,
-                });
+            if let Some(o) = self.read_binding(id)? {
+                return Ok(o);
             }
         }
         let t = self.temp()?;
@@ -1052,27 +1647,42 @@ impl<'s> Gen<'s> {
                 self.asm.load_null(dst);
                 Ok(())
             }
-            Expression::Identifier(id) => match self.read_local(id)? {
-                Some(r) => {
-                    if r != dst {
-                        self.asm.mov(dst, r);
+            Expression::Identifier(id) => {
+                let Some(sym) = self.resolve(id) else {
+                    // Unresolved: a global. These three are non-writable,
+                    // non-configurable properties of the global object, and
+                    // nothing in this subset can shadow them dynamically
+                    // (`with` and direct `eval` are unsupported).
+                    return match id.name.as_str() {
+                        "undefined" => {
+                            self.asm.load_undefined(dst);
+                            Ok(())
+                        }
+                        "NaN" => self.load_number(dst, f64::NAN),
+                        "Infinity" => self.load_number(dst, f64::INFINITY),
+                        _ => unsupported("global variables", id.span),
+                    };
+                };
+                let loc = self.locate(sym, self.reference_scope(id), id.span)?;
+                let check = self.binding_kind(sym, loc, id.span)?;
+                match loc {
+                    Loc::Reg(r) => {
+                        if check {
+                            self.asm.check_initialized(r);
+                        }
+                        if r != dst {
+                            self.asm.mov(dst, r);
+                        }
                     }
-                    Ok(())
+                    Loc::Env(slot) => {
+                        self.asm.load_env(dst, slot);
+                        if check {
+                            self.asm.check_initialized(dst);
+                        }
+                    }
                 }
-                // Unresolved: a global. These three are non-writable,
-                // non-configurable properties of the global object, and
-                // nothing in this subset can shadow them dynamically
-                // (`with` and direct `eval` are unsupported).
-                None => match id.name.as_str() {
-                    "undefined" => {
-                        self.asm.load_undefined(dst);
-                        Ok(())
-                    }
-                    "NaN" => self.load_number(dst, f64::NAN),
-                    "Infinity" => self.load_number(dst, f64::INFINITY),
-                    _ => unsupported("global variables", id.span),
-                },
-            },
+                Ok(())
+            }
             Expression::UnaryExpression(u) => self.unary(u, dst),
             Expression::BinaryExpression(b) => self.binary(b, dst),
             Expression::LogicalExpression(l) => {
@@ -1106,8 +1716,72 @@ impl<'s> Gen<'s> {
             }
             Expression::AssignmentExpression(a) => self.assignment(a, dst),
             Expression::UpdateExpression(u) => self.update(u, Some(dst)),
+            Expression::FunctionExpression(f) => {
+                let f = FnLike::function(f)?;
+                let func = self.nested(&f)?;
+                self.asm.create_closure(dst, func);
+                Ok(())
+            }
+            Expression::ArrowFunctionExpression(f) => {
+                let f = FnLike::arrow(f)?;
+                let func = self.nested(&f)?;
+                self.asm.create_closure(dst, func);
+                Ok(())
+            }
+            Expression::CallExpression(c) => {
+                let call = self.call_operands(c)?;
+                self.asm
+                    .call(dst, call.callee, call.this, call.args, call.argc);
+                self.free_call(call);
+                Ok(())
+            }
             other => unsupported(expression_name(other), other.span()),
         }
+    }
+
+    /// Evaluates a call's callee, `this` (undefined) and arguments into
+    /// consecutive temporaries.
+    fn call_operands(&mut self, c: &CallExpression<'_>) -> CResult<CallOperands> {
+        if c.optional {
+            return unsupported("optional calls", c.span);
+        }
+        if c.callee.without_parentheses().is_member_expression() {
+            return unsupported("method calls (need objects)", c.span);
+        }
+        if matches!(c.callee, Expression::Super(_)) {
+            return unsupported("super calls", c.span);
+        }
+        let callee = self.temp()?;
+        self.expr_to(&c.callee, callee)?;
+        let this = self.temp()?;
+        self.asm.load_undefined(this);
+        let mut args = Vec::with_capacity(c.arguments.len());
+        for a in &c.arguments {
+            let Some(e) = a.as_expression() else {
+                return unsupported("spread arguments", a.span());
+            };
+            let r = self.temp()?;
+            self.expr_to(e, r)?;
+            args.push(r);
+        }
+        let argc =
+            u32::try_from(args.len()).map_err(|_| CompileError::TooLarge("arguments".into()))?;
+        Ok(CallOperands {
+            callee,
+            this,
+            // With no arguments any in-range register will do.
+            args: args.first().copied().unwrap_or(this),
+            argc: Count(argc),
+            temps: args,
+        })
+    }
+
+    fn free_call(&mut self, call: CallOperands) {
+        for &r in call.temps.iter().rev() {
+            self.free(r);
+        }
+        self.free(call.this);
+        self.free(call.callee);
     }
 
     /// Jumps to `target` if ToBoolean(`test`) is false.
@@ -1222,47 +1896,64 @@ impl<'s> Gen<'s> {
         };
         let t = self.write_target(id)?;
         match a.operator {
-            AssignmentOperator::Assign => self.store(t, &a.right)?,
+            AssignmentOperator::Assign => {
+                if let Some(r) = t.simple_reg() {
+                    self.assign_local(r, t.sym, &a.right)?;
+                    if r != dst {
+                        self.asm.mov(dst, r);
+                    }
+                } else {
+                    // SetMutableBinding runs after the right side.
+                    self.expr_to(&a.right, dst)?;
+                    self.store_reg(t, dst)?;
+                }
+            }
             op if op.is_logical() => {
-                self.read_target(t);
+                let cur = self.read_target(t)?;
+                self.asm.mov(dst, cur.reg);
+                self.release(cur);
                 let end = self.asm.new_label();
                 match op {
-                    AssignmentOperator::LogicalAnd => self.asm.jump_if_false(t.reg, end),
-                    AssignmentOperator::LogicalOr => self.asm.jump_if_true(t.reg, end),
-                    _ => self.asm.jump_if_not_nullish(t.reg, end),
+                    AssignmentOperator::LogicalAnd => self.asm.jump_if_false(dst, end),
+                    AssignmentOperator::LogicalOr => self.asm.jump_if_true(dst, end),
+                    _ => self.asm.jump_if_not_nullish(dst, end),
                 }
-                self.store(t, &a.right)?;
+                self.expr_to(&a.right, dst)?;
+                self.store_reg(t, dst)?;
                 self.asm.bind(end);
             }
             op => {
                 // `x op= e`: the old x is read before e runs.
-                self.read_target(t);
                 let bop = op.to_binary_operator().expect("arithmetic assignment");
-                let old = if has_side_effects(&a.right) {
+                let cur = self.read_target(t)?;
+                let old = if !cur.temp && has_side_effects(&a.right) {
                     let r = self.temp()?;
-                    self.asm.mov(r, t.reg);
+                    self.asm.mov(r, cur.reg);
                     Operand { reg: r, temp: true }
                 } else {
-                    Operand {
-                        reg: t.reg,
-                        temp: false,
-                    }
+                    cur
                 };
                 let rhs = self.expr_any(&a.right)?;
-                if t.constant || t.tdz {
-                    let v = self.temp()?;
-                    self.binary_op(bop, v, old.reg, rhs.reg)?;
-                    self.store_reg(t, v);
-                    self.free(v);
-                } else {
-                    self.binary_op(bop, t.reg, old.reg, rhs.reg)?;
+                match t.simple_reg() {
+                    Some(r) => {
+                        self.binary_op(bop, r, old.reg, rhs.reg)?;
+                        self.release(rhs);
+                        self.release(old);
+                        if r != dst {
+                            self.asm.mov(dst, r);
+                        }
+                    }
+                    None => {
+                        let v = self.temp()?;
+                        self.binary_op(bop, v, old.reg, rhs.reg)?;
+                        self.store_reg(t, v)?;
+                        self.asm.mov(dst, v);
+                        self.free(v);
+                        self.release(rhs);
+                        self.release(old);
+                    }
                 }
-                self.release(rhs);
-                self.release(old);
             }
-        }
-        if t.reg != dst {
-            self.asm.mov(dst, t.reg);
         }
         Ok(())
     }
@@ -1274,41 +1965,61 @@ impl<'s> Gen<'s> {
             SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => self.write_target(id)?,
             other => return unsupported("update of a property", other.span()),
         };
-        self.read_target(t);
+        let cur = self.read_target(t)?;
         let ic = self.ic()?;
         let step = |g: &mut Self, d: Reg, s: Reg| match u.operator {
             UpdateOperator::Increment => g.asm.inc(d, s, ic),
             UpdateOperator::Decrement => g.asm.dec(d, s, ic),
         };
-        match dst {
-            Some(dst) if !u.prefix => {
-                let ic = self.ic()?;
-                self.asm.to_numeric(dst, t.reg, ic);
-                if t.constant {
-                    let v = self.temp()?;
-                    step(self, v, dst);
-                    self.store_reg(t, v);
-                    self.free(v);
-                } else {
-                    step(self, t.reg, dst);
+        match t.simple_reg() {
+            Some(r) => {
+                match dst {
+                    Some(dst) if !u.prefix => {
+                        let ic = self.ic()?;
+                        self.asm.to_numeric(dst, r, ic);
+                        step(self, r, dst);
+                    }
+                    _ => {
+                        step(self, r, r);
+                        if let Some(dst) = dst {
+                            self.asm.mov(dst, r);
+                        }
+                    }
                 }
+                self.release(cur);
             }
-            _ => {
-                if t.constant {
-                    let v = self.temp()?;
-                    step(self, v, t.reg);
-                    self.store_reg(t, v);
-                    self.free(v);
-                } else {
-                    step(self, t.reg, t.reg);
+            None => {
+                let v = self.temp()?;
+                match dst {
+                    Some(dst) if !u.prefix => {
+                        let ic = self.ic()?;
+                        self.asm.to_numeric(dst, cur.reg, ic);
+                        step(self, v, dst);
+                        self.store_reg(t, v)?;
+                    }
+                    _ => {
+                        step(self, v, cur.reg);
+                        self.store_reg(t, v)?;
+                        if let Some(dst) = dst {
+                            self.asm.mov(dst, v);
+                        }
+                    }
                 }
-                if let Some(dst) = dst {
-                    self.asm.mov(dst, t.reg);
-                }
+                self.free(v);
+                self.release(cur);
             }
         }
         Ok(())
     }
+}
+
+/// The registers of a call: callee, `this`, and the argument temporaries.
+struct CallOperands {
+    callee: Reg,
+    this: Reg,
+    args: Reg,
+    argc: Count,
+    temps: Vec<Reg>,
 }
 
 /// Records, per binding, where its first use starts and where its
@@ -1443,7 +2154,6 @@ fn statement_name(s: &Statement<'_>) -> &'static str {
         Statement::ForInStatement(_) => "for-in",
         Statement::ForOfStatement(_) => "for-of",
         Statement::WithStatement(_) => "with",
-        Statement::FunctionDeclaration(_) => "nested functions",
         Statement::ClassDeclaration(_) => "classes",
         _ => "this statement",
     }
@@ -1454,10 +2164,7 @@ fn expression_name(e: &Expression<'_>) -> &'static str {
         Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => "strings",
         Expression::BigIntLiteral(_) => "BigInt",
         Expression::RegExpLiteral(_) => "regular expressions",
-        Expression::CallExpression(_) | Expression::NewExpression(_) => "calls",
-        Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {
-            "nested functions"
-        }
+        Expression::NewExpression(_) => "`new`",
         Expression::ObjectExpression(_) | Expression::ArrayExpression(_) => "objects and arrays",
         Expression::ThisExpression(_) => "this",
         _ => "this expression",
