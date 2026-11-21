@@ -155,6 +155,16 @@ exception table (pc ranges → handler pc and the register to receive the
 exception), unwinding frames until one matches or the entry frame is
 reached.
 
+As built in 1.6c (D-035): the table is a list of `Handler { start, end,
+target, exception }` byte ranges, innermost first, so the first match
+wins. Every target lies at or after its range's end (the verifier
+checks it), so unwinding always moves forward and can't loop around the
+interrupt check. A termination from the interrupt check (D-007) is never
+caught by a handler. `finally` is compiled inline: jumps out of a `try`
+set a completion-kind register and jump to the finally block, which
+dispatches on the kind afterwards (rethrow, return, or the pending
+`break`/`continue`).
+
 ## 4. Bytecode (D-019) and the op-definition language (D-020)
 
 ### 4.1 Format

@@ -8,6 +8,7 @@
 use ferrojs_value::{Kind, Value};
 
 use crate::number::{self, CompareOp, NumericOp, UnaryOp};
+use crate::Handler;
 use crate::{
     decode, execute, Completion, Const, EnvSlot, ErrorKind, Feedback, Flow, Ic, Limits, OpCtx, Reg,
     Thrown,
@@ -27,6 +28,10 @@ pub struct ToyCtx {
     pub interrupt_checks: u64,
     /// How many times each slow path ran (for tests of the fast paths).
     pub slow_calls: u64,
+    /// Set when the interrupt check terminated execution: termination is
+    /// not catchable, so [`run_with_handlers`] doesn't unwind into
+    /// handlers then.
+    pub terminating: bool,
     /// The kind of the last error a runtime function threw, if any (the
     /// toy has no error objects; the exception value is `undefined`).
     pub last_error: Option<ErrorKind>,
@@ -106,6 +111,7 @@ impl OpCtx for ToyCtx {
     }
     fn check_interrupt(&mut self) -> Flow {
         if self.interrupt_after == Some(self.interrupt_checks) {
+            self.terminating = true;
             self.exception = Some(Value::NULL);
             return Flow::Throw;
         }
@@ -208,6 +214,22 @@ pub enum Outcome {
 /// If the code doesn't decode or a jump leaves it: the verifier rules
 /// those out, which is what the `bytecode_verify` fuzz target checks.
 pub fn run(code: &[u8], cx: &mut ToyCtx, max_steps: u64) -> Outcome {
+    run_with_handlers(code, &[], cx, max_steps)
+}
+
+/// [`run`] with an exception table: a throw (other than a termination)
+/// at a pc covered by a handler stores the exception in the handler's
+/// register and continues at its target.
+///
+/// # Panics
+/// As [`run`]; the handlers must have passed
+/// [`verify_handlers`](crate::verify_handlers).
+pub fn run_with_handlers(
+    code: &[u8],
+    handlers: &[Handler],
+    cx: &mut ToyCtx,
+    max_steps: u64,
+) -> Outcome {
     let mut pc = 0usize;
     for _ in 0..max_steps {
         let (insn, len) = decode(code, pc).expect("verified bytecode decodes");
@@ -218,7 +240,17 @@ pub fn run(code: &[u8], cx: &mut ToyCtx, max_steps: u64) -> Outcome {
             }
             Flow::Return(v) => return Outcome::Returned(v),
             Flow::Throw => {
-                return Outcome::Threw(cx.exception.take().expect("a throw sets the exception"));
+                let exception = cx.exception.take().expect("a throw sets the exception");
+                let handler = handlers
+                    .iter()
+                    .find(|h| (h.start as usize..h.end as usize).contains(&pc));
+                match handler {
+                    Some(h) if !cx.terminating => {
+                        cx.set(h.exception, exception);
+                        pc = h.target as usize;
+                    }
+                    _ => return Outcome::Threw(exception),
+                }
             }
         }
     }

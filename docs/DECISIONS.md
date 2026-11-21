@@ -703,3 +703,33 @@ planning document and gets logged here as each is implemented.
   for no benefit); building oxc's full `AstNodes` table to get reference
   positions (memory and time for every parse, when one visitor over the
   function body suffices).
+
+## D-035 Exceptions: forward-only handler table, inline finally
+- **Status:** Accepted (autopilot, 2026-11-21)
+- **Choice:** a compiled function carries `handlers: Vec<Handler>`
+  (`ferrojs_bytecode::Handler { start, end, target, exception: Reg }`,
+  byte offsets), innermost ranges first: entries are emitted when their
+  range closes, and inner ranges close first. `verify_handlers` requires
+  non-empty ranges on instruction boundaries, targets on instructions at
+  or after the range end (so a throw always moves forward and every loop
+  still passes `JumpLoop`'s interrupt check), and registers in range.
+  `Assembler::finish_with_labels` gives label offsets to build the table.
+  `try/catch`: the catch parameter's register receives the exception
+  (a temporary for `catch {}`). `finally` is compiled once, inline, with
+  two temporaries: a completion kind (0 normal, 1 throw, 2 return, 3+i
+  the i-th `break`/`continue` routed through it) and a value; the try and
+  catch blocks are covered by a handler that stores the exception in the
+  value register and sets kind 1. After the finally block, compares on
+  the kind rethrow, return (through the enclosing finally if any) or
+  re-issue the jump (again through enclosing finallys), so every exit
+  path runs each finally exactly once. Breakables record how many
+  finallys were open when entered to know when a jump crosses one.
+- **Termination isn't catchable:** a throw caused by the interrupt
+  check (D-007) skips handlers. The toy context records it in
+  `terminating`; the interpreter (1.7) must do the same.
+- **Not yet:** `var` redeclaring a catch parameter (Annex B.3.4) is
+  rejected as unsupported until it is handled deliberately; destructuring
+  catch parameters wait for destructuring.
+- **Rejected:** duplicating the finally block at every exit (code size
+  grows with exits and nesting); subroutine-style `jsr`/`ret` (needs an
+  indirect jump the verifier can't check); backward handler targets.

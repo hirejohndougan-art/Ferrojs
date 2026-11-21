@@ -748,3 +748,41 @@ fn random_bytes_never_break_verified_execution() {
     }
     assert!(verified > 500, "only {verified} random programs verified");
 }
+
+#[test]
+fn exception_tables_are_verified() {
+    use ferrojs_bytecode::{verify_handlers, Handler};
+    // 0: LoadInt r0, 1 (3 bytes)  3: Throw r0 (2)  5: Return r0 (2)
+    let mut a = Assembler::new();
+    a.load_int(Reg(0), Imm(1));
+    a.throw(Reg(0));
+    a.ret(Reg(0));
+    let code = a.finish().unwrap();
+    let limits = limits(2, 0, 0);
+    verify(&code, &limits).unwrap();
+    let h = |start, end, target, r| Handler {
+        start,
+        end,
+        target,
+        exception: Reg(r),
+    };
+    assert!(verify_handlers(&code, &[h(0, 5, 5, 1)], &limits).is_ok());
+    assert!(verify_handlers(&code, &[h(3, 5, 5, 0)], &limits).is_ok());
+    for bad in [
+        h(0, 0, 5, 1), // empty range
+        h(0, 5, 3, 1), // target inside the range: could loop without an interrupt check
+        h(0, 4, 5, 1), // end inside an instruction
+        h(1, 5, 5, 1), // start inside an instruction
+        h(0, 5, 6, 1), // target inside an instruction
+        h(0, 5, 7, 1), // target past the end
+        h(0, 5, 5, 2), // register out of range
+    ] {
+        assert!(verify_handlers(&code, &[bad], &limits).is_err(), "{bad:?}");
+    }
+
+    // The toy unwinds to the handler, storing the exception.
+    let mut cx = ToyCtx::new(&limits);
+    let out = ferrojs_bytecode::testing::run_with_handlers(&code, &[h(0, 5, 5, 1)], &mut cx, 100);
+    assert_eq!(out, Outcome::Returned(Value::from_i32(1)));
+    assert_eq!(cx.regs[1], Value::from_i32(1));
+}

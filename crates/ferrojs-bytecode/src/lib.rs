@@ -44,8 +44,8 @@ mod verify;
 pub use ctx::{Completion, ErrorKind, Feedback, Flow, OpCtx, Thrown};
 pub use define::{Flags, OpInfo};
 pub use encode::{
-    decode, instructions, AsmError, Assembler, DecodeError, DecodeErrorKind, Instructions, Reader,
-    Unit, PREFIX_EXTRA_WIDE, PREFIX_WIDE,
+    decode, instructions, label_offset, AsmError, Assembler, DecodeError, DecodeErrorKind,
+    Instructions, Reader, Unit, PREFIX_EXTRA_WIDE, PREFIX_WIDE,
 };
 pub use number::{CompareOp, NumericOp, UnaryOp};
 pub use operand::{
@@ -53,4 +53,6 @@ pub use operand::{
 };
 pub(crate) use ops::decode_operands;
 pub use ops::{execute, handlers, operands, Instruction, Opcode};
-pub use verify::{disassemble, verify, Limits, VerifyError, VerifyErrorKind};
+pub use verify::{
+    disassemble, verify, verify_handlers, Handler, Limits, VerifyError, VerifyErrorKind,
+};

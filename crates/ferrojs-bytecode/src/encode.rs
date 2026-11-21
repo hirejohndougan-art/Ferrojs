@@ -321,6 +321,14 @@ impl Assembler {
     /// doesn't fit, its instruction is widened and the layout redone.
     /// Widths only grow, so this reaches a fixed point.
     pub fn finish(self) -> Result<Vec<u8>, AsmError> {
+        self.finish_with_labels().map(|(code, _)| code)
+    }
+
+    /// Like [`finish`](Self::finish), and also returns the byte offset
+    /// each label is bound to (`None` if unbound), indexed by label id:
+    /// look one up with [`label_offset`]. Exception tables are built
+    /// from these.
+    pub fn finish_with_labels(self) -> Result<(Vec<u8>, Vec<Option<u32>>), AsmError> {
         let mut targets = vec![0usize; self.labels.len()];
         for (i, l) in self.labels.iter().enumerate() {
             // Unused unbound labels are fine; used ones are caught below.
@@ -379,6 +387,17 @@ impl Assembler {
             debug_assert_eq!(out.len(), offsets[i]);
             write(p.op, &resolved, widths[i], &mut out);
         }
-        Ok(out)
+        let labels = self
+            .labels
+            .iter()
+            .map(|l| l.map(|insn| offsets[insn] as u32))
+            .collect();
+        Ok((out, labels))
     }
+}
+
+/// The byte offset of `label` in the table [`Assembler::finish_with_labels`]
+/// returned.
+pub fn label_offset(labels: &[Option<u32>], label: AsmLabel) -> Option<u32> {
+    labels.get(label.0 as usize).copied().flatten()
 }

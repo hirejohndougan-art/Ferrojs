@@ -19,7 +19,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use ferrojs_bytecode::{AsmLabel, Assembler, Const, Ic, Imm, Limits, Reg};
+use ferrojs_bytecode::{label_offset, AsmLabel, Assembler, Const, Handler, Ic, Imm, Limits, Reg};
 use ferrojs_value::Value;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{walk, Visit};
@@ -43,6 +43,8 @@ pub struct CompiledFunction {
     pub ics: u32,
     pub strict: bool,
     pub code: Vec<u8>,
+    /// The exception table, innermost ranges first.
+    pub handlers: Vec<Handler>,
 }
 
 impl CompiledFunction {
@@ -158,10 +160,23 @@ pub fn compile_function<'a>(parsed: &Parsed<'a>, func: &Function<'a>) -> CResult
     g.asm.ret(r);
     g.free(r);
 
-    let code = g
+    let (code, labels) = g
         .asm
-        .finish()
+        .finish_with_labels()
         .map_err(|e| CompileError::TooLarge(format!("{e:?}")))?;
+    let at = |l| label_offset(&labels, l).expect("handler labels are bound");
+    let handlers = g
+        .handlers
+        .iter()
+        .map(|&(start, end, target, exception)| Handler {
+            start: at(start),
+            end: at(end),
+            target: at(target),
+            exception,
+        })
+        // A try block that compiled to nothing protects nothing.
+        .filter(|h| h.start < h.end)
+        .collect();
     Ok(CompiledFunction {
         name: func
             .id
@@ -174,6 +189,7 @@ pub fn compile_function<'a>(parsed: &Parsed<'a>, func: &Function<'a>) -> CResult
         ics: g.ics,
         strict: scoping.scope_flags(scope).is_strict_mode(),
         code,
+        handlers,
     })
 }
 
@@ -189,7 +205,28 @@ struct Breakable {
     continue_to: Option<AsmLabel>,
     /// Loops and `switch`: an unlabeled `break` can target it.
     unlabeled_break: bool,
+    /// How many `finally` blocks were open when it was entered: a jump to
+    /// it from deeper runs the ones in between first.
+    finally_depth: usize,
 }
+
+/// An open `try … finally`. Jumps leaving it set `kind` and `value`, jump
+/// to `fin`, and the code after the finally block finishes them.
+struct Finally {
+    fin: AsmLabel,
+    /// 0 normal completion, 1 throw, 2 return, 3 + i the i-th entry of
+    /// `jumps`.
+    kind: Reg,
+    value: Reg,
+    returns: bool,
+    /// (breakable index, is continue) pairs routed through this block.
+    jumps: Vec<(usize, bool)>,
+}
+
+const K_NORMAL: i32 = 0;
+const K_THROW: i32 = 1;
+const K_RETURN: i32 = 2;
+const K_JUMPS: i32 = 3;
 
 /// Where an assignment stores, and what it must check first.
 #[derive(Clone, Copy)]
@@ -221,6 +258,12 @@ struct Gen<'s> {
     breakables: Vec<Breakable>,
     /// Labels seen on the way to the statement being compiled.
     pending_labels: Vec<String>,
+    /// Exception table entries (start, end, target, register), in the
+    /// order their ranges close: inner before outer.
+    handlers: Vec<(AsmLabel, AsmLabel, AsmLabel, Reg)>,
+    finallies: Vec<Finally>,
+    /// Names of the catch parameters around the code being compiled.
+    catch_names: Vec<String>,
 }
 
 const MAX_OPERAND: u32 = i32::MAX as u32;
@@ -241,6 +284,9 @@ impl<'s> Gen<'s> {
             ics: 0,
             breakables: Vec::new(),
             pending_labels: Vec::new(),
+            handlers: Vec::new(),
+            finallies: Vec::new(),
+            catch_names: Vec::new(),
         }
     }
 
@@ -407,9 +453,8 @@ impl<'s> Gen<'s> {
     /// needs a run-time TDZ check.
     fn binding_kind(&self, sym: SymbolId, span: oxc_span::Span) -> CResult<bool> {
         let flags = self.scoping.symbol_flags(sym);
-        if flags.intersects(SymbolFlags::Function | SymbolFlags::Class | SymbolFlags::CatchVariable)
-        {
-            return unsupported("function, class and catch bindings", span);
+        if flags.intersects(SymbolFlags::Function | SymbolFlags::Class) {
+            return unsupported("function and class bindings", span);
         }
         if !is_lexical(flags) {
             return Ok(false);
@@ -494,16 +539,14 @@ impl<'s> Gen<'s> {
                     break_to: end,
                     continue_to: None,
                     unlabeled_break: false,
+                    finally_depth: self.finallies.len(),
                 });
                 let r = self.statement(&l.body);
                 self.breakables.pop();
                 self.asm.bind(end);
                 r
             }
-            Statement::BlockStatement(b) => {
-                self.enter_lexical(b.body.iter());
-                self.statements(&b.body)
-            }
+            Statement::BlockStatement(b) => self.block(b),
             Statement::SwitchStatement(sw) => self.switch(sw, labels),
             Statement::EmptyStatement(_) | Statement::DebuggerStatement(_) => Ok(()),
             Statement::ExpressionStatement(e) => self.effect(&e.expression),
@@ -574,30 +617,38 @@ impl<'s> Gen<'s> {
             }
             Statement::BreakStatement(b) => {
                 let target = self.find_target(b.label.as_ref(), false, b.span)?;
-                self.asm.jump(target);
-                Ok(())
+                self.jump_to(target, false)
             }
             Statement::ContinueStatement(c) => {
                 let target = self.find_target(c.label.as_ref(), true, c.span)?;
-                self.asm.jump(target);
-                Ok(())
+                self.jump_to(target, true)
             }
             Statement::ReturnStatement(r) => {
-                match &r.argument {
-                    Some(e) => {
-                        let v = self.expr_any(e)?;
-                        self.asm.ret(v.reg);
-                        self.release(v);
+                if self.finallies.is_empty() {
+                    match &r.argument {
+                        Some(e) => {
+                            let v = self.expr_any(e)?;
+                            self.asm.ret(v.reg);
+                            self.release(v);
+                        }
+                        None => {
+                            let t = self.temp()?;
+                            self.asm.load_undefined(t);
+                            self.asm.ret(t);
+                            self.free(t);
+                        }
                     }
-                    None => {
-                        let t = self.temp()?;
-                        self.asm.load_undefined(t);
-                        self.asm.ret(t);
-                        self.free(t);
-                    }
+                    return Ok(());
                 }
+                let value = self.finallies.last().expect("checked").value;
+                match &r.argument {
+                    Some(e) => self.expr_to(e, value)?,
+                    None => self.asm.load_undefined(value),
+                }
+                self.return_value(value);
                 Ok(())
             }
+            Statement::TryStatement(t) => self.try_statement(t),
             Statement::ThrowStatement(t) => {
                 let v = self.expr_any(&t.argument)?;
                 self.asm.throw(v.reg);
@@ -651,6 +702,7 @@ impl<'s> Gen<'s> {
             break_to: end,
             continue_to: None,
             unlabeled_break: true,
+            finally_depth: self.finallies.len(),
         });
         let mut result = Ok(());
         for (case, &body) in sw.cases.iter().zip(&bodies) {
@@ -679,6 +731,7 @@ impl<'s> Gen<'s> {
             break_to,
             continue_to: Some(continue_to),
             unlabeled_break: true,
+            finally_depth: self.finallies.len(),
         });
         let r = self.statement(body);
         self.breakables.pop();
@@ -690,8 +743,8 @@ impl<'s> Gen<'s> {
         label: Option<&LabelIdentifier<'_>>,
         is_continue: bool,
         span: oxc_span::Span,
-    ) -> CResult<AsmLabel> {
-        for b in self.breakables.iter().rev() {
+    ) -> CResult<usize> {
+        for (i, b) in self.breakables.iter().enumerate().rev() {
             let matches = match label {
                 Some(l) => b.labels.iter().any(|n| n == l.name.as_str()),
                 // Unlabeled `continue` targets the innermost loop, unlabeled
@@ -700,18 +753,179 @@ impl<'s> Gen<'s> {
                 None => b.unlabeled_break,
             };
             if matches {
-                return if is_continue {
-                    match b.continue_to {
-                        Some(c) => Ok(c),
-                        // Early errors rule this out.
-                        None => unsupported("continue to a non-loop label", span),
-                    }
-                } else {
-                    Ok(b.break_to)
-                };
+                if is_continue && b.continue_to.is_none() {
+                    // Early errors rule this out.
+                    return unsupported("continue to a non-loop label", span);
+                }
+                return Ok(i);
             }
         }
         unsupported("break or continue outside the compiled function", span)
+    }
+
+    /// Jumps to breakable `index` (its continue or break label), running
+    /// the `finally` blocks in between first.
+    fn jump_to(&mut self, index: usize, is_continue: bool) -> CResult<()> {
+        let b = &self.breakables[index];
+        let label = if is_continue {
+            b.continue_to.expect("find_target checked")
+        } else {
+            b.break_to
+        };
+        if b.finally_depth == self.finallies.len() {
+            self.asm.jump(label);
+            return Ok(());
+        }
+        let f = self.finallies.last_mut().expect("deeper than the target");
+        let i = match f.jumps.iter().position(|&j| j == (index, is_continue)) {
+            Some(i) => i,
+            None => {
+                f.jumps.push((index, is_continue));
+                f.jumps.len() - 1
+            }
+        };
+        let (kind, fin) = (f.kind, f.fin);
+        let k = K_JUMPS
+            .checked_add(i32::try_from(i).unwrap_or(i32::MAX))
+            .ok_or_else(|| CompileError::TooLarge("jumps out of finally".into()))?;
+        self.asm.load_int(kind, Imm(k));
+        self.asm.jump(fin);
+        Ok(())
+    }
+
+    /// Returns the value in register `value`, which must be the innermost
+    /// open finally's value register if there is one.
+    fn return_value(&mut self, value: Reg) {
+        match self.finallies.last_mut() {
+            None => self.asm.ret(value),
+            Some(f) => {
+                debug_assert_eq!(f.value, value);
+                f.returns = true;
+                let (kind, fin) = (f.kind, f.fin);
+                self.asm.load_int(kind, Imm(K_RETURN));
+                self.asm.jump(fin);
+            }
+        }
+    }
+
+    fn try_statement(&mut self, t: &TryStatement<'_>) -> CResult<()> {
+        let Some(finalizer) = &t.finalizer else {
+            let handler = t.handler.as_ref().expect("try has catch or finally");
+            return self.try_catch(&t.block, handler);
+        };
+        let kind = self.temp()?;
+        let value = self.temp()?;
+        let (start, end, handler, fin) = (
+            self.asm.new_label(),
+            self.asm.new_label(),
+            self.asm.new_label(),
+            self.asm.new_label(),
+        );
+        self.finallies.push(Finally {
+            fin,
+            kind,
+            value,
+            returns: false,
+            jumps: Vec::new(),
+        });
+        self.asm.bind(start);
+        let body = match &t.handler {
+            Some(c) => self.try_catch(&t.block, c),
+            None => self.block(&t.block),
+        };
+        let f = self.finallies.pop().expect("pushed above");
+        body?;
+        self.asm.bind(end);
+        self.asm.load_int(kind, Imm(K_NORMAL));
+        self.asm.jump(fin);
+        // A throw anywhere in the try block or the catch block lands here.
+        self.handlers.push((start, end, handler, value));
+        self.asm.bind(handler);
+        self.asm.load_int(kind, Imm(K_THROW));
+        self.asm.bind(fin);
+        self.block(finalizer)?;
+
+        // Finish whatever completion brought us here. The routes run with
+        // this finally closed, so they go through the enclosing ones.
+        let t = self.temp()?;
+        let dispatch = |g: &mut Self, k: i32, body: &mut dyn FnMut(&mut Self) -> CResult<()>| {
+            let skip = g.asm.new_label();
+            g.asm.load_int(t, Imm(k));
+            g.asm.strict_equal(t, kind, t);
+            g.asm.jump_if_false(t, skip);
+            body(g)?;
+            g.asm.bind(skip);
+            Ok::<(), CompileError>(())
+        };
+        dispatch(self, K_THROW, &mut |g| {
+            g.asm.throw(value);
+            Ok(())
+        })?;
+        if f.returns {
+            dispatch(self, K_RETURN, &mut |g| {
+                match g.finallies.last().map(|o| o.value) {
+                    Some(outer) => {
+                        g.asm.mov(outer, value);
+                        g.return_value(outer);
+                    }
+                    None => g.asm.ret(value),
+                }
+                Ok(())
+            })?;
+        }
+        for (i, &(index, is_continue)) in f.jumps.iter().enumerate() {
+            dispatch(self, K_JUMPS + i as i32, &mut |g| {
+                g.jump_to(index, is_continue)
+            })?;
+        }
+        self.free(t);
+        self.free(value);
+        self.free(kind);
+        Ok(())
+    }
+
+    fn try_catch(&mut self, block: &BlockStatement<'_>, c: &CatchClause<'_>) -> CResult<()> {
+        let (exception, temp, name) = match &c.param {
+            None => (self.temp()?, true, None),
+            Some(p) => {
+                let BindingPattern::BindingIdentifier(id) = &p.pattern else {
+                    return unsupported("destructuring catch parameters", p.span);
+                };
+                let r = self.local_for(symbol_of(id), id.span)?;
+                (r, false, Some(id.name.as_str().to_owned()))
+            }
+        };
+        let (start, end, handler, done) = (
+            self.asm.new_label(),
+            self.asm.new_label(),
+            self.asm.new_label(),
+            self.asm.new_label(),
+        );
+        self.asm.bind(start);
+        self.block(block)?;
+        self.asm.bind(end);
+        self.asm.jump(done);
+        self.handlers.push((start, end, handler, exception));
+        self.asm.bind(handler);
+        let pushed = name.is_some();
+        if let Some(n) = name {
+            self.catch_names.push(n);
+        }
+        let r = self.block(&c.body);
+        if pushed {
+            self.catch_names.pop();
+        }
+        r?;
+        self.asm.bind(done);
+        if temp {
+            self.free(exception);
+        }
+        Ok(())
+    }
+
+    fn block(&mut self, b: &BlockStatement<'_>) -> CResult<()> {
+        self.enter_lexical(b.body.iter());
+        self.statements(&b.body)
     }
 
     fn declaration(&mut self, d: &VariableDeclaration<'_>) -> CResult<()> {
@@ -727,6 +941,12 @@ impl<'s> Gen<'s> {
             let BindingPattern::BindingIdentifier(id) = &decl.id else {
                 return unsupported("destructuring", decl.span);
             };
+            if d.kind == VariableDeclarationKind::Var
+                && self.catch_names.iter().any(|n| n == id.name.as_str())
+            {
+                // Annex B.3.4: the initializer assigns the catch parameter.
+                return unsupported("`var` redeclaring a catch parameter", id.span);
+            }
             let sym = symbol_of(id);
             let r = self.local_for(sym, id.span)?;
             match &decl.init {
@@ -1222,7 +1442,6 @@ fn statement_name(s: &Statement<'_>) -> &'static str {
     match s {
         Statement::ForInStatement(_) => "for-in",
         Statement::ForOfStatement(_) => "for-of",
-        Statement::TryStatement(_) => "try",
         Statement::WithStatement(_) => "with",
         Statement::FunctionDeclaration(_) => "nested functions",
         Statement::ClassDeclaration(_) => "classes",

@@ -2,17 +2,20 @@
 //! the verifier, and running it on the toy context gives exactly what
 //! Node.js gives for the same call.
 
-use ferrojs_bytecode::testing::{run, Outcome, ToyCtx};
-use ferrojs_bytecode::{disassemble, verify, ErrorKind};
+use ferrojs_bytecode::testing::{run, run_with_handlers, Outcome, ToyCtx};
+use ferrojs_bytecode::{disassemble, verify, verify_handlers, ErrorKind};
 use ferrojs_compiler::{compile_function_source, CompileError, CompiledFunction};
 use ferrojs_value::{Kind, Value};
 
 fn compile(src: &str) -> CompiledFunction {
     let f = compile_function_source(src).unwrap_or_else(|e| panic!("{src}: {e}"));
-    if let Err(e) = verify(&f.code, &f.limits()) {
+    let checked = verify(&f.code, &f.limits())
+        .and_then(|()| verify_handlers(&f.code, &f.handlers, &f.limits()));
+    if let Err(e) = checked {
         panic!(
-            "{src}: compiled code fails verification: {e:?}\n{}",
-            disassemble(&f.code).unwrap_or_default()
+            "{src}: compiled code fails verification: {e:?}\n{}\n{:?}",
+            disassemble(&f.code).unwrap_or_default(),
+            f.handlers
         );
     }
     f
@@ -28,7 +31,7 @@ fn call_toy(f: &CompiledFunction, args: &[f64]) -> (Outcome, ToyCtx) {
     for (i, &a) in args.iter().enumerate().take(f.params as usize) {
         cx.regs[i] = Value::number(a);
     }
-    let out = run(&f.code, &mut cx, 10_000_000);
+    let out = run_with_handlers(&f.code, &f.handlers, &mut cx, 10_000_000);
     (out, cx)
 }
 
@@ -136,6 +139,30 @@ const CASES: &[(&str, &[&[f64]])] = &[
     ("function f(a) { const c = 1; return c--; }", &[&[0.0]]),
     ("function f(a) { 'use strict'; const c = 1; c = 2; }", &[&[0.0]]),
     ("function f(a) { if (a) { c = 5; } const c = 1; c = 3; }", &[&[1.0], &[0.0]]),
+    // try / catch / finally (1.6c)
+    ("function f(a) { try { if (a) throw a; return 1; } catch (e) { return e * 10; } }", &[&[0.0], &[3.0]]),
+    ("function f(a) { let r = 0; try { r = 1; throw 5; } catch { r += 10; } return r; }", &[&[0.0]]),
+    ("function f(a) { let r = 0; try { r = 1; } finally { r += 10; } return r; }", &[&[0.0]]),
+    ("function f(a) { try { return a; } finally { a = 99; } }", &[&[4.0]]),
+    ("function f(a) { try { return a; } finally { return 7; } }", &[&[4.0]]),
+    ("function f(a) { try { throw a; } finally { return 7; } }", &[&[4.0]]),
+    ("function f(a) { try { throw a; } finally { a = 1; } }", &[&[4.0]]),
+    ("function f(a) { try { throw a; } catch (e) { throw e + 1; } finally { a = 1; } }", &[&[4.0]]),
+    ("function f(a) { let r = 0; try { try { throw 1; } finally { r += 10; } } catch (e) { r += e * 100; } return r; }", &[&[0.0]]),
+    ("function f(a) { let r = 0; try { try { throw 1; } catch (e) { r += e; throw 2; } finally { r += 10; } } catch (e) { r += e * 100; } return r; }", &[&[0.0]]),
+    ("function f(n) { let s = 0; for (let i = 0; i < n; i++) { try { if (i === 2) continue; if (i === 4) break; s += i; } finally { s += 100; } } return s; }", &[&[10.0], &[3.0]]),
+    ("function f(n) { let s = 0; outer: for (let i = 0; i < n; i++) { for (let j = 0; j < n; j++) { try { try { if (j === 1) continue outer; if (i === 3) break outer; s += 1; } finally { s += 10; } } finally { s += 100; } } } return s; }", &[&[5.0]]),
+    ("function f(a) { let s = 0; for (;;) { try { return s; } finally { s = 5; break; } } return s + 1; }", &[&[0.0]]),
+    ("function f(a) { let s = 0; try { try { return 1; } finally { s += 1; } } finally { s += 10; a = s; } }", &[&[0.0]]),
+    ("function f(a) { let s = 0; try { try { return 1; } finally { s += 1; } } finally { return s + 10; } }", &[&[0.0]]),
+    ("function f(a) { let s = 0; lbl: { try { break lbl; } finally { s = 3; } s = 9; } return s; }", &[&[0.0]]),
+    ("function f(a) { let r = 0; try { r = 1; } catch (e) { r = 2; } finally { r *= 10; } return r; }", &[&[0.0]]),
+    ("function f(a) { let r; try { r = x; let x = 1; } catch (e) { r = -1; } return r; }", &[&[0.0]]),
+    ("function f(a) { const c = 1; try { c = 2; } catch { return 'caught' === 'caught' ? 5 : 6; } }", &[]),
+    ("function f(a) { const c = 1; try { c = 2; } catch (e) { return a + 5; } }", &[&[1.0]]),
+    ("function f(a) { try { } finally { a += 1; } try { } catch (e) { a = 0; } return a; }", &[&[1.0]]),
+    ("function f(n) { let s = 0; for (let i = 0; i < n; i++) { try { switch (i) { case 1: continue; case 2: break; default: s += i; } s += 10; } finally { s += 100; } } return s; }", &[&[4.0]]),
+    ("function f(e) { try { throw 1; } catch (e) { e += 5; } return e; }", &[&[3.0]]),
 ];
 
 fn node_results() -> Option<Vec<String>> {
@@ -235,6 +262,17 @@ fn hand_checked_results() {
 }
 
 #[test]
+fn termination_is_not_catchable() {
+    let f =
+        compile("function f() { for (;;) { try { while (true) {} } catch (e) {} finally {} } }");
+    assert!(!f.handlers.is_empty());
+    let mut cx = ToyCtx::new(&f.limits());
+    cx.interrupt_after = Some(1000);
+    let out = run_with_handlers(&f.code, &f.handlers, &mut cx, 1_000_000);
+    assert_eq!(out, Outcome::Threw(Value::NULL));
+}
+
+#[test]
 fn loops_check_for_interrupts() {
     let f = compile("function f() { while (true) {} }");
     let mut cx = ToyCtx::new(&f.limits());
@@ -269,7 +307,8 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function f() { return this; }",
         "function f() { return typeof 1; }",
         "function f(o) { return o.p; }",
-        "function f() { try {} catch (e) {} }",
+        "function f() { try {} catch ({ e }) {} }",
+        "function f() { try {} catch (e) { var e = 1; } }",
         "function f() { for (var k in {}) ; }",
         "function* f() {}",
         "async function f() {}",

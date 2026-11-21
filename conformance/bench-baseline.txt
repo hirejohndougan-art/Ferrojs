@@ -2,7 +2,7 @@
 # One line per benchmark: <id> <Callgrind instructions>.
 # toolchain: rustc 1.97.0 (2d8144b78 2026-07-07) / valgrind-3.22.0
 bytecode/bytecode/decode.mixed 144649
-bytecode/bytecode/dispatch.count_loop 881505
+bytecode/bytecode/dispatch.count_loop 884511
 heap/heap_alloc/bump_alloc.mixed 167391
 heap/heap_alloc/collect.half_live 439835
 heap/heap_alloc/cx_alloc.mixed 214725

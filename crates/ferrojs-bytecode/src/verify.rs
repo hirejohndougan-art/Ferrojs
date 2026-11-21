@@ -19,7 +19,7 @@ use core::fmt;
 use core::fmt::Write as _;
 
 use crate::encode::{instructions, DecodeError, DecodeErrorKind};
-use crate::operand::OperandValue;
+use crate::operand::{OperandValue, Reg};
 use crate::{Flags, Opcode};
 
 /// Sizes the verifier checks operands against.
@@ -48,6 +48,8 @@ pub enum VerifyErrorKind {
     ForwardLoopEdge,
     /// The last instruction falls through past the end.
     FallsOffEnd,
+    /// Exception handler `n` is malformed: see [`verify_handlers`].
+    BadHandler(usize),
 }
 
 /// A verification failure at instruction `pc`.
@@ -91,6 +93,7 @@ impl fmt::Display for VerifyError {
             }
             VerifyErrorKind::ForwardLoopEdge => write!(f, "JumpLoop must jump backward"),
             VerifyErrorKind::FallsOffEnd => write!(f, "last instruction falls through"),
+            VerifyErrorKind::BadHandler(n) => write!(f, "exception handler {n} is malformed"),
         }
     }
 }
@@ -167,6 +170,54 @@ pub fn verify(code: &[u8], limits: &Limits) -> Result<(), VerifyError> {
             return Err(VerifyError {
                 pc,
                 kind: VerifyErrorKind::JumpIntoInstruction(target as usize),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// One entry of a function's exception table (ARCHITECTURE.md §3.6): a
+/// throw at a pc in `start..end` stores the exception in `exception` and
+/// continues at `target`. The first matching entry wins, so inner ranges
+/// come before the ranges that enclose them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Handler {
+    pub start: u32,
+    pub end: u32,
+    pub target: u32,
+    pub exception: Reg,
+}
+
+/// Checks an exception table against verified `code`: every range is
+/// non-empty and starts and ends on instruction boundaries (or the end),
+/// every target is an instruction at or after its range's end, and every
+/// register is in range. Targets after the range mean a throw always
+/// moves forward, so a handler can't form a loop that skips the
+/// interrupt check (D-007).
+pub fn verify_handlers(
+    code: &[u8],
+    handlers: &[Handler],
+    limits: &Limits,
+) -> Result<(), VerifyError> {
+    let mut starts = vec![false; code.len() + 1];
+    for item in instructions(code) {
+        let (pc, _) = item?;
+        starts[pc] = true;
+    }
+    starts[code.len()] = true;
+    for (n, h) in handlers.iter().enumerate() {
+        let (start, end, target) = (h.start as usize, h.end as usize, h.target as usize);
+        let ok = start < end
+            && end <= target
+            && target < code.len()
+            && starts[start]
+            && starts[end]
+            && starts[target]
+            && h.exception.0 < limits.registers;
+        if !ok {
+            return Err(VerifyError {
+                pc: start.min(code.len()),
+                kind: VerifyErrorKind::BadHandler(n),
             });
         }
     }

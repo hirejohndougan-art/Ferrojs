@@ -7,8 +7,8 @@
 //! run on the toy context without panicking.
 #![no_main]
 
-use ferrojs_bytecode::testing::{run, ToyCtx};
-use ferrojs_bytecode::verify;
+use ferrojs_bytecode::testing::{run_with_handlers, ToyCtx};
+use ferrojs_bytecode::{verify, verify_handlers};
 use ferrojs_compiler::{compile_function, parse, Allocator, Goal};
 use ferrojs_value::Value;
 use libfuzzer_sys::fuzz_target;
@@ -43,11 +43,13 @@ fuzz_target!(|data: &[u8]| {
         };
         let limits = compiled.limits();
         verify(&compiled.code, &limits).expect("compiler output verifies");
+        verify_handlers(&compiled.code, &compiled.handlers, &limits)
+            .expect("compiler exception tables verify");
         let mut cx = ToyCtx::new(&limits);
         cx.constants = compiled.constant_values();
         for r in cx.regs.iter_mut().take(compiled.params as usize) {
             *r = Value::from_i32(i32::from(*g));
         }
-        run(&compiled.code, &mut cx, 10_000);
+        run_with_handlers(&compiled.code, &compiled.handlers, &mut cx, 10_000);
     }
 });
