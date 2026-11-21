@@ -464,6 +464,20 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
 - **Why:** a correct, checkable collector now, with no new `unsafe`, and
   the cell-layout knowledge left to the `cells!` table that will own it.
 
+## D-029 Sunday marathon run
+- **Status:** Accepted (2026-11-20, requested by John)
+- **Choice:** besides the three nightly one-task runs, a weekly run starts
+  Sunday around 10 PM Central and keeps taking tasks, one after another,
+  until it runs out of usage or work. Each task still goes through the
+  full procedure (claim, gate, review, CI Miri, merge, record) before the
+  next starts, and the run pushes after every meaningful step because it
+  can end without warning. Claims keep it from colliding with the Monday
+  1 AM run.
+- **Rejected:** keeping only one task per run (John wants faster progress);
+  batching several tasks into one merge (harder to review and to undo).
+- **Why:** more progress per week without loosening any check. It uses
+  more of John's usage on Sunday nights, which he chose knowingly.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,
