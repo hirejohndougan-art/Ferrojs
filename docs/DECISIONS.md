@@ -577,3 +577,46 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
 The full set of planned decisions (GC, frames, tail calls, baseline tier,
 warm starts, concurrency, platforms, parser, accuracy scope) is in the
 planning document and gets logged here as each is implemented.
+
+## D-032 Front end as built: oxc 0.158, `ferrojs-compiler`, parse-only Test262 runs
+- **Status:** Accepted (autopilot, 2026-11-21)
+- **Choice:** task 1.5 implements D-018 in the new `ferrojs-compiler`
+  crate. `parse(&Allocator, source, Goal::{Script, Module})` runs
+  `oxc_parser` (regular-expression parsing on, so pattern early errors
+  are reported), then `oxc_semantic` with syntax-error checks, then our
+  `early::check` pass, and returns the AST plus `Semantic` or every
+  `SyntaxError` (message and byte offset). `check` is the AST-free
+  convenience. All oxc crates are pinned with `=0.158.0`, the newest
+  release whose `rust-version` (1.97) the sandbox toolchain meets; the
+  `Allocator` is re-exported so callers need no oxc dependency. The
+  crates that depend on oxc (`ferrojs-compiler`, `ferrojs-test262`,
+  `ferrojs-diff`, `ferrojs-bench`) declare `rust-version = "1.97"`
+  themselves; the workspace value stays 1.80 for now, because raising
+  it turns on MSRV-gated clippy lints in `ferrojs-core`, which would make
+  this a core change (Miri, review). Raising it is a later small task.
+  The Test262 `ferrojs` engine now parses every run: an early error is
+  reported as a parse-phase `SyntaxError`; a negative parse-phase test
+  that parses is a **failure** (no engine behavior could still pass it);
+  everything else that parses is "not run" until the interpreter lands.
+  Module jobs check the prelude as a script and the body as a module.
+  Result at the pinned suite: 8,699 runs pass (every negative
+  parse-phase run), 7 fail.
+- **Known gap:** oxc rejects call expressions as assignment targets in
+  sloppy code (`f() = 1`, `for (f() in x)`, `f()++`), which the current
+  spec allows as a runtime `ReferenceError` (the 7 Annex B
+  `assignmenttargettype/callexpression*` failures). Fixing it means
+  accepting that oxc diagnostic for a call-expression target in sloppy
+  code and emitting a runtime throw; that belongs with the bytecode
+  compiler (1.6), which has to handle the throw anyway.
+- **Early-error pass:** empty at this pin, since oxc misses no early
+  error Test262 checks. Rules are added only with a test that fails
+  without them.
+- **Also fixed:** the Test262 runner wrote `--write-baseline` before
+  reading `--baseline`; the gate passes the same file to both, so it
+  compared every run with itself and could never report a regression. It
+  now reads first, never rewrites the baseline on a run with regressions,
+  and keeps entries a filtered run didn't cover.
+- **Rejected:** raising the workspace `rust-version` in this task (core
+  lint churn, see above); reporting parse-only successes of negative
+  tests as "not run" (hides parser gaps from the dashboard); our own AST
+  (D-018).

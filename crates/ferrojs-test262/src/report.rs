@@ -130,6 +130,15 @@ impl Report {
     }
 
     /// Tests passing now that the baseline didn't list.
+    /// The baseline to store after this run: every passing run, plus the
+    /// old baseline's entries this run didn't cover (a `--filter`ed run must
+    /// not drop the rest). Only meaningful when there are no regressions.
+    pub fn updated_baseline(&self, old: &BTreeSet<String>) -> BTreeSet<String> {
+        let mut new = self.passing.clone();
+        new.extend(old.iter().filter(|id| !self.ran.contains(*id)).cloned());
+        new
+    }
+
     pub fn newly_passing(&self, baseline: &BTreeSet<String>) -> usize {
         self.passing
             .iter()
@@ -221,5 +230,20 @@ mod tests {
         assert_eq!(r.regressions(&baseline), ["b.js:default"]);
         assert_eq!(r.newly_passing(&parse_baseline("")), 1);
         assert_eq!(parse_baseline(&format_baseline(&r.passing)), r.passing);
+    }
+
+    #[test]
+    fn updated_baseline_keeps_entries_the_run_did_not_cover() {
+        let outcomes = vec![
+            outcome("a.js:default", Verdict::Pass),
+            outcome("new.js:default", Verdict::Pass),
+        ];
+        let r = Report::build("e", None, &outcomes, 0);
+        let old = parse_baseline("a.js:default\nelsewhere.js:strict\n");
+        assert!(r.regressions(&old).is_empty());
+        assert_eq!(
+            r.updated_baseline(&old),
+            parse_baseline("a.js:default\nelsewhere.js:strict\nnew.js:default\n")
+        );
     }
 }

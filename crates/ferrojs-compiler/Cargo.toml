@@ -1,0 +1,21 @@
+[package]
+name = "ferrojs-compiler"
+description = "Parsing (oxc), early errors, and later bytecode generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.97" # oxc 0.158 needs it (D-032)
+publish = false
+
+[dependencies]
+# Pinned exactly (D-018): oxc 0.x releases break the API often. Upgrades are
+# their own task and re-run the full gate.
+oxc_allocator = "=0.158.0"
+oxc_ast = "=0.158.0"
+oxc_diagnostics = "=0.158.0"
+oxc_parser = "=0.158.0"
+oxc_semantic = "=0.158.0"
+oxc_span = "=0.158.0"
+
+[lints]
+workspace = true

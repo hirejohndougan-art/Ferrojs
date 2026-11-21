@@ -4,11 +4,12 @@ description = "Instruction-count benchmarks (Valgrind via gungraun) and the regr
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+rust-version = "1.97" # oxc 0.158 needs it (D-032)
 publish = false
 
 [dependencies]
 ferrojs-bytecode = { path = "../ferrojs-bytecode" }
+ferrojs-compiler = { path = "../ferrojs-compiler" }
 ferrojs-core = { path = "../ferrojs-core" }
 ferrojs-value = { path = "../ferrojs-value" }
 serde_json = "1"
@@ -36,6 +37,10 @@ harness = false
 
 [[bench]]
 name = "heap"
+harness = false
+
+[[bench]]
+name = "parse"
 harness = false
 
 [lints]

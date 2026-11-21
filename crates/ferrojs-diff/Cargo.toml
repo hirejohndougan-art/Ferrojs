@@ -4,7 +4,7 @@ description = "Differential testing: run JavaScript files on FerroJS and a refer
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+rust-version = "1.97" # oxc 0.158 needs it (D-032)
 publish = false
 
 [[bin]]

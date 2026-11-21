@@ -6,6 +6,7 @@
 
 use crate::job::{Job, Mode};
 use crate::metadata::Phase;
+use ferrojs_compiler::Goal;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -44,17 +45,57 @@ pub trait Engine: Send + Sync {
     fn run(&self, job: &Job) -> Execution;
 }
 
-/// FerroJS itself. It cannot run JavaScript yet; this adapter is where the
-/// interpreter plugs in during Phase 1.
+/// FerroJS itself. It can parse and check early errors (task 1.5) but not
+/// run code yet, so only negative syntax tests can pass; everything that
+/// parses is reported as not run, until the interpreter lands (task 1.10).
 pub struct FerroJs;
+
+impl FerroJs {
+    /// The (source, goal) pairs a job is made of. A module job's prelude is a
+    /// separate script, checked first.
+    fn sources(job: &Job) -> Vec<(String, Goal)> {
+        match job.mode {
+            Mode::Module => {
+                let mut v = Vec::new();
+                if !job.prelude.is_empty() {
+                    v.push((job.prelude.clone(), Goal::Script));
+                }
+                v.push((job.body.clone(), Goal::Module));
+                v
+            }
+            _ => vec![(job.script_source(), Goal::Script)],
+        }
+    }
+}
 
 impl Engine for FerroJs {
     fn name(&self) -> &str {
         "ferrojs"
     }
 
-    fn run(&self, _job: &Job) -> Execution {
-        Execution::Unsupported("FerroJS cannot run JavaScript yet".into())
+    fn run(&self, job: &Job) -> Execution {
+        for (source, goal) in Self::sources(job) {
+            if let Err(e) = ferrojs_compiler::check(&source, goal) {
+                return Execution::Completed {
+                    error: Some(Thrown {
+                        phase: Some(Phase::Parse),
+                        name: "SyntaxError".into(),
+                        message: e.to_string(),
+                    }),
+                    printed: Vec::new(),
+                };
+            }
+        }
+        match &job.negative {
+            // The test expects an early error and the front end found none.
+            // Whatever running the code would do, a parse-phase error can no
+            // longer happen, so this is a real failure, not "not run".
+            Some(n) if n.phase == Phase::Parse => Execution::Completed {
+                error: None,
+                printed: Vec::new(),
+            },
+            _ => Execution::Unsupported("FerroJS parses this but cannot run it yet".into()),
+        }
     }
 }
 
@@ -231,5 +272,89 @@ impl Engine for External {
             Err(RecvTimeoutError::Timeout) => Execution::Timeout,
             Err(RecvTimeoutError::Disconnected) => Execution::Crash("worker exited".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::Negative;
+
+    fn job(mode: Mode, prelude: &str, body: &str, negative: Option<Phase>) -> Job {
+        Job {
+            id: "t.js".into(),
+            rel_path: "t.js".into(),
+            path: "t.js".into(),
+            mode,
+            prelude: prelude.into(),
+            body: body.into(),
+            negative: negative.map(|phase| Negative {
+                phase,
+                error_type: "SyntaxError".into(),
+            }),
+            is_async: false,
+            features: Vec::new(),
+        }
+    }
+
+    fn parse_error(e: &Execution) -> bool {
+        matches!(
+            e,
+            Execution::Completed { error: Some(Thrown { phase: Some(Phase::Parse), name, .. }), .. }
+                if name == "SyntaxError"
+        )
+    }
+
+    #[test]
+    fn ferrojs_reports_early_errors_in_the_parse_phase() {
+        let e = FerroJs.run(&job(
+            Mode::NonStrict,
+            "",
+            "let a; let a;",
+            Some(Phase::Parse),
+        ));
+        assert!(parse_error(&e), "{e:?}");
+        // The strict prelude counts: this only fails in strict mode.
+        let strict = job(Mode::Strict, "'use strict';\n", "with ({}) {}", None);
+        assert!(parse_error(&FerroJs.run(&strict)));
+        assert!(matches!(
+            FerroJs.run(&job(Mode::NonStrict, "", "with ({}) {}", None)),
+            Execution::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn ferrojs_missing_an_early_error_is_a_failure_not_a_skip() {
+        let e = FerroJs.run(&job(Mode::NonStrict, "", "1;", Some(Phase::Parse)));
+        assert_eq!(
+            e,
+            Execution::Completed {
+                error: None,
+                printed: Vec::new()
+            }
+        );
+        // Runtime and resolution errors need execution, so those are not run.
+        for phase in [Phase::Runtime, Phase::Resolution] {
+            assert!(matches!(
+                FerroJs.run(&job(Mode::NonStrict, "", "1;", Some(phase))),
+                Execution::Unsupported(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn ferrojs_parses_modules_and_their_prelude_separately() {
+        let m = job(
+            Mode::Module,
+            "var x = 1;",
+            "export const y = await 2;",
+            None,
+        );
+        assert!(matches!(FerroJs.run(&m), Execution::Unsupported(_)));
+        // The prelude is a script: `await` there is not top-level await.
+        let bad = job(Mode::Module, "await 1;", "export {};", None);
+        assert!(parse_error(&FerroJs.run(&bad)));
+        let bad = job(Mode::Module, "", "with ({}) {}", Some(Phase::Parse));
+        assert!(parse_error(&FerroJs.run(&bad)));
     }
 }

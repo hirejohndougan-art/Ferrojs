@@ -67,12 +67,14 @@ fn node_matches_node_on_the_corpus() {
 }
 
 #[test]
-fn ferrojs_is_skipped_until_it_runs_javascript() {
+fn ferrojs_runs_only_files_with_early_errors_until_it_runs_javascript() {
     let cases = load_corpus(&corpus_dir()).expect("corpus loads");
-    // The reference is never consulted for skipped files.
+    // The reference is never consulted for skipped files. FerroJS can parse
+    // (task 1.5) but not run code, so only files it rejects before running
+    // are compared: the syntax-error case.
     let report = run(&cases, &FerroJs, &FerroJs);
     assert!(report.passed());
-    assert_eq!(report.skipped(), cases.len());
+    assert_eq!(report.skipped(), cases.len() - 1);
 }
 
 trait RunCase {

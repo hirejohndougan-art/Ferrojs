@@ -122,35 +122,48 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    if let Some(path) = &args.write_baseline {
-        if let Err(e) = std::fs::write(path, report::format_baseline(&report.passing)) {
+    // Read the old baseline before anything is written: the gate passes the
+    // same file to --baseline and --write-baseline.
+    let baseline = match &args.baseline {
+        None => None,
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(text) => Some(report::parse_baseline(&text)),
+            Err(e) => {
+                eprintln!("could not read baseline {}: {e}", path.display());
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    let mut regressions = Vec::new();
+    if let Some(baseline) = &baseline {
+        regressions = report.regressions(baseline);
+        println!(
+            "  baseline: {} passing before, {} newly passing, {} regressions",
+            baseline.len(),
+            report.newly_passing(baseline),
+            regressions.len()
+        );
+        for id in regressions.iter().take(50) {
+            println!("  REGRESSION {id}");
+        }
+    }
+
+    // A run with regressions never rewrites the baseline: that would shrink
+    // it and let the next run pass.
+    if let (Some(path), true) = (&args.write_baseline, regressions.is_empty()) {
+        let new = match &baseline {
+            Some(old) => report.updated_baseline(old),
+            None => report.passing.clone(),
+        };
+        if let Err(e) = std::fs::write(path, report::format_baseline(&new)) {
             eprintln!("could not write {}: {e}", path.display());
             return ExitCode::from(2);
         }
     }
 
-    if let Some(path) = &args.baseline {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("could not read baseline {}: {e}", path.display());
-                return ExitCode::from(2);
-            }
-        };
-        let baseline = report::parse_baseline(&text);
-        let regressions = report.regressions(&baseline);
-        println!(
-            "  baseline: {} passing before, {} newly passing, {} regressions",
-            baseline.len(),
-            report.newly_passing(&baseline),
-            regressions.len()
-        );
-        if !regressions.is_empty() {
-            for id in regressions.iter().take(50) {
-                println!("  REGRESSION {id}");
-            }
-            return ExitCode::FAILURE;
-        }
+    if !regressions.is_empty() {
+        return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }

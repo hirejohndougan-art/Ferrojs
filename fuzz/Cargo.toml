@@ -16,6 +16,7 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 ferrojs-value = { path = "../crates/ferrojs-value" }
 ferrojs-bytecode = { path = "../crates/ferrojs-bytecode" }
+ferrojs-compiler = { path = "../crates/ferrojs-compiler" }
 
 # Keeps this crate out of the parent workspace.
 [workspace]
@@ -46,6 +47,13 @@ bench = false
 [[bin]]
 name = "bytecode_verify"
 path = "fuzz_targets/bytecode_verify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
 test = false
 doc = false
 bench = false
