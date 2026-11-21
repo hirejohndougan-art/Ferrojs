@@ -19,6 +19,7 @@ fn encode(kind: Kind) -> Value {
         Kind::Object(r) => Value::object(r),
         Kind::String(r) => Value::string(r),
         Kind::Other(k, r) => Value::other(k, r),
+        Kind::Uninitialized => panic!("from_bits_checked accepted the TDZ marker"),
     }
 }
 

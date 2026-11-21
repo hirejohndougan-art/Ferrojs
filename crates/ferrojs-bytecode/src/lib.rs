@@ -41,7 +41,7 @@ mod ops;
 pub mod testing;
 mod verify;
 
-pub use ctx::{Completion, Feedback, Flow, OpCtx, Thrown};
+pub use ctx::{Completion, ErrorKind, Feedback, Flow, OpCtx, Thrown};
 pub use define::{Flags, OpInfo};
 pub use encode::{
     decode, instructions, AsmError, Assembler, DecodeError, DecodeErrorKind, Instructions, Reader,

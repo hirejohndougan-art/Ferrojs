@@ -9,7 +9,8 @@ use ferrojs_value::{Kind, Value};
 
 use crate::number::{self, CompareOp, NumericOp, UnaryOp};
 use crate::{
-    decode, execute, Completion, Const, EnvSlot, Feedback, Flow, Ic, Limits, OpCtx, Reg, Thrown,
+    decode, execute, Completion, Const, EnvSlot, ErrorKind, Feedback, Flow, Ic, Limits, OpCtx, Reg,
+    Thrown,
 };
 
 /// Registers, constants, feedback and an environment chain in vectors.
@@ -26,6 +27,9 @@ pub struct ToyCtx {
     pub interrupt_checks: u64,
     /// How many times each slow path ran (for tests of the fast paths).
     pub slow_calls: u64,
+    /// The kind of the last error a runtime function threw, if any (the
+    /// toy has no error objects; the exception value is `undefined`).
+    pub last_error: Option<ErrorKind>,
 }
 
 impl ToyCtx {
@@ -54,7 +58,9 @@ impl ToyCtx {
             Kind::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
             Kind::Int32(i) => Some(f64::from(i)),
             Kind::Double(d) => Some(d),
-            Kind::Object(_) | Kind::String(_) | Kind::Other(..) => None,
+            // Verified but arbitrary bytecode (the fuzz target) can feed the
+            // TDZ marker to anything; the toy treats it like a heap value.
+            Kind::Object(_) | Kind::String(_) | Kind::Other(..) | Kind::Uninitialized => None,
         }
     }
 
@@ -136,6 +142,11 @@ impl OpCtx for ToyCtx {
     fn rt_mul(&mut self, a: Value, b: Value) -> Completion {
         self.numbers(a, b, |x, y| x * y)
     }
+    fn rt_throw_error(&mut self, e: ErrorKind) -> Flow {
+        self.last_error = Some(e);
+        self.exception = Some(Value::UNDEFINED);
+        Flow::Throw
+    }
     fn rt_less_than(&mut self, a: Value, b: Value) -> Completion {
         self.predicate(a, b, |x, y| x < y)
     }
@@ -176,7 +187,7 @@ impl OpCtx for ToyCtx {
             Kind::Bool(b) => b,
             Kind::Int32(i) => i != 0,
             Kind::Double(d) => !(d == 0.0 || d.is_nan()),
-            Kind::Object(_) | Kind::String(_) | Kind::Other(..) => true,
+            Kind::Object(_) | Kind::String(_) | Kind::Other(..) | Kind::Uninitialized => true,
         }
     }
 }

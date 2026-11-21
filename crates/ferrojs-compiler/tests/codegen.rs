@@ -3,7 +3,7 @@
 //! Node.js gives for the same call.
 
 use ferrojs_bytecode::testing::{run, Outcome, ToyCtx};
-use ferrojs_bytecode::{disassemble, verify};
+use ferrojs_bytecode::{disassemble, verify, ErrorKind};
 use ferrojs_compiler::{compile_function_source, CompileError, CompiledFunction};
 use ferrojs_value::{Kind, Value};
 
@@ -19,12 +19,17 @@ fn compile(src: &str) -> CompiledFunction {
 }
 
 fn call(f: &CompiledFunction, args: &[f64]) -> Outcome {
+    call_toy(f, args).0
+}
+
+fn call_toy(f: &CompiledFunction, args: &[f64]) -> (Outcome, ToyCtx) {
     let mut cx = ToyCtx::new(&f.limits());
     cx.constants = f.constant_values();
     for (i, &a) in args.iter().enumerate().take(f.params as usize) {
         cx.regs[i] = Value::number(a);
     }
-    run(&f.code, &mut cx, 10_000_000)
+    let out = run(&f.code, &mut cx, 10_000_000);
+    (out, cx)
 }
 
 fn show(v: Value) -> String {
@@ -40,10 +45,15 @@ fn show(v: Value) -> String {
     }
 }
 
-fn show_outcome(o: Outcome) -> String {
+fn show_outcome((o, cx): (Outcome, ToyCtx)) -> String {
     match o {
         Outcome::Returned(v) => show(v),
-        Outcome::Threw(v) => format!("throw:{}", show(v)),
+        // The toy has no error objects; it records which error was thrown.
+        Outcome::Threw(v) => match cx.last_error {
+            Some(ErrorKind::UninitializedBinding) => "throw:ReferenceError".into(),
+            Some(ErrorKind::ConstAssignment) => "throw:TypeError".into(),
+            None => format!("throw:{}", show(v)),
+        },
         Outcome::StepLimit => "step limit".into(),
     }
 }
@@ -94,6 +104,38 @@ const CASES: &[(&str, &[&[f64]])] = &[
     ("function f(a) { 'use strict'; let big = 1.5e300; return big * big + 0.1 + 1e-7; }", &[&[0.0]]),
     ("function f(n) { var x; if (n) { var x = 5; } return x; }", &[&[0.0], &[1.0]]),
     ("function f(n) { let r = 0; for (let i = 0; i < 3; i++) { let k; if (i === 1) k = 5; r = r * 10 + (k === undefined ? 1 : k); } return r; }", &[&[0.0]]),
+    // switch (1.6b)
+    ("function f(a) { let r = 0; switch (a) { case 1: r += 1; case 2: r += 2; break; case 3: r += 3; default: r += 10; case 4: r += 4; } return r; }", &[&[1.0], &[2.0], &[3.0], &[4.0], &[5.0], &[f64::NAN]]),
+    ("function f(a) { switch (a) { case 0: return 1; case -0: return 2; } return 3; }", &[&[0.0], &[-0.0], &[1.0]]),
+    ("function f(a) { switch (a) { case 1: return 1; } return 0; }", &[&[1.0], &[2.0]]),
+    ("function f(a) { switch (a) { default: return 7; } }", &[&[1.0]]),
+    ("function f(a) { switch (a) {} return 5; }", &[&[1.0]]),
+    ("function f(a) { let n = 0; switch (a++) { case (n += 1, 1): n += 10; case (n += 100, 2): n += 1000; } return n * 10 + a; }", &[&[1.0], &[2.0], &[3.0]]),
+    ("function f(n) { let s = 0; for (let i = 0; i < n; i++) { switch (i % 3) { case 0: continue; case 1: s += i; break; default: s += 100; } s += 1000; } return s; }", &[&[7.0]]),
+    ("function f(n) { let s = 0; out: for (let i = 0; i < n; i++) { switch (i) { case 3: break out; default: s += i; } } return s; }", &[&[10.0]]),
+    ("function f(a) { lbl: switch (a) { case 1: { break lbl; } case 2: return 2; } return 9; }", &[&[1.0], &[2.0]]),
+    // TDZ (1.6b): run-time checks where order isn't provable.
+    ("function f(a) { if (a) { return x; } let x = 1; return x; }", &[&[1.0], &[0.0]]),
+    ("function f(a) { let x = x + 1; return x; }", &[&[0.0]]),
+    ("function f(a) { const c = a > 0 ? c : 2; return c; }", &[&[1.0], &[-1.0]]),
+    ("function f(a) { { if (a) x = 5; let x = 1; return x; } }", &[&[1.0], &[0.0]]),
+    ("function f(a) { switch (a) { case 0: let y = 1; case 1: return y; } return 9; }", &[&[0.0], &[1.0], &[2.0]]),
+    ("function f(a) { switch (a) { case 0: const k = 4; return k; default: return 5; } }", &[&[0.0], &[1.0]]),
+    ("function f(n) { let s = 0; for (let i = 0; i < n; i++) { if (i === 2) { s += y; } let y = i * 10; s += y; } return s; }", &[&[2.0], &[3.0]]),
+    ("function f(a) { let r = 0; for (let i = 0; i < 3; i++) { let z; if (i === 1) z = a; r = r * 10 + (z ?? 7); } return r; }", &[&[4.0]]),
+    ("function f(a) { { a = a + 1; } let x = a; return x; }", &[&[1.0]]),
+    ("function f(a) { let q = 1; switch (a) { case 0: return q; } return -q; }", &[&[0.0], &[1.0]]),
+    // const assignment (1.6b): TypeError, after the right side runs.
+    ("function f(a) { const c = 1; c = 2; return c; }", &[&[0.0]]),
+    ("function f(a) { const c = a; c ||= 5; return c; }", &[&[1.0], &[0.0]]),
+    ("function f(a) { const c = a; c &&= 5; return c; }", &[&[1.0], &[0.0]]),
+    ("function f(a) { const c = a; c ??= 5; return c; }", &[&[1.0]]),
+    ("function f(a) { const c = 1; c += 1; return c; }", &[&[0.0]]),
+    ("function f(a) { const c = 1; c++; return c; }", &[&[0.0]]),
+    ("function f(a) { const c = 1; return --c; }", &[&[0.0]]),
+    ("function f(a) { const c = 1; return c--; }", &[&[0.0]]),
+    ("function f(a) { 'use strict'; const c = 1; c = 2; }", &[&[0.0]]),
+    ("function f(a) { if (a) { c = 5; } const c = 1; c = 3; }", &[&[1.0], &[0.0]]),
 ];
 
 fn node_results() -> Option<Vec<String>> {
@@ -125,7 +167,7 @@ fn node_results() -> Option<Vec<String>> {
                 })
                 .collect();
             script.push_str(&format!(
-                "out.push((()=>{{{src}\ntry{{return show(f({}));}}catch(e){{return'throw:'+show(e);}}}})());\n",
+                "out.push((()=>{{{src}\ntry{{return show(f({}));}}catch(e){{return'throw:'+(e instanceof Error?e.name:show(e));}}}})());\n",
                 args.join(",")
             ));
         }
@@ -164,7 +206,7 @@ fn compiled_functions_match_node() {
         }
         let f = compile(src);
         for args in *calls {
-            let got = show_outcome(call(&f, args));
+            let got = show_outcome(call_toy(&f, args));
             assert_eq!(got, expected[i], "{src} with {args:?}");
             i += 1;
             checked += 1;
@@ -227,16 +269,10 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function f() { return this; }",
         "function f() { return typeof 1; }",
         "function f(o) { return o.p; }",
-        "function f() { switch (1) {} }",
         "function f() { try {} catch (e) {} }",
         "function f() { for (var k in {}) ; }",
         "function* f() {}",
         "async function f() {}",
-        "function f() { const c = 1; c = 2; }",
-        "function f() { const c = 1; c++; }",
-        // The TDZ is checked statically in 1.6a: these may hit it.
-        "function f() { x; let x = 1; }",
-        "function f() { let x = x; }",
         "function f() { return 1n; }",
         "var outer = 1; function f() { return outer; }",
     ] {

@@ -674,3 +674,32 @@ planning document and gets logged here as each is implemented.
   exist (top-level bindings must be global, ARCHITECTURE.md §8);
   separate `rt_*` functions per new op (a dozen near-identical trait
   methods).
+
+## D-034 TDZ marker and run-time TDZ checks only where needed
+- **Status:** Accepted (autopilot, 2026-11-21)
+- **Choice:** the internal "uninitialized" marker is `TAG_OTHER` with the
+  reserved kind `0xFFFF` and offset 0 (`Value::UNINITIALIZED`,
+  `Kind::Uninitialized`, `is_uninitialized`). `from_bits_checked`
+  rejects it, so cache input can't contain it; it is not a heap
+  reference, so a GC that scans value slots by kind skips it. New ops:
+  `LoadUninitialized dst`, `CheckInitialized src` (throws a
+  `ReferenceError` through `rt_throw_error(ErrorKind::UninitializedBinding)`)
+  and `ThrowConstAssign` (a terminator; `TypeError`). The compiler
+  checks only bindings that need it: a `let`/`const` gets the marker at
+  scope entry and a check at every use only if some use starts before
+  its declarator ends (found by an `oxc_ast_visit` pass over the body),
+  or if it is declared in a `switch` case block, where a case can jump
+  past the declaration. Every other use is proven to run after
+  initialization, because within one function without closures textual
+  order is execution order for lexical bindings. Closures (1.6d) add
+  their own rule: uses from a nested function always check unless the
+  binding is initialized before the closure is created.
+- **Order of checks** follows the spec: an assignment evaluates its
+  right side first, then SetMutableBinding does the TDZ check
+  (`ReferenceError`) and then the `const` check (`TypeError`); compound,
+  logical and update assignments read (and check) the target first, and
+  a short-circuiting logical assignment to a `const` doesn't throw.
+- **Rejected:** checking every lexical use (a check per read in hot loops
+  for no benefit); building oxc's full `AstNodes` table to get reference
+  positions (memory and time for every parse, when one visitor over the
+  function body suffices).

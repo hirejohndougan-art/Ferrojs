@@ -65,6 +65,7 @@ fn kind(values: Vec<Value>) -> u64 {
             Kind::Double(d) => d.to_bits(),
             Kind::Bool(b) => b as u64,
             Kind::Object(r) | Kind::String(r) | Kind::Other(_, r) => r.0 as u64,
+            Kind::Uninitialized => 7,
             Kind::Undefined | Kind::Null => 1,
         });
     }

@@ -31,6 +31,15 @@ pub enum Flow {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Thrown;
 
+/// Errors op handlers ask the runtime to throw.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ErrorKind {
+    /// `ReferenceError`: a binding was used in its temporal dead zone.
+    UninitializedBinding,
+    /// `TypeError`: assignment to a `const` binding.
+    ConstAssignment,
+}
+
 /// The result of a runtime function that may throw.
 pub type Completion = Result<Value, Thrown>;
 
@@ -89,6 +98,9 @@ pub trait OpCtx {
     fn env_set(&mut self, slot: EnvSlot, v: Value) -> Result<(), Thrown>;
 
     // Named runtime functions: the slow paths every tier calls.
+
+    /// Creates and throws the error `e` describes; returns [`Flow::Throw`].
+    fn rt_throw_error(&mut self, e: ErrorKind) -> Flow;
 
     /// `a + b` for operands the fast path didn't handle.
     fn rt_add(&mut self, a: Value, b: Value) -> Completion;

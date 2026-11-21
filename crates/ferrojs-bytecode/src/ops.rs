@@ -13,7 +13,8 @@ use ferrojs_value::Value;
 use crate::number::{self, CompareOp, NumericOp, UnaryOp};
 #[allow(unused_imports)]
 use crate::{
-    Completion, Const, Count, EnvSlot, Feedback, Flow, Ic, Imm, Label, OpCtx, Reg, Thrown,
+    Completion, Const, Count, EnvSlot, ErrorKind, Feedback, Flow, Ic, Imm, Label, OpCtx, Reg,
+    Thrown,
 };
 
 /// `int32 op int32` without overflow, else `number op number`, else `None`.
@@ -480,5 +481,32 @@ define_ops! {
         flags(branch)
         handler(cx) {
             if cx.reg(cond).is_nullish() { Flow::Next } else { Flow::Jump(target) }
+        }
+
+    /// `dst = ` the TDZ marker (D-034): the binding in `dst` is not
+    /// initialized yet.
+    LoadUninitialized(load_uninitialized) { dst: Reg }
+        flags()
+        handler(cx) {
+            cx.set(dst, Value::UNINITIALIZED);
+            Flow::Next
+        }
+
+    /// Throws a `ReferenceError` if `src` holds the TDZ marker.
+    CheckInitialized(check_initialized) { src: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            if cx.reg(src).is_uninitialized() {
+                cx.rt_throw_error(ErrorKind::UninitializedBinding)
+            } else {
+                Flow::Next
+            }
+        }
+
+    /// Throws the `TypeError` for an assignment to a `const` binding.
+    ThrowConstAssign(throw_const_assign) {}
+        flags(terminator, may_throw, may_gc)
+        handler(cx) {
+            cx.rt_throw_error(ErrorKind::ConstAssignment)
         }
 }

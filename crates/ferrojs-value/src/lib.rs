@@ -15,7 +15,13 @@
 //! 0xFFFD           object ref     payload low 32 bits = heap offset (D-002)
 //! 0xFFFE           string ref     payload low 32 bits = heap offset
 //! 0xFFFF           other heap ref bits 32..47 = kind (symbol, bigint), low 32 = offset
+//!                  kind 0xFFFF, offset 0: the internal "uninitialized" marker
 //! ```
+//!
+//! The uninitialized marker (D-034) fills `let`/`const`/`class` bindings
+//! in their temporal dead zone. It never reaches JavaScript code: reading
+//! it throws a `ReferenceError`. [`Value::from_bits_checked`] rejects it,
+//! so untrusted input (cache files) can't smuggle it in.
 //!
 //! Heap references are 32-bit offsets into the engine instance's heap cage,
 //! never raw pointers, so this crate is entirely safe Rust.
@@ -42,6 +48,8 @@ const TAG_INT32: u64 = 0xFFFC;
 const TAG_OBJECT: u64 = 0xFFFD;
 const TAG_STRING: u64 = 0xFFFE;
 const TAG_OTHER: u64 = 0xFFFF;
+/// The `OtherKind` bits reserved for the uninitialized marker.
+const MARKER_KIND: u64 = 0xFFFF;
 
 /// A 32-bit offset into the engine instance's heap cage (D-002).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -76,6 +84,9 @@ pub enum Kind {
     Object(HeapRef),
     String(HeapRef),
     Other(OtherKind, HeapRef),
+    /// The internal TDZ marker ([`Value::UNINITIALIZED`]); never a
+    /// JavaScript value.
+    Uninitialized,
 }
 
 /// A JavaScript value in 64 bits.
@@ -87,6 +98,8 @@ impl Value {
     pub const NULL: Value = Value(TAG_NULL << TAG_SHIFT);
     pub const TRUE: Value = Value((TAG_BOOL << TAG_SHIFT) | 1);
     pub const FALSE: Value = Value(TAG_BOOL << TAG_SHIFT);
+    /// The internal marker for a binding in its temporal dead zone (D-034).
+    pub const UNINITIALIZED: Value = Value((TAG_OTHER << TAG_SHIFT) | (MARKER_KIND << 32));
 
     #[inline]
     const fn tagged(tag: u64, payload: u64) -> Value {
@@ -201,6 +214,12 @@ impl Value {
         self.0 == Value::NULL.0
     }
 
+    /// The TDZ marker.
+    #[inline]
+    pub const fn is_uninitialized(self) -> bool {
+        self.0 == Value::UNINITIALIZED.0
+    }
+
     /// `null` or `undefined`.
     #[inline]
     pub const fn is_nullish(self) -> bool {
@@ -249,6 +268,7 @@ impl Value {
             TAG_INT32 => Kind::Int32(payload as u32 as i32),
             TAG_OBJECT => Kind::Object(HeapRef(payload as u32)),
             TAG_STRING => Kind::String(HeapRef(payload as u32)),
+            _ if self.0 == Value::UNINITIALIZED.0 => Kind::Uninitialized,
             _ => {
                 // Constructors only ever store valid kinds.
                 let kind = OtherKind::from_bits((payload >> 32) as u16)
@@ -268,6 +288,26 @@ impl fmt::Debug for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninitialized_marker() {
+        let m = Value::UNINITIALIZED;
+        assert!(m.is_uninitialized());
+        assert_eq!(m.kind(), Kind::Uninitialized);
+        assert!(!m.is_nullish() && !m.is_number() && m.as_bool().is_none());
+        // Untrusted input can't produce it.
+        assert_eq!(Value::from_bits_checked(m.to_bits()), None);
+        // Nothing else is the marker.
+        for v in [
+            Value::UNDEFINED,
+            Value::NULL,
+            Value::from_i32(0),
+            Value::other(OtherKind::Symbol, HeapRef(0)),
+            Value::other(OtherKind::BigInt, HeapRef(u32::MAX)),
+        ] {
+            assert!(!v.is_uninitialized());
+        }
+    }
 
     #[test]
     fn int32_and_bool_accessors() {

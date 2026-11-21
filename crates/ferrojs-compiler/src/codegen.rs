@@ -1,14 +1,16 @@
-//! Bytecode generation, part 1a (task 1.6a, D-033).
+//! Bytecode generation, parts 1a and 1b (tasks 1.6a/b, D-033, D-034).
 //!
 //! Compiles one function body to register bytecode (D-019): parameters
 //! are `r0..rP`, every other binding of the function gets a fixed register
 //! after them, and temporaries are allocated stack-wise above the locals.
-//! This part handles functions whose bindings are all uncaptured locals,
-//! with number, boolean, `null` and `undefined` values, the operators on
-//! them and structured control flow. Everything else is reported as
-//! [`CompileError::Unsupported`], never miscompiled: nested functions,
-//! closures, calls, objects, strings, globals, `switch`, `try`, and any
-//! access the compiler can't prove happens outside the temporal dead zone.
+//! This handles functions whose bindings are all uncaptured locals, with
+//! number, boolean, `null` and `undefined` values, the operators on them,
+//! structured control flow and `switch`. `let`/`const` bindings that may
+//! be used in their temporal dead zone hold the uninitialized marker until
+//! declared and are checked at every use; the rest are proven safe at
+//! compile time. Assigning a `const` throws a `TypeError`. Everything else
+//! is reported as [`CompileError::Unsupported`], never miscompiled: nested
+//! functions, closures, calls, objects, strings, globals and `try`.
 //!
 //! Register-writing contract: `expr_to(e, dst)` may write `dst` before it
 //! has finished reading `e`'s operands, so `dst` must be a register `e`
@@ -20,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use ferrojs_bytecode::{AsmLabel, Assembler, Const, Ic, Imm, Limits, Reg};
 use ferrojs_value::Value;
 use oxc_ast::ast::*;
+use oxc_ast_visit::{walk, Visit};
 use oxc_semantic::{ScopeFlags, ScopeId, Scoping, SymbolFlags, SymbolId};
 use oxc_span::GetSpan;
 
@@ -144,7 +147,9 @@ pub fn compile_function<'a>(parsed: &Parsed<'a>, func: &Function<'a>) -> CResult
     }
     g.next_reg = count;
     g.claim_locals(count);
+    g.find_early_references(body);
 
+    g.enter_lexical(body.statements.iter());
     for stmt in &body.statements {
         g.statement(stmt)?;
     }
@@ -180,8 +185,21 @@ fn symbol_of(id: &BindingIdentifier<'_>) -> SymbolId {
 struct Breakable {
     labels: Vec<String>,
     break_to: AsmLabel,
-    /// `None` for labeled non-loop statements: only `break label` works.
+    /// `None` for labeled non-loop statements and `switch`.
     continue_to: Option<AsmLabel>,
+    /// Loops and `switch`: an unlabeled `break` can target it.
+    unlabeled_break: bool,
+}
+
+/// Where an assignment stores, and what it must check first.
+#[derive(Clone, Copy)]
+struct Target {
+    reg: Reg,
+    sym: SymbolId,
+    /// Lexical binding that may be in its TDZ: check before storing.
+    tdz: bool,
+    /// `const`: the store throws a `TypeError`.
+    constant: bool,
 }
 
 struct Gen<'s> {
@@ -189,8 +207,12 @@ struct Gen<'s> {
     scope: ScopeId,
     asm: Assembler,
     locals: HashMap<SymbolId, Reg>,
-    /// Lexical bindings (`let`, `const`) whose declaration has run.
+    /// Lexical bindings (`let`, `const`) whose declaration has been
+    /// compiled.
     initialized: HashSet<SymbolId>,
+    /// Lexical bindings that may be used in their TDZ: they start as the
+    /// marker and every use checks it (D-034). The rest are proven safe.
+    needs_tdz: HashSet<SymbolId>,
     next_reg: u32,
     max_reg: u32,
     constants: Vec<f64>,
@@ -211,6 +233,7 @@ impl<'s> Gen<'s> {
             asm: Assembler::new(),
             locals: HashMap::new(),
             initialized: HashSet::new(),
+            needs_tdz: HashSet::new(),
             next_reg: 0,
             max_reg: 0,
             constants: Vec::new(),
@@ -254,6 +277,52 @@ impl<'s> Gen<'s> {
         }
         self.next_reg = next;
         self.max_reg = next;
+    }
+
+    /// Finds the lexical bindings with a use that comes textually before
+    /// the end of their declaration (so it may run in the TDZ). Within one
+    /// function without closures, textual order is execution order for
+    /// everything except `switch`, which [`Gen::switch`] handles.
+    fn find_early_references(&mut self, body: &FunctionBody<'_>) {
+        let mut v = UseOrder {
+            scoping: self.scoping,
+            first_use: HashMap::new(),
+            decl_end: HashMap::new(),
+        };
+        v.visit_function_body(body);
+        for (sym, end) in v.decl_end {
+            if v.first_use.get(&sym).is_some_and(|&start| start < end)
+                && is_lexical(self.scoping.symbol_flags(sym))
+            {
+                self.needs_tdz.insert(sym);
+            }
+        }
+    }
+
+    /// At the start of a scope: puts the TDZ marker into the lexical
+    /// bindings declared directly in `stmts` that need run-time checks.
+    fn enter_lexical<'b, 'c: 'b>(&mut self, stmts: impl Iterator<Item = &'b Statement<'c>>) {
+        for s in stmts {
+            if let Statement::VariableDeclaration(d) = s {
+                self.mark_uninitialized(d);
+            }
+        }
+    }
+
+    fn mark_uninitialized(&mut self, d: &VariableDeclaration<'_>) {
+        if d.kind == VariableDeclarationKind::Var {
+            return;
+        }
+        for decl in &d.declarations {
+            if let BindingPattern::BindingIdentifier(id) = &decl.id {
+                let sym = symbol_of(id);
+                if self.needs_tdz.contains(&sym) {
+                    if let Some(&r) = self.locals.get(&sym) {
+                        self.asm.load_uninitialized(r);
+                    }
+                }
+            }
+        }
     }
 
     fn temp(&mut self) -> CResult<Reg> {
@@ -322,45 +391,89 @@ impl<'s> Gen<'s> {
         }
     }
 
-    /// The register to read for `id`, after the TDZ check (static here).
-    fn read_local(&self, id: &IdentifierReference<'_>) -> CResult<Option<Reg>> {
+    /// The register to read for `id`, after its TDZ check.
+    fn read_local(&mut self, id: &IdentifierReference<'_>) -> CResult<Option<Reg>> {
         let Some(sym) = self.resolve(id) else {
             return Ok(None);
         };
         let r = self.local_for(sym, id.span)?;
-        self.check_initialized(sym, id.span)?;
+        if self.binding_kind(sym, id.span)? {
+            self.asm.check_initialized(r);
+        }
         Ok(Some(r))
     }
 
-    fn check_initialized(&self, sym: SymbolId, span: oxc_span::Span) -> CResult<()> {
+    /// Rejects bindings this part can't handle; returns whether a use
+    /// needs a run-time TDZ check.
+    fn binding_kind(&self, sym: SymbolId, span: oxc_span::Span) -> CResult<bool> {
         let flags = self.scoping.symbol_flags(sym);
-        if flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::Class)
-            && !self.initialized.contains(&sym)
-        {
-            return unsupported("an access that may be in the temporal dead zone", span);
-        }
         if flags.intersects(SymbolFlags::Function | SymbolFlags::Class | SymbolFlags::CatchVariable)
         {
             return unsupported("function, class and catch bindings", span);
         }
-        Ok(())
+        if !is_lexical(flags) {
+            return Ok(false);
+        }
+        if self.needs_tdz.contains(&sym) {
+            return Ok(true);
+        }
+        if !self.initialized.contains(&sym) {
+            // `find_early_references` should have caught this use.
+            return unsupported("an access the TDZ analysis didn't expect", span);
+        }
+        Ok(false)
     }
 
-    /// The register to write for an assignment to `id`.
-    fn write_local(&self, id: &IdentifierReference<'_>) -> CResult<Reg> {
+    /// Where an assignment to `id` stores.
+    fn write_target(&self, id: &IdentifierReference<'_>) -> CResult<Target> {
         let Some(sym) = self.resolve(id) else {
             return unsupported("assignment to a global variable", id.span);
         };
-        let r = self.local_for(sym, id.span)?;
-        self.check_initialized(sym, id.span)?;
-        if self
+        let reg = self.local_for(sym, id.span)?;
+        let tdz = self.binding_kind(sym, id.span)?;
+        let constant = self
             .scoping
             .symbol_flags(sym)
-            .contains(SymbolFlags::ConstVariable)
-        {
-            return unsupported("assignment to a const binding", id.span);
+            .contains(SymbolFlags::ConstVariable);
+        Ok(Target {
+            reg,
+            sym,
+            tdz,
+            constant,
+        })
+    }
+
+    /// Reads an assignment target's current value (with its TDZ check),
+    /// for compound and logical assignments and updates.
+    fn read_target(&mut self, t: Target) {
+        if t.tdz {
+            self.asm.check_initialized(t.reg);
         }
-        Ok(r)
+    }
+
+    /// Stores `e`'s value in `t`: SetMutableBinding, after `e` ran.
+    fn store(&mut self, t: Target, e: &Expression<'_>) -> CResult<()> {
+        if t.constant || t.tdz {
+            let v = self.temp()?;
+            self.expr_to(e, v)?;
+            self.store_reg(t, v);
+            self.free(v);
+            Ok(())
+        } else {
+            self.assign_local(t.reg, t.sym, e)
+        }
+    }
+
+    /// Stores register `v` in `t`.
+    fn store_reg(&mut self, t: Target, v: Reg) {
+        if t.tdz {
+            self.asm.check_initialized(t.reg);
+        }
+        if t.constant {
+            self.asm.throw_const_assign();
+        } else if v != t.reg {
+            self.asm.mov(t.reg, v);
+        }
     }
 
     // ---- statements ----
@@ -380,13 +493,18 @@ impl<'s> Gen<'s> {
                     labels,
                     break_to: end,
                     continue_to: None,
+                    unlabeled_break: false,
                 });
                 let r = self.statement(&l.body);
                 self.breakables.pop();
                 self.asm.bind(end);
                 r
             }
-            Statement::BlockStatement(b) => self.statements(&b.body),
+            Statement::BlockStatement(b) => {
+                self.enter_lexical(b.body.iter());
+                self.statements(&b.body)
+            }
+            Statement::SwitchStatement(sw) => self.switch(sw, labels),
             Statement::EmptyStatement(_) | Statement::DebuggerStatement(_) => Ok(()),
             Statement::ExpressionStatement(e) => self.effect(&e.expression),
             Statement::VariableDeclaration(d) => self.declaration(d),
@@ -433,7 +551,10 @@ impl<'s> Gen<'s> {
             Statement::ForStatement(f) => {
                 match &f.init {
                     None => {}
-                    Some(ForStatementInit::VariableDeclaration(d)) => self.declaration(d)?,
+                    Some(ForStatementInit::VariableDeclaration(d)) => {
+                        self.mark_uninitialized(d);
+                        self.declaration(d)?
+                    }
                     Some(init) => self.effect(init.to_expression())?,
                 }
                 let top = self.asm.new_label();
@@ -494,6 +615,58 @@ impl<'s> Gen<'s> {
         Ok(())
     }
 
+    fn switch(&mut self, sw: &SwitchStatement<'_>, labels: Vec<String>) -> CResult<()> {
+        // The discriminant is evaluated before the case block's scope
+        // exists, and kept in a temporary the cases can't assign.
+        let d = self.temp()?;
+        self.expr_to(&sw.discriminant, d)?;
+        // A case can jump past a declaration, so textual order says nothing
+        // about the TDZ here: every lexical binding of the block is checked.
+        let scope = sw.scope_id.get().expect("semantic analysis ran");
+        for sym in self.scoping.iter_bindings_in(scope) {
+            if is_lexical(self.scoping.symbol_flags(sym)) {
+                self.needs_tdz.insert(sym);
+            }
+        }
+        self.enter_lexical(sw.cases.iter().flat_map(|c| c.consequent.iter()));
+
+        let bodies: Vec<AsmLabel> = sw.cases.iter().map(|_| self.asm.new_label()).collect();
+        let end = self.asm.new_label();
+        // Case tests run in source order, skipping `default`; the first
+        // strictly equal one picks the entry point.
+        let t = self.temp()?;
+        for (case, &body) in sw.cases.iter().zip(&bodies) {
+            if let Some(test) = &case.test {
+                self.expr_to(test, t)?;
+                self.asm.strict_equal(t, d, t);
+                self.asm.jump_if_true(t, body);
+            }
+        }
+        self.free(t);
+        let default = sw.cases.iter().position(|c| c.test.is_none());
+        self.asm.jump(default.map_or(end, |i| bodies[i]));
+
+        self.breakables.push(Breakable {
+            labels,
+            break_to: end,
+            continue_to: None,
+            unlabeled_break: true,
+        });
+        let mut result = Ok(());
+        for (case, &body) in sw.cases.iter().zip(&bodies) {
+            self.asm.bind(body);
+            result = self.statements(&case.consequent);
+            if result.is_err() {
+                break;
+            }
+        }
+        self.breakables.pop();
+        result?;
+        self.asm.bind(end);
+        self.free(d);
+        Ok(())
+    }
+
     fn loop_body(
         &mut self,
         labels: Vec<String>,
@@ -505,6 +678,7 @@ impl<'s> Gen<'s> {
             labels,
             break_to,
             continue_to: Some(continue_to),
+            unlabeled_break: true,
         });
         let r = self.statement(body);
         self.breakables.pop();
@@ -520,8 +694,10 @@ impl<'s> Gen<'s> {
         for b in self.breakables.iter().rev() {
             let matches = match label {
                 Some(l) => b.labels.iter().any(|n| n == l.name.as_str()),
-                // Unlabeled break/continue target the innermost loop.
-                None => b.continue_to.is_some(),
+                // Unlabeled `continue` targets the innermost loop, unlabeled
+                // `break` the innermost loop or `switch`.
+                None if is_continue => b.continue_to.is_some(),
+                None => b.unlabeled_break,
             };
             if matches {
                 return if is_continue {
@@ -598,10 +774,7 @@ impl<'s> Gen<'s> {
     fn effect(&mut self, e: &Expression<'_>) -> CResult<()> {
         match e {
             Expression::ParenthesizedExpression(p) => self.effect(&p.expression),
-            Expression::UpdateExpression(u) => {
-                let r = self.update_target(u)?;
-                self.update_op(u, r, r)
-            }
+            Expression::UpdateExpression(u) => self.update(u, None),
             Expression::SequenceExpression(s) => {
                 for e in &s.expressions {
                     self.effect(e)?;
@@ -712,19 +885,7 @@ impl<'s> Gen<'s> {
                 self.expr_to(last, dst)
             }
             Expression::AssignmentExpression(a) => self.assignment(a, dst),
-            Expression::UpdateExpression(u) => {
-                let r = self.update_target(u)?;
-                if u.prefix {
-                    self.update_op(u, r, r)?;
-                    self.asm.mov(dst, r);
-                } else {
-                    // Old value, converted (ToNumeric), is the result.
-                    let ic = self.ic()?;
-                    self.asm.to_numeric(dst, r, ic);
-                    self.update_op(u, r, dst)?;
-                }
-                Ok(())
-            }
+            Expression::UpdateExpression(u) => self.update(u, Some(dst)),
             other => unsupported(expression_name(other), other.span()),
         }
     }
@@ -839,63 +1000,122 @@ impl<'s> Gen<'s> {
         let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left else {
             return unsupported("assignment to a property or a pattern", a.left.span());
         };
-        let target = self.write_local(id)?;
-        let sym = self.resolve(id).expect("write_local resolved it");
+        let t = self.write_target(id)?;
         match a.operator {
-            AssignmentOperator::Assign => {
-                self.assign_local(target, sym, &a.right)?;
-            }
+            AssignmentOperator::Assign => self.store(t, &a.right)?,
             op if op.is_logical() => {
+                self.read_target(t);
                 let end = self.asm.new_label();
                 match op {
-                    AssignmentOperator::LogicalAnd => self.asm.jump_if_false(target, end),
-                    AssignmentOperator::LogicalOr => self.asm.jump_if_true(target, end),
-                    _ => self.asm.jump_if_not_nullish(target, end),
+                    AssignmentOperator::LogicalAnd => self.asm.jump_if_false(t.reg, end),
+                    AssignmentOperator::LogicalOr => self.asm.jump_if_true(t.reg, end),
+                    _ => self.asm.jump_if_not_nullish(t.reg, end),
                 }
-                self.assign_local(target, sym, &a.right)?;
+                self.store(t, &a.right)?;
                 self.asm.bind(end);
             }
             op => {
                 // `x op= e`: the old x is read before e runs.
+                self.read_target(t);
                 let bop = op.to_binary_operator().expect("arithmetic assignment");
-                let rhs_writes = has_side_effects(&a.right);
-                let old = if rhs_writes {
-                    let t = self.temp()?;
-                    self.asm.mov(t, target);
-                    Operand { reg: t, temp: true }
+                let old = if has_side_effects(&a.right) {
+                    let r = self.temp()?;
+                    self.asm.mov(r, t.reg);
+                    Operand { reg: r, temp: true }
                 } else {
                     Operand {
-                        reg: target,
+                        reg: t.reg,
                         temp: false,
                     }
                 };
                 let rhs = self.expr_any(&a.right)?;
-                self.binary_op(bop, target, old.reg, rhs.reg)?;
+                if t.constant || t.tdz {
+                    let v = self.temp()?;
+                    self.binary_op(bop, v, old.reg, rhs.reg)?;
+                    self.store_reg(t, v);
+                    self.free(v);
+                } else {
+                    self.binary_op(bop, t.reg, old.reg, rhs.reg)?;
+                }
                 self.release(rhs);
                 self.release(old);
             }
         }
-        if target != dst {
-            self.asm.mov(dst, target);
+        if t.reg != dst {
+            self.asm.mov(dst, t.reg);
         }
         Ok(())
     }
 
-    fn update_target(&self, u: &UpdateExpression<'_>) -> CResult<Reg> {
-        match &u.argument {
-            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => self.write_local(id),
-            other => unsupported("update of a property", other.span()),
-        }
-    }
-
-    /// `dst = src ± 1` after ToNumeric, for `++`/`--`.
-    fn update_op(&mut self, u: &UpdateExpression<'_>, dst: Reg, src: Reg) -> CResult<()> {
+    /// `x++`, `--x`, …: the result (the old value converted with ToNumeric,
+    /// or the new value) goes to `dst` if there is one.
+    fn update(&mut self, u: &UpdateExpression<'_>, dst: Option<Reg>) -> CResult<()> {
+        let t = match &u.argument {
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => self.write_target(id)?,
+            other => return unsupported("update of a property", other.span()),
+        };
+        self.read_target(t);
         let ic = self.ic()?;
-        match u.operator {
-            UpdateOperator::Increment => self.asm.inc(dst, src, ic),
-            UpdateOperator::Decrement => self.asm.dec(dst, src, ic),
+        let step = |g: &mut Self, d: Reg, s: Reg| match u.operator {
+            UpdateOperator::Increment => g.asm.inc(d, s, ic),
+            UpdateOperator::Decrement => g.asm.dec(d, s, ic),
+        };
+        match dst {
+            Some(dst) if !u.prefix => {
+                let ic = self.ic()?;
+                self.asm.to_numeric(dst, t.reg, ic);
+                if t.constant {
+                    let v = self.temp()?;
+                    step(self, v, dst);
+                    self.store_reg(t, v);
+                    self.free(v);
+                } else {
+                    step(self, t.reg, dst);
+                }
+            }
+            _ => {
+                if t.constant {
+                    let v = self.temp()?;
+                    step(self, v, t.reg);
+                    self.store_reg(t, v);
+                    self.free(v);
+                } else {
+                    step(self, t.reg, t.reg);
+                }
+                if let Some(dst) = dst {
+                    self.asm.mov(dst, t.reg);
+                }
+            }
         }
         Ok(())
+    }
+}
+
+/// Records, per binding, where its first use starts and where its
+/// declaration ends.
+struct UseOrder<'s> {
+    scoping: &'s Scoping,
+    first_use: HashMap<SymbolId, u32>,
+    decl_end: HashMap<SymbolId, u32>,
+}
+
+impl<'a> Visit<'a> for UseOrder<'_> {
+    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+        let sym = it
+            .reference_id
+            .get()
+            .and_then(|r| self.scoping.get_reference(r).symbol_id());
+        if let Some(sym) = sym {
+            let e = self.first_use.entry(sym).or_insert(it.span.start);
+            *e = (*e).min(it.span.start);
+        }
+    }
+
+    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        if let BindingPattern::BindingIdentifier(id) = &it.id {
+            self.decl_end.insert(symbol_of(id), it.span.end);
+        }
+        walk::walk_variable_declarator(self, it);
     }
 }
 
@@ -904,6 +1124,11 @@ impl<'s> Gen<'s> {
 struct Operand {
     reg: Reg,
     temp: bool,
+}
+
+/// `let` and `const` (the bindings with a TDZ that this part compiles).
+fn is_lexical(flags: SymbolFlags) -> bool {
+    flags.intersects(SymbolFlags::BlockScopedVariable | SymbolFlags::ConstVariable)
 }
 
 fn is_loop(s: &Statement<'_>) -> bool {
@@ -997,7 +1222,6 @@ fn statement_name(s: &Statement<'_>) -> &'static str {
     match s {
         Statement::ForInStatement(_) => "for-in",
         Statement::ForOfStatement(_) => "for-of",
-        Statement::SwitchStatement(_) => "switch",
         Statement::TryStatement(_) => "try",
         Statement::WithStatement(_) => "with",
         Statement::FunctionDeclaration(_) => "nested functions",
