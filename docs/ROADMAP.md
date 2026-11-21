@@ -92,11 +92,13 @@ Order matters: each task builds on the ones above it.
 - [x] 1.4 (2026-11-21) Op-definition language: a Rust macro that defines each bytecode
   op once and generates the interpreter handler (later also the
   copy-and-patch stencil and optimizer lowering). needs: 1.1
-- [~] (claimed 2026-11-21 11:20 UTC) 1.5 Parser integration: oxc AST in, plus an early-error pass. Run
+- [x] 1.5 (2026-11-21) Parser integration: oxc AST in, plus an early-error pass. Run
   Test262's syntax (negative parse) tests through it. Pin oxc per D-018
   (newest release whose `rust-version` the toolchain meets). needs: 1.1
 - [ ] 1.6 Bytecode compiler, part 1: expressions, variables, functions,
-  control flow; register-based bytecode. needs: 1.4, 1.5
+  control flow; register-based bytecode. Also accept sloppy-mode call
+  expressions as assignment targets (runtime `ReferenceError`; the 7
+  Annex B failures, D-032). needs: 1.4, 1.5
 - [ ] 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
   layout; proper tail calls designed in. needs: 1.3b, 1.6
 - [ ] 1.8 Objects and shapes (hidden classes), property get/set, prototype

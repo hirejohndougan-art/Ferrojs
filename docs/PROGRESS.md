@@ -145,3 +145,20 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Next: 1.5 parser integration (oxc; check D-018 pinning against the
   toolchain), or 1.8 objects and shapes. Tomorrow is Sunday: the weekly
   report is due first.
+
+## 2026-11-21 11:20 UTC — 1.5 Parser integration
+- Result: merged
+- Changed: new `ferrojs-compiler` crate: oxc 0.158 parser (regex early
+  errors on) + `oxc_semantic` syntax checks + our early-error pass (empty:
+  oxc misses nothing Test262 checks at this pin). The Test262 `ferrojs`
+  engine now parses every run; negative parse-phase tests pass, the rest
+  is "not run". New `parse` fuzz target and `front_end` benchmark. Fixed
+  a gate hole: the runner wrote the baseline before reading it, so the
+  Test262 regression check compared each run with itself (verified it now
+  fails on an injected regression). Not risky, `ferrojs-core` unchanged,
+  so no independent review or CI Miri needed.
+- Decisions: D-032
+- Test262: 8699 (+8699; first real baseline, parse-phase only)
+- Next: 1.8 objects and shapes (risky? touches core heap cells) or 1.6
+  bytecode compiler part 1. Tomorrow is Sunday: the weekly report is due
+  first.
