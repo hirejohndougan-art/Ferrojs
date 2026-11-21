@@ -105,7 +105,7 @@ Order matters: each task builds on the ones above it.
 - [x] 1.6b (2026-11-21) Bytecode compiler, part 1b: the TDZ marker value
   and run-time TDZ checks where the compiler can't prove them away,
   assignment to `const` (TypeError), `switch`. needs: 1.6a
-- [~] (claimed 2026-11-21 14:35 UTC) 1.6c Bytecode compiler, part 1c: `try`/`catch`/`finally` with the
+- [x] 1.6c (2026-11-21) Bytecode compiler, part 1c: `try`/`catch`/`finally` with the
   exception table (ARCHITECTURE.md §3.6), including `break`, `continue`
   and `return` through `finally`. needs: 1.6b
 - [ ] 1.6d Bytecode compiler, part 1d: nested functions and calls

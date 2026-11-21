@@ -189,3 +189,17 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-034
 - Test262: 8699 (+0; the runner doesn't execute code until 1.10)
 - Next: 1.6c try/catch/finally.
+
+## 2026-11-21 15:20 UTC — 1.6c try/catch/finally
+- Result: merged
+- Changed: exception tables (`Handler`, `verify_handlers`: forward-only
+  targets), `Assembler::finish_with_labels`, toy `run_with_handlers` with
+  uncatchable termination. The compiler handles `try`/`catch`/`finally`
+  with inline finally blocks and a completion-kind register, so
+  `return`/`break`/`continue` run every enclosing finally once. 23 more
+  Node.js-checked cases.
+- Decisions: D-035
+- Test262: 8699 (+0; the runner doesn't execute code until 1.10)
+- Next: 1.6d functions, calls, closures, globals, strings. It needs
+  function objects and calls in some form before the interpreter (1.7):
+  consider splitting it, or doing 1.8 objects and shapes first.
