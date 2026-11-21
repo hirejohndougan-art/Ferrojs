@@ -108,12 +108,15 @@ Order matters: each task builds on the ones above it.
 - [x] 1.6c (2026-11-21) Bytecode compiler, part 1c: `try`/`catch`/`finally` with the
   exception table (ARCHITECTURE.md §3.6), including `break`, `continue`
   and `return` through `finally`. needs: 1.6b
-- [ ] 1.6d Bytecode compiler, part 1d: nested functions and calls
-  (`Call`/`Return` ops per ARCHITECTURE.md §3.3), captured variables in
-  `Environment` slots, per-iteration `let` bindings, script top level
-  and globals (`LoadName`/`StoreName`), strings in the constant pool.
-  Also accept sloppy-mode call expressions as assignment targets
-  (runtime `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6c
+- [~] (claimed 2026-11-21 15:30 UTC) 1.6d Bytecode compiler, part 1d: nested functions,
+  closures and calls (`CreateClosure`, `Call`/`TailCall` returning to
+  the dispatch loop per ARCHITECTURE.md §3.3–3.4), captured variables in
+  environments, per-iteration `let` bindings; the toy context grows
+  frames, closures and environments to run them. needs: 1.6c
+- [ ] 1.6e Bytecode compiler, part 1e: script top level and globals
+  (`LoadName`/`StoreName`), strings in the constant pool, `this`. Also
+  accept sloppy-mode call expressions as assignment targets (runtime
+  `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6d, 1.8
 - [ ] 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
   layout; proper tail calls designed in. needs: 1.3b, 1.6d
 - [ ] 1.8 Objects and shapes (hidden classes), property get/set, prototype
