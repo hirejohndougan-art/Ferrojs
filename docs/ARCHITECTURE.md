@@ -193,26 +193,31 @@ reached.
 ### 4.2 Defining an op once
 
 All ops are defined in one file, `ferrojs-bytecode/src/ops.rs`, inside a
-single declarative X-macro:
+single declarative X-macro, `define_ops!` (built in task 1.4, D-031):
 
 ```rust
-ops! {
+define_ops! {
     /// `dst = lhs + rhs` (ApplyStringOrNumericBinaryOperator, `+`).
-    Add { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+    Add(add) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
         flags(may_throw, may_gc, has_ic)
         handler(cx) {
             let (a, b) = (cx.reg(lhs), cx.reg(rhs));
-            if let (Some(x), Some(y)) = (a.as_int32(), b.as_int32()) {
-                if let Some(r) = x.checked_add(y) {
-                    cx.note(ic, Feedback::INT32);
-                    cx.set(dst, Value::int32(r));
-                    return Flow::Next;
-                }
+            if let Some(r) = numeric(cx, ic, a, b, i32::checked_add, |x, y| x + y) {
+                cx.set(dst, r);
+                return Flow::Next;
             }
-            cx.slow(dst, |rt| rt.add(a, b))
+            cx.note(ic, Feedback::OTHER);
+            let c = cx.rt_add(a, b);
+            cx.complete(dst, c)
         }
 }
 ```
+
+The name in parentheses is the snake-case name of the assembler method
+and the handler function. Encoding details as built: prefixes `Wide` =
+0xFE, `ExtraWide` = 0xFF; an `EnvSlot` is two units; jump offsets count
+from the jumping instruction's first byte (prefix included); the
+assembler picks widths, including jump widths, at `finish`.
 
 From this one list the macro generates:
 
@@ -229,8 +234,10 @@ From this one list the macro generates:
    builder. Ops with ICs lower through their CacheIR instead (§7), which
    is why the handler/IC split matters.
 
-Handler bodies are generic over an `OpCtx` trait (`reg`, `set`, `note`,
-`slow`, `jump`, `throw`, …). They contain only the fast path; anything
+Handler bodies are generic over the `OpCtx` trait (`reg`, `set`,
+`constant`, `note`, `throw`, `check_interrupt`, `env_get`/`env_set`, and
+the slow paths `rt_add`, `rt_less_than`, …) and return a `Flow`
+(`Next`, `Jump`, `Return`, `Throw`). They contain only the fast path; anything
 long goes into a named runtime function (`rt.add`) so stencils stay small
 and every tier calls the same slow path. This is what stops tiers from
 disagreeing (plan: "Single op definitions").
@@ -244,6 +251,9 @@ Rules for op definitions:
   op that checks the interrupt flag (D-007) and, later, counts toward tier-up.
   Function entry checks the flag too.
 - No op reads the bytecode stream past its own operands.
+- Only `loop_edge` ops (`JumpLoop`) may jump backward or to themselves,
+  and they may not jump forward; the verifier enforces it, so every loop
+  passes an interrupt check.
 
 ### 4.3 Interpreter loop
 

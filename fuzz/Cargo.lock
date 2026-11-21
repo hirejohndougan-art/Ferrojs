@@ -41,10 +41,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrojs-bytecode"
+version = "0.0.1"
+dependencies = [
+ "ferrojs-value",
+]
+
+[[package]]
 name = "ferrojs-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "ferrojs-bytecode",
  "ferrojs-value",
  "libfuzzer-sys",
 ]

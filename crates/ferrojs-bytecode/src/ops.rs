@@ -1,0 +1,263 @@
+//! Every bytecode op, defined once (D-020). See `define.rs` for the
+//! syntax and what is generated from this list.
+//!
+//! Opcode bytes follow definition order, and cached bytecode (later)
+//! depends on them: add new ops at the end of a group only when no cache
+//! format exists yet, and once one does, bump its version.
+//!
+//! Phase 1 starts with loads, moves, arithmetic, comparisons, jumps and
+//! captured variables; task 1.6 adds what the compiler needs.
+
+use ferrojs_value::Value;
+
+#[allow(unused_imports)]
+use crate::{
+    Completion, Const, Count, EnvSlot, Feedback, Flow, Ic, Imm, Label, OpCtx, Reg, Thrown,
+};
+
+/// `int32 op int32` without overflow, else `number op number`, else `None`.
+/// Records the feedback for the fast cases.
+#[inline]
+fn numeric<C: OpCtx + ?Sized>(
+    cx: &mut C,
+    ic: Ic,
+    a: Value,
+    b: Value,
+    int: impl FnOnce(i32, i32) -> Option<i32>,
+    float: impl FnOnce(f64, f64) -> f64,
+) -> Option<Value> {
+    if let (Some(x), Some(y)) = (a.as_int32(), b.as_int32()) {
+        if let Some(r) = int(x, y) {
+            cx.note(ic, Feedback::INT32);
+            return Some(Value::from_i32(r));
+        }
+    }
+    if let (Some(x), Some(y)) = (a.as_number(), b.as_number()) {
+        cx.note(ic, Feedback::NUMBER);
+        return Some(Value::number(float(x, y)));
+    }
+    None
+}
+
+/// Integer multiply that leaves results JS would make `-0` to the double
+/// path (`0 * -5` is `-0`, which int32 can't hold).
+#[inline]
+fn int_mul(x: i32, y: i32) -> Option<i32> {
+    match x.checked_mul(y) {
+        Some(0) if x < 0 || y < 0 => None,
+        r => r,
+    }
+}
+
+define_ops! {
+    /// `dst = src`.
+    Mov(mov) { dst: Reg, src: Reg }
+        flags()
+        handler(cx) {
+            let v = cx.reg(src);
+            cx.set(dst, v);
+            Flow::Next
+        }
+
+    /// `dst = undefined`.
+    LoadUndefined(load_undefined) { dst: Reg }
+        flags()
+        handler(cx) {
+            cx.set(dst, Value::UNDEFINED);
+            Flow::Next
+        }
+
+    /// `dst = null`.
+    LoadNull(load_null) { dst: Reg }
+        flags()
+        handler(cx) {
+            cx.set(dst, Value::NULL);
+            Flow::Next
+        }
+
+    /// `dst = true`.
+    LoadTrue(load_true) { dst: Reg }
+        flags()
+        handler(cx) {
+            cx.set(dst, Value::TRUE);
+            Flow::Next
+        }
+
+    /// `dst = false`.
+    LoadFalse(load_false) { dst: Reg }
+        flags()
+        handler(cx) {
+            cx.set(dst, Value::FALSE);
+            Flow::Next
+        }
+
+    /// `dst = value` (an int32 immediate).
+    LoadInt(load_int) { dst: Reg, value: Imm }
+        flags()
+        handler(cx) {
+            cx.set(dst, Value::from_i32(value.0));
+            Flow::Next
+        }
+
+    /// `dst = constants[index]`.
+    LoadConst(load_const) { dst: Reg, index: Const }
+        flags()
+        handler(cx) {
+            let v = cx.constant(index);
+            cx.set(dst, v);
+            Flow::Next
+        }
+
+    /// `dst = lhs + rhs` (ApplyStringOrNumericBinaryOperator, `+`).
+    Add(add) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let (a, b) = (cx.reg(lhs), cx.reg(rhs));
+            if let Some(r) = numeric(cx, ic, a, b, i32::checked_add, |x, y| x + y) {
+                cx.set(dst, r);
+                return Flow::Next;
+            }
+            cx.note(ic, Feedback::OTHER);
+            let c = cx.rt_add(a, b);
+            cx.complete(dst, c)
+        }
+
+    /// `dst = lhs - rhs`.
+    Sub(sub) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let (a, b) = (cx.reg(lhs), cx.reg(rhs));
+            if let Some(r) = numeric(cx, ic, a, b, i32::checked_sub, |x, y| x - y) {
+                cx.set(dst, r);
+                return Flow::Next;
+            }
+            cx.note(ic, Feedback::OTHER);
+            let c = cx.rt_sub(a, b);
+            cx.complete(dst, c)
+        }
+
+    /// `dst = lhs * rhs`.
+    Mul(mul) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let (a, b) = (cx.reg(lhs), cx.reg(rhs));
+            if let Some(r) = numeric(cx, ic, a, b, int_mul, |x, y| x * y) {
+                cx.set(dst, r);
+                return Flow::Next;
+            }
+            cx.note(ic, Feedback::OTHER);
+            let c = cx.rt_mul(a, b);
+            cx.complete(dst, c)
+        }
+
+    /// `dst = lhs < rhs`.
+    LessThan(less_than) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let (a, b) = (cx.reg(lhs), cx.reg(rhs));
+            if let (Some(x), Some(y)) = (a.as_int32(), b.as_int32()) {
+                cx.note(ic, Feedback::INT32);
+                cx.set(dst, Value::from_bool(x < y));
+                return Flow::Next;
+            }
+            if let (Some(x), Some(y)) = (a.as_number(), b.as_number()) {
+                cx.note(ic, Feedback::NUMBER);
+                cx.set(dst, Value::from_bool(x < y));
+                return Flow::Next;
+            }
+            cx.note(ic, Feedback::OTHER);
+            let c = cx.rt_less_than(a, b);
+            cx.complete(dst, c)
+        }
+
+    /// `dst = lhs === rhs` (IsStrictlyEqual).
+    StrictEqual(strict_equal) { dst: Reg, lhs: Reg, rhs: Reg }
+        flags()
+        handler(cx) {
+            let (a, b) = (cx.reg(lhs), cx.reg(rhs));
+            let eq = match (a.as_number(), b.as_number()) {
+                (Some(x), Some(y)) => x == y,
+                _ => cx.rt_strict_equal(a, b),
+            };
+            cx.set(dst, Value::from_bool(eq));
+            Flow::Next
+        }
+
+    /// `dst = !src`.
+    Not(not) { dst: Reg, src: Reg }
+        flags()
+        handler(cx) {
+            let v = cx.reg(src);
+            let b = cx.to_boolean(v);
+            cx.set(dst, Value::from_bool(!b));
+            Flow::Next
+        }
+
+    /// Jumps forward to `target`.
+    Jump(jump) { target: Label }
+        flags(jump)
+        handler(cx) {
+            Flow::Jump(target)
+        }
+
+    /// Jumps forward to `target` if ToBoolean(`cond`) is true.
+    JumpIfTrue(jump_if_true) { cond: Reg, target: Label }
+        flags(branch)
+        handler(cx) {
+            let v = cx.reg(cond);
+            if cx.to_boolean(v) { Flow::Jump(target) } else { Flow::Next }
+        }
+
+    /// Jumps forward to `target` if ToBoolean(`cond`) is false.
+    JumpIfFalse(jump_if_false) { cond: Reg, target: Label }
+        flags(branch)
+        handler(cx) {
+            let v = cx.reg(cond);
+            if cx.to_boolean(v) { Flow::Next } else { Flow::Jump(target) }
+        }
+
+    /// Loop back-edge: checks for interrupts (D-007), then jumps backward
+    /// to `target`. The only op allowed to jump backward.
+    JumpLoop(jump_loop) { target: Label }
+        flags(jump, loop_edge, may_throw, may_gc)
+        handler(cx) {
+            match cx.check_interrupt() {
+                Flow::Next => Flow::Jump(target),
+                other => other,
+            }
+        }
+
+    /// `dst = ` the captured variable at `slot`.
+    LoadEnv(load_env) { dst: Reg, slot: EnvSlot }
+        flags(may_throw)
+        handler(cx) {
+            let c = cx.env_get(slot);
+            cx.complete(dst, c)
+        }
+
+    /// The captured variable at `slot` ` = src`.
+    StoreEnv(store_env) { slot: EnvSlot, src: Reg }
+        flags(may_throw)
+        handler(cx) {
+            let v = cx.reg(src);
+            match cx.env_set(slot, v) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// Returns `value` from the function.
+    Return(ret) { value: Reg }
+        flags(terminator)
+        handler(cx) {
+            Flow::Return(cx.reg(value))
+        }
+
+    /// Throws `value`.
+    Throw(throw) { value: Reg }
+        flags(terminator, may_throw)
+        handler(cx) {
+            let v = cx.reg(value);
+            cx.throw(v)
+        }
+}

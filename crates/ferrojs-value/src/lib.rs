@@ -207,6 +207,27 @@ impl Value {
         self.is_undefined() || self.is_null()
     }
 
+    /// The payload of an int32 value; `None` for every other kind
+    /// (including doubles that happen to hold an integer).
+    #[inline]
+    pub const fn as_int32(self) -> Option<i32> {
+        if self.is_int32() {
+            Some((self.0 & LOW32) as u32 as i32)
+        } else {
+            None
+        }
+    }
+
+    /// The payload of a boolean value; `None` for every other kind.
+    #[inline]
+    pub const fn as_bool(self) -> Option<bool> {
+        if self.tag() == TAG_BOOL {
+            Some(self.0 & 1 == 1)
+        } else {
+            None
+        }
+    }
+
     /// The numeric value of an int32 or double, as f64.
     #[inline]
     pub fn as_number(self) -> Option<f64> {
@@ -247,6 +268,19 @@ impl fmt::Debug for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn int32_and_bool_accessors() {
+        for i in [0, 1, -1, i32::MIN, i32::MAX] {
+            assert_eq!(Value::from_i32(i).as_int32(), Some(i));
+        }
+        assert_eq!(Value::from_f64(1.0).as_int32(), None);
+        assert_eq!(Value::TRUE.as_int32(), None);
+        assert_eq!(Value::TRUE.as_bool(), Some(true));
+        assert_eq!(Value::FALSE.as_bool(), Some(false));
+        assert_eq!(Value::from_i32(1).as_bool(), None);
+        assert_eq!(Value::UNDEFINED.as_bool(), None);
+    }
 
     #[test]
     fn singletons_round_trip() {

@@ -528,6 +528,50 @@ autopilot run accepts the decisions it makes: **Accepted (autopilot, date)**.
   new `unsafe` beyond three-line `&self` stores, and moving collection
   later only changes what `Root::get` and `Global::get` read.
 
+## D-031 Op definitions as built: per-op handlers, context trait, assembler layout
+- **Status:** Accepted (autopilot, 2026-11-21)
+- **Choice:** task 1.4 implements D-019/D-020 in the new `ferrojs-bytecode`
+  crate. `define_ops!` (a crate-private `macro_rules!` in `define.rs`,
+  invoked once in `ops.rs`) takes `Name(snake) { field: Kind, … }
+  flags(…) handler(cx) { … }` per op; the snake name is written out
+  because `macro_rules!` can't change case. It generates `Opcode`
+  (numbered 0.. in definition order; `ALL`, `from_byte`, `info`), the
+  metadata table (`OpInfo`: name, operand kinds, `Flags`, unit count),
+  `operands::<Name>` structs, the decoded `Instruction` enum with
+  `encode` and `for_each_operand`, the decoder, one `Assembler` method
+  per op, and one generic handler function per op in `handlers` plus the
+  `execute` dispatch. Encoding: prefix bytes `Wide` = 0xFE and
+  `ExtraWide` = 0xFF (opcodes must stay below them, checked at compile
+  time); an `EnvSlot` is two units; `Imm` and `Label` units are signed.
+  A `Label` is relative to the jumping instruction's first byte,
+  including its prefix. The assembler takes `AsmLabel`s and lays out at
+  `finish`: every instruction starts at its narrowest width and only
+  widens while a jump offset doesn't fit, so layout reaches a fixed point.
+  Flags: `may_throw`, `may_gc`, `has_ic`, `jump`, `branch`, `loop_edge`,
+  `terminator`. The verifier additionally requires that only `loop_edge`
+  ops (today `JumpLoop`) jump backward or to themselves and that they
+  never jump forward, so every loop passes an interrupt check (D-007);
+  plain jumps must go strictly forward. `EnvSlot`s are checked at run
+  time, not by the verifier. Handlers see the machine through the
+  `OpCtx` trait: `reg`/`set`/`constant`/`note`/`throw`/
+  `check_interrupt`/`env_get`/`env_set` plus named slow paths `rt_*`
+  returning `Completion = Result<Value, Thrown>` (the exception is held
+  by the context), and return `Flow` (`Next`, `Jump`, `Return`,
+  `Throw`). `ferrojs_bytecode::testing` has a numbers-only reference
+  context and dispatch loop used by tests, the `bytecode` benchmarks and
+  the `bytecode_verify` fuzz target (verified random code must run on it
+  without panicking). `ferrojs-value` gained `as_int32` and `as_bool`.
+- **Rejected:** slow paths behind a closure (`cx.slow(dst, |rt| …)` in
+  the sketch in ARCHITECTURE.md): a trait method per runtime function is
+  simpler to instantiate per tier and to call from stencils; a single
+  `match` with inline handler bodies (the stencil compiler needs each
+  handler as its own function); fixing jump widths at emit time (forward
+  jumps would all need the widest form); exporting the macro (only this
+  crate defines ops).
+- **Why:** everything per-op comes from one list, and the verifier's
+  rules are exactly what the interpreter relies on, which the fuzz target
+  checks.
+
 ---
 
 The full set of planned decisions (GC, frames, tail calls, baseline tier,

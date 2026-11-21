@@ -1,8 +1,10 @@
 # FerroJS instruction-count baseline (D-015). Written by tools/bench.sh.
 # One line per benchmark: <id> <Callgrind instructions>.
 # toolchain: rustc 1.97.0 (2d8144b78 2026-07-07) / valgrind-3.22.0
+bytecode/bytecode/decode.mixed 131342
+bytecode/bytecode/dispatch.count_loop 837412
 heap/heap_alloc/bump_alloc.mixed 167391
-heap/heap_alloc/collect.half_live 439835
+heap/heap_alloc/collect.half_live 439836
 heap/heap_alloc/cx_alloc.mixed 214725
 value/value_encoding/as_number.mixed 25447
 value/value_encoding/from_bits_checked.mixed 22236

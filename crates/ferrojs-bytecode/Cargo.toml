@@ -1,0 +1,14 @@
+[package]
+name = "ferrojs-bytecode"
+description = "Bytecode op definitions, encoder, decoder, disassembler and verifier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ferrojs-value = { path = "../ferrojs-value" }
+
+[lints]
+workspace = true

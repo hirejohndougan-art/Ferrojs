@@ -6,6 +6,7 @@ through `tools/fuzz.sh`; no nightly or `cargo-fuzz` install is needed.
 | Target | What it checks |
 | --- | --- |
 | `value_bits` | Any 64 bits through `Value::from_bits_checked`: accepted bits decode and re-encode to the same bits |
+| `bytecode_verify` | Any bytes through the bytecode verifier: no panics; accepted code disassembles, re-encodes to the same instructions, and runs on the toy context without panicking |
 | `value_roundtrip` | Every constructor's output is accepted by the checked decoder and decodes to what went in; `Value::number` keeps value, sign of zero and the right int32/double form |
 
 ## Running
