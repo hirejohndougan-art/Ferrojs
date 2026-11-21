@@ -48,7 +48,7 @@ it uses the branded handles of §6.
 
 Internal marker values that must never reach JavaScript (the TDZ
 "uninitialized" marker, array holes, "no value" in frames) need one more
-encoding. Task 1.6 adds it as `TAG_OTHER` with a reserved kind and logs a
+encoding. Task 1.6b adds it as `TAG_OTHER` with a reserved kind and logs a
 decision; `from_bits_checked` must keep rejecting it for cache input unless
 the cache format says otherwise.
 

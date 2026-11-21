@@ -10,6 +10,7 @@
 
 use ferrojs_value::Value;
 
+use crate::number::{self, CompareOp, NumericOp, UnaryOp};
 #[allow(unused_imports)]
 use crate::{
     Completion, Const, Count, EnvSlot, Feedback, Flow, Ic, Imm, Label, OpCtx, Reg, Thrown,
@@ -47,6 +48,79 @@ fn int_mul(x: i32, y: i32) -> Option<i32> {
         Some(0) if x < 0 || y < 0 => None,
         r => r,
     }
+}
+
+/// The handler body shared by every [`NumericOp`] op: int32 fast path,
+/// then number, then the runtime.
+#[inline]
+fn numeric_op<C: OpCtx + ?Sized>(
+    cx: &mut C,
+    op: NumericOp,
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    ic: Ic,
+) -> Flow {
+    let (a, b) = (cx.reg(lhs), cx.reg(rhs));
+    if let Some(r) = numeric(
+        cx,
+        ic,
+        a,
+        b,
+        |x, y| number::numeric_int(op, x, y),
+        |x, y| number::numeric(op, x, y),
+    ) {
+        cx.set(dst, r);
+        return Flow::Next;
+    }
+    cx.note(ic, Feedback::OTHER);
+    let c = cx.rt_numeric(op, a, b);
+    cx.complete(dst, c)
+}
+
+/// The handler body shared by every [`CompareOp`] op.
+#[inline]
+fn compare_op<C: OpCtx + ?Sized>(
+    cx: &mut C,
+    op: CompareOp,
+    dst: Reg,
+    lhs: Reg,
+    rhs: Reg,
+    ic: Ic,
+) -> Flow {
+    let (a, b) = (cx.reg(lhs), cx.reg(rhs));
+    if let (Some(x), Some(y)) = (a.as_number(), b.as_number()) {
+        let fb = if a.is_int32() && b.is_int32() {
+            Feedback::INT32
+        } else {
+            Feedback::NUMBER
+        };
+        cx.note(ic, fb);
+        cx.set(dst, Value::from_bool(number::compare(op, x, y)));
+        return Flow::Next;
+    }
+    cx.note(ic, Feedback::OTHER);
+    let c = cx.rt_compare(op, a, b);
+    cx.complete(dst, c)
+}
+
+/// The handler body shared by every [`UnaryOp`] op.
+#[inline]
+fn unary_op<C: OpCtx + ?Sized>(cx: &mut C, op: UnaryOp, dst: Reg, src: Reg, ic: Ic) -> Flow {
+    let a = cx.reg(src);
+    if let Some(r) = a.as_int32().and_then(|x| number::unary_int(op, x)) {
+        cx.note(ic, Feedback::INT32);
+        cx.set(dst, Value::from_i32(r));
+        return Flow::Next;
+    }
+    if let Some(x) = a.as_number() {
+        cx.note(ic, Feedback::NUMBER);
+        cx.set(dst, Value::number(number::unary(op, x)));
+        return Flow::Next;
+    }
+    cx.note(ic, Feedback::OTHER);
+    let c = cx.rt_unary(op, a);
+    cx.complete(dst, c)
 }
 
 define_ops! {
@@ -259,5 +333,152 @@ define_ops! {
         handler(cx) {
             let v = cx.reg(value);
             cx.throw(v)
+        }
+
+    /// `dst = lhs / rhs`.
+    Div(div) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            numeric_op(cx, NumericOp::Div, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs % rhs`.
+    Rem(rem) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            numeric_op(cx, NumericOp::Rem, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs ** rhs`.
+    Exp(exp) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            numeric_op(cx, NumericOp::Exp, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs & rhs`.
+    BitAnd(bit_and) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            numeric_op(cx, NumericOp::BitAnd, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs | rhs`.
+    BitOr(bit_or) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            numeric_op(cx, NumericOp::BitOr, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs ^ rhs`.
+    BitXor(bit_xor) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            numeric_op(cx, NumericOp::BitXor, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs << rhs`.
+    Shl(shl) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            numeric_op(cx, NumericOp::Shl, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs >> rhs`.
+    Shr(shr) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            numeric_op(cx, NumericOp::Shr, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs >>> rhs`.
+    UShr(ushr) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            numeric_op(cx, NumericOp::UShr, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs > rhs`.
+    GreaterThan(greater_than) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            compare_op(cx, CompareOp::Greater, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs <= rhs`.
+    LessEqual(less_equal) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            compare_op(cx, CompareOp::LessEq, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = lhs >= rhs`.
+    GreaterEqual(greater_equal) { dst: Reg, lhs: Reg, rhs: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            compare_op(cx, CompareOp::GreaterEq, dst, lhs, rhs, ic)
+        }
+
+    /// `dst = +src` (ToNumber).
+    ToNumber(to_number) { dst: Reg, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            unary_op(cx, UnaryOp::ToNumber, dst, src, ic)
+        }
+
+    /// `dst = ToNumeric(src)` (the old value of `x++`).
+    ToNumeric(to_numeric) { dst: Reg, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            unary_op(cx, UnaryOp::ToNumeric, dst, src, ic)
+        }
+
+    /// `dst = -src`.
+    Negate(negate) { dst: Reg, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            unary_op(cx, UnaryOp::Negate, dst, src, ic)
+        }
+
+    /// `dst = ~src`.
+    BitNot(bit_not) { dst: Reg, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            unary_op(cx, UnaryOp::BitNot, dst, src, ic)
+        }
+
+    /// `dst = ToNumeric(src) + 1`.
+    Inc(inc) { dst: Reg, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            unary_op(cx, UnaryOp::Inc, dst, src, ic)
+        }
+
+    /// `dst = ToNumeric(src) - 1`.
+    Dec(dec) { dst: Reg, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            unary_op(cx, UnaryOp::Dec, dst, src, ic)
+        }
+
+    /// `dst = lhs == rhs` (IsLooselyEqual).
+    Equal(equal) { dst: Reg, lhs: Reg, rhs: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (a, b) = (cx.reg(lhs), cx.reg(rhs));
+            if let (Some(x), Some(y)) = (a.as_number(), b.as_number()) {
+                cx.set(dst, Value::from_bool(x == y));
+                return Flow::Next;
+            }
+            let c = cx.rt_loose_equal(a, b);
+            cx.complete(dst, c)
+        }
+
+    /// Jumps forward to `target` unless `cond` is `undefined` or `null`
+    /// (for `??` and `??=`).
+    JumpIfNotNullish(jump_if_not_nullish) { cond: Reg, target: Label }
+        flags(branch)
+        handler(cx) {
+            if cx.reg(cond).is_nullish() { Flow::Next } else { Flow::Jump(target) }
         }
 }

@@ -620,3 +620,57 @@ planning document and gets logged here as each is implemented.
   lint churn, see above); reporting parse-only successes of negative
   tests as "not run" (hides parser gaps from the dashboard); our own AST
   (D-018).
+
+## D-033 Bytecode compiler, part 1a: registers, static TDZ, shared number semantics
+- **Status:** Accepted (autopilot, 2026-11-21)
+- **Choice:** task 1.6 is split into 1.6a–c (roadmap). 1.6a adds
+  `ferrojs_compiler::codegen`: `compile_function(&Parsed, &Function)`
+  produces a `CompiledFunction` (name, `params` P, `registers` R, number
+  constant pool, IC count, strict flag, code). Registers: parameters are
+  `r0..rP` (a repeated sloppy-mode name binds the last one); every other
+  binding owned by the function (its scope, or block scopes under it,
+  but not nested functions) gets a fixed register in symbol order;
+  temporaries are a stack above the locals. A plain local read uses the
+  local's register directly; a left operand is copied to a temporary
+  when the right side may assign. `expr_to(e, dst)` may write `dst`
+  early, so assignments go straight into a local only for expressions
+  that write their destination last and don't mention it. Int32
+  literals use `LoadInt`; other numbers are pooled by bit pattern.
+  Unresolved `undefined`, `NaN` and `Infinity` compile to constants
+  (safe while `with` and direct `eval` are unsupported).
+- **TDZ in 1.6a is static:** a `let`/`const` read before its
+  declaration has been compiled, or any read of a function, class or
+  catch binding, is rejected as unsupported rather than checked at run
+  time. Within one function without closures or `switch`, textual order
+  is execution order for lexical bindings, so this never accepts a TDZ
+  violation. 1.6b replaces it with the marker value and run-time checks.
+  Assignment to `const` is likewise unsupported until 1.6b emits the
+  `TypeError`.
+- **Ops added** (at the end of the list; no cache format exists yet):
+  `Div Rem Exp BitAnd BitOr BitXor Shl Shr UShr` (one slow path,
+  `rt_numeric(NumericOp, …)`), `GreaterThan LessEqual GreaterEqual`
+  (`rt_compare(CompareOp, …)`), `ToNumber ToNumeric Negate BitNot Inc
+  Dec` (`rt_unary(UnaryOp, …)`), `Equal` (`rt_loose_equal`) and
+  `JumpIfNotNullish`. `!=` and `!==` are the equality op plus `Not`.
+  Grouping the slow paths by an operator enum keeps `OpCtx` small; the
+  fast paths stay per op. Number semantics (ToInt32, ToUint32,
+  exponentiate, remainder, shifts, `-0` rules) live once in
+  `ferrojs_bytecode::number` and both the fast paths and every slow path
+  call them, so tiers can't disagree.
+- **Toy context:** the slow paths now do ToNumber on `undefined`, `null`
+  and booleans (heap values still throw), so compiled code can be
+  checked against Node.js: the compiler's tests run 90-odd calls on the
+  toy and compare bit-exact results with `node`.
+- **Benchmark slowdown accepted:** growing the op list from 19 to 41
+  ops makes the generic `decode` +10% and the toy `dispatch` loop +6% in
+  instruction counts: LLVM inlines the larger generated `match`es
+  differently. Tried `#[inline]` and a decoder specialized per operand
+  width; both made `decode` worse. These benchmarks exercise the 1.4
+  scaffolding (the toy loop and the generic decoder), not the real
+  interpreter, which task 1.7 designs and benchmarks on its own; the
+  baseline was rewritten in this commit.
+- **Rejected:** an accumulator (D-019); allocating locals lazily
+  (breaks the temporary stack); compiling a whole script before globals
+  exist (top-level bindings must be global, ARCHITECTURE.md §8);
+  separate `rt_*` functions per new op (a dozen near-identical trait
+  methods).

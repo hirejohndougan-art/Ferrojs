@@ -126,6 +126,8 @@ dependencies = [
 name = "ferrojs-compiler"
 version = "0.0.1"
 dependencies = [
+ "ferrojs-bytecode",
+ "ferrojs-value",
  "oxc_allocator",
  "oxc_ast",
  "oxc_diagnostics",
@@ -143,6 +145,7 @@ dependencies = [
  "ferrojs-compiler",
  "ferrojs-value",
  "libfuzzer-sys",
+ "oxc_ast",
 ]
 
 [[package]]

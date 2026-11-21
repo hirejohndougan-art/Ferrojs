@@ -35,6 +35,7 @@
 mod define;
 mod ctx;
 mod encode;
+pub mod number;
 mod operand;
 mod ops;
 pub mod testing;
@@ -46,6 +47,7 @@ pub use encode::{
     decode, instructions, AsmError, Assembler, DecodeError, DecodeErrorKind, Instructions, Reader,
     Unit, PREFIX_EXTRA_WIDE, PREFIX_WIDE,
 };
+pub use number::{CompareOp, NumericOp, UnaryOp};
 pub use operand::{
     AsmLabel, Const, Count, EnvSlot, Ic, Imm, Label, Operand, OperandKind, OperandValue, Reg, Width,
 };

@@ -508,8 +508,15 @@ fn arithmetic_fast_paths() {
     // NaN stays canonical.
     let (o, _, _) = binop(Assembler::sub, d(f64::INFINITY), d(f64::INFINITY));
     assert_eq!(bits(o), d(f64::NAN).to_bits());
-    // Non-numbers take the slow path, which throws in the toy.
+    // Non-numbers take the slow path: `undefined + 1` is NaN, and heap
+    // values (here a fake object) throw in the toy.
     let (o, fb, slow) = binop(Assembler::add, Value::UNDEFINED, i(1));
+    assert_eq!(
+        (bits(o), fb, slow),
+        (d(f64::NAN).to_bits(), Feedback::OTHER, 1)
+    );
+    let obj = Value::object(ferrojs_value::HeapRef(64));
+    let (o, fb, slow) = binop(Assembler::add, obj, i(1));
     assert_eq!(
         (o, fb, slow),
         (Outcome::Threw(Value::UNDEFINED), Feedback::OTHER, 1)

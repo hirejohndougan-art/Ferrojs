@@ -15,7 +15,10 @@
 //! assert!(err.message.contains("x"));
 //! ```
 
+pub mod codegen;
 pub mod early;
+
+pub use codegen::{compile_function, compile_function_source, CompileError, CompiledFunction};
 
 /// The arena the AST is allocated in; re-exported so callers need no oxc
 /// dependency of their own.

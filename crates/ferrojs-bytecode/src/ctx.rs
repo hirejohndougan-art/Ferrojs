@@ -11,6 +11,7 @@ use core::fmt;
 
 use ferrojs_value::Value;
 
+use crate::number::{CompareOp, NumericOp, UnaryOp};
 use crate::operand::{Const, EnvSlot, Ic, Label, Reg};
 
 /// What the dispatch loop does after a handler.
@@ -100,6 +101,15 @@ pub trait OpCtx {
     /// `a === b` (IsStrictlyEqual) for operands that aren't both numbers.
     /// Must not allocate or run user code.
     fn rt_strict_equal(&mut self, a: Value, b: Value) -> bool;
+    /// A [`NumericOp`] (`/ % ** & | ^ << >> >>>`) for operands the fast
+    /// path didn't handle: ToNumeric on both (left first), then the op.
+    fn rt_numeric(&mut self, op: NumericOp, a: Value, b: Value) -> Completion;
+    /// A [`CompareOp`] (`> <= >=`) for operands that aren't both numbers.
+    fn rt_compare(&mut self, op: CompareOp, a: Value, b: Value) -> Completion;
+    /// A [`UnaryOp`] for an operand that isn't a number.
+    fn rt_unary(&mut self, op: UnaryOp, a: Value) -> Completion;
+    /// `a == b` (IsLooselyEqual) for operands that aren't both numbers.
+    fn rt_loose_equal(&mut self, a: Value, b: Value) -> Completion;
     /// ToBoolean for values that aren't booleans. Must not allocate or run
     /// user code.
     fn rt_to_boolean(&mut self, v: Value) -> bool;

@@ -1,10 +1,13 @@
 //! A reference context and dispatch loop over plain values, for tests,
 //! benchmarks and fuzzing of the op definitions before the real
-//! interpreter (task 1.7) exists. Numbers only: the slow paths handle
-//! numbers and throw `undefined` for anything else.
+//! interpreter (task 1.7) exists. Primitives only: the slow paths convert
+//! `undefined`, `null`, booleans and numbers as ToNumber does, and throw
+//! `undefined` for heap values (strings, objects, symbols), which the toy
+//! can't look inside.
 
 use ferrojs_value::{Kind, Value};
 
+use crate::number::{self, CompareOp, NumericOp, UnaryOp};
 use crate::{
     decode, execute, Completion, Const, EnvSlot, Feedback, Flow, Ic, Limits, OpCtx, Reg, Thrown,
 };
@@ -43,14 +46,36 @@ impl ToyCtx {
         (s < self.envs[e].len()).then_some((e, s))
     }
 
+    /// ToNumber for the primitives the toy understands.
+    pub fn to_number(v: Value) -> Option<f64> {
+        match v.kind() {
+            Kind::Undefined => Some(f64::NAN),
+            Kind::Null => Some(0.0),
+            Kind::Bool(b) => Some(if b { 1.0 } else { 0.0 }),
+            Kind::Int32(i) => Some(f64::from(i)),
+            Kind::Double(d) => Some(d),
+            Kind::Object(_) | Kind::String(_) | Kind::Other(..) => None,
+        }
+    }
+
+    fn fail<T>(&mut self) -> Result<T, Thrown> {
+        self.exception = Some(Value::UNDEFINED);
+        Err(Thrown)
+    }
+
     fn numbers(&mut self, a: Value, b: Value, f: impl FnOnce(f64, f64) -> f64) -> Completion {
         self.slow_calls += 1;
-        match (a.as_number(), b.as_number()) {
+        match (Self::to_number(a), Self::to_number(b)) {
             (Some(x), Some(y)) => Ok(Value::number(f(x, y))),
-            _ => {
-                self.exception = Some(Value::UNDEFINED);
-                Err(Thrown)
-            }
+            _ => self.fail(),
+        }
+    }
+
+    fn predicate(&mut self, a: Value, b: Value, f: impl FnOnce(f64, f64) -> bool) -> Completion {
+        self.slow_calls += 1;
+        match (Self::to_number(a), Self::to_number(b)) {
+            (Some(x), Some(y)) => Ok(Value::from_bool(f(x, y))),
+            _ => self.fail(),
         }
     }
 }
@@ -112,13 +137,31 @@ impl OpCtx for ToyCtx {
         self.numbers(a, b, |x, y| x * y)
     }
     fn rt_less_than(&mut self, a: Value, b: Value) -> Completion {
+        self.predicate(a, b, |x, y| x < y)
+    }
+    fn rt_numeric(&mut self, op: NumericOp, a: Value, b: Value) -> Completion {
+        self.numbers(a, b, |x, y| number::numeric(op, x, y))
+    }
+    fn rt_compare(&mut self, op: CompareOp, a: Value, b: Value) -> Completion {
+        self.predicate(a, b, |x, y| number::compare(op, x, y))
+    }
+    fn rt_unary(&mut self, op: UnaryOp, a: Value) -> Completion {
         self.slow_calls += 1;
-        match (a.as_number(), b.as_number()) {
-            (Some(x), Some(y)) => Ok(Value::from_bool(x < y)),
-            _ => {
-                self.exception = Some(Value::UNDEFINED);
-                Err(Thrown)
-            }
+        match Self::to_number(a) {
+            Some(x) => Ok(Value::number(number::unary(op, x))),
+            None => self.fail(),
+        }
+    }
+    fn rt_loose_equal(&mut self, a: Value, b: Value) -> Completion {
+        self.slow_calls += 1;
+        // IsLooselyEqual on primitives the toy has: null and undefined
+        // equal each other only; booleans compare as numbers.
+        if a.is_nullish() || b.is_nullish() {
+            return Ok(Value::from_bool(a.is_nullish() && b.is_nullish()));
+        }
+        match (Self::to_number(a), Self::to_number(b)) {
+            (Some(x), Some(y)) => Ok(Value::from_bool(x == y)),
+            _ => self.fail(),
         }
     }
     fn rt_strict_equal(&mut self, a: Value, b: Value) -> bool {
