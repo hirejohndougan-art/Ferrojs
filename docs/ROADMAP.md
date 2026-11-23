@@ -161,8 +161,20 @@ Order matters: each task builds on the ones above it.
 - [ ] 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
   `print`, `$262` host object. First real baseline. needs: 1.9
 - [x] 1.11 (2026-11-23) Host hooks for randomness, clocks and job ordering (D-008).
-- [ ] 1.12 Bytecode compiler, part 2: classes, destructuring, spread,
-  closures, generators and async (state machines). needs: 1.6d
+- 1.12 Bytecode compiler, part 2 (split 2026-11-23: everything but
+  default values needs objects, iterators or the interpreter):
+  - [x] 1.12a (2026-11-23) Default parameter values: left-to-right
+    initialization, parameter TDZ, `length` (D-046). needs: 1.6d
+  - [ ] 1.12b Rest parameters, spread arguments and array literals.
+    needs: 1.7, 1.8c
+  - [ ] 1.12c Destructuring (declarations, parameters, assignment,
+    catch), with the iterator protocol for arrays. needs: 1.12b, 1.8b
+  - [ ] 1.12d The arguments object (mapped and unmapped), sloppy `this`.
+    needs: 1.7, 1.8c
+  - [ ] 1.12e Classes: constructors, methods, fields, `super`.
+    needs: 1.7, 1.8d
+  - [ ] 1.12f Generators as state machines. needs: 1.7, 1.12c
+  - [ ] 1.12g Async functions and await. needs: 1.12f, 1.14
 - [ ] 1.13 Basic built-ins: Object, Function, Error types, Array, String,
   Number, Boolean, Math, JSON (hand-written; spec generation comes in 2).
 - [ ] 1.14 Promise and the job queue.

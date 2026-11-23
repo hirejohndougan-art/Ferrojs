@@ -367,7 +367,12 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function f() { if (1) { function g() {} } }",
         "function f() { return { a: 1 }.a; }",
         "function f() { return new f(); }",
-        "function f(a = 1) {}",
+        "function f(a, g = () => a) { var a = 2; }",
+        "function f(a = 1, g = function () { return a; }) { function a() {} }",
+        "function f() { return arguments; }",
+        "function f() { return () => typeof arguments; }",
+        "function f() { arguments = 1; }",
+        "function f(a = arguments) {}",
         "function f(...r) {}",
         "function f({ a }) {}",
         "function f() { let [a] = [1]; }",
@@ -387,6 +392,19 @@ fn everything_else_is_unsupported_not_miscompiled() {
         compile_function_source("function f( {"),
         Err(CompileError::Syntax(_))
     ));
+}
+
+#[test]
+fn length_counts_parameters_before_the_first_default() {
+    for (src, params, length) in [
+        ("function f() {}", 0, 0),
+        ("function f(a, b) {}", 2, 2),
+        ("function f(a, b = 1, c) {}", 3, 1),
+        ("function f(a = 1) {}", 1, 0),
+    ] {
+        let f = compile(src);
+        assert_eq!((f.params, f.length), (params, length), "{src}");
+    }
 }
 
 #[test]

@@ -346,3 +346,20 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 8699 (+0); failures 7 -> 0 (the 7 Annex B runs now parse and
   are "not run" until the interpreter is hooked up)
 - Next: 1.7a once CI runs again (everything else open needs 1.7).
+
+## 2026-11-23 11:50 UTC — 1.12a Default parameter values (1.12 split a–g)
+- Result: merged
+- Changed: parameter initializers compile (left to right, `undefined`
+  triggers the default); parameters reachable early get a TDZ binding
+  checked everywhere, closures included; `CompiledFunction::length`.
+  28 new script cases match Node.js; mutations (no TDZ, no env store
+  for captured params, no TDZ check in nested functions) are caught. An
+  unresolved `arguments` in a function is now refused instead of
+  compiling as a global. Not risky (no core, unsafe or GC code); no
+  review needed. 1.12 split: the rest needs objects or the interpreter.
+- Decisions: D-046
+- Test262: 8699 (+0)
+- Next: 1.7a once CI runs again. GitHub Actions still starts no job
+  (every run fails in ~3 s since 2026-11-21) and rustup can't reach
+  static.rust-lang.org here, so Miri can't run anywhere; every other
+  open task waits on 1.7. John has been notified.

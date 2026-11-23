@@ -161,6 +161,41 @@ b`;"],
     &["var w = 'v'; var result = (() => { var w = 'inner'; return `${w}:${typeof w}`; })() + w;"],
 ];
 
+/// Default parameter values (task 1.12a, D-046): left-to-right
+/// initialization, `undefined` triggers the default, parameter TDZ
+/// (closures included), scoping of initializers, captured parameters.
+const DEFAULT_CASES: &[&[&str]] = &[
+    &["function f(a, b = 2) { return a * 10 + b; } var result = f(1) + ',' + f(1, 5) + ',' + f(1, undefined) + ',' + f(1, null);"],
+    &["function f(a = 1, b = a + 1, c = a + b) { return `${a}${b}${c}`; } var result = f() + f(5) + f(5, 0) + f(undefined, 7);"],
+    &["function f(a = b, b) { return a; } var result; try { f(); } catch (e) { result = 'tdz'; }"],
+    &["function f(a = b, b) { return a; } var result = f(3);"],
+    &["function f(a = a) { return a; } var result = f(4);"],
+    &["function f(a = a) { return a; } f();"],
+    &["function f(a = (b = 1), b) { return b; } f();"],
+    &["function f(g = () => b, b = 2) { return g(); } var result = f();"],
+    &["function f(g = () => b, h = g(), b = 2) { return h; } f();"],
+    &["function f(a, g = () => a) { a = 9; return g(); } var result = f(1);"],
+    &["function f(a = 1) { return () => a; } var result = f()() + f(2)();"],
+    &["function f(a = 1, b = () => a) { a++; return b() + a; } var result = f(10);"],
+    &["var x = 'outer'; function f(a = x) { var x = 'inner'; return a + x; } var result = f();"],
+    &["var x = 'outer'; function f(g = () => x) { var x = 'inner'; return g() + x; } var result = f();"],
+    &["function f(a = 1) { var a; return a; } var result = f() + f(2);"],
+    &["function f(a = 1) { var a = 5; return a; } var result = f();"],
+    &["let n = 0; function f(a = ++n, b = ++n) { return a * 10 + b; } var result = `${f()}|${f(0)}|${f(undefined, 0)}|${n}`;"],
+    &["var calls = ''; function t(s) { calls += s; return s; } function f(a = t('a'), b = t('b')) { return a + b; } f('x'); f(undefined, 'y'); var result = calls;"],
+    &["var result = ((a, b = a * 2) => a + b)(3);"],
+    &["var result = ((a = 'p', b = `${a}q`) => b)();"],
+    &["var result = (function g(n, acc = 1) { return n <= 1 ? acc : g(n - 1, acc * n); })(5);"],
+    &["var result = (function g(a = g) { return typeof a; })();"],
+    &["function f(a = 'use strict') { return a; } var result = f();"],
+    &["function f(a = 1) { function a() {} return typeof a; } var result = f();"],
+    &["function f(a, b = 1) { let c = a + b; return c; } var result = f(1) + f(2, 2);"],
+    &["function f(a = (() => { throw 'boom'; })()) { return a; } var result = f(1); f();"],
+    &["'use strict'; function f(a = this) { return a; } var result = f();"],
+    &["function f(a = 1, b) { return b === undefined ? a : a + b; } var result = f(undefined, 2) + f();"],
+    &["var arguments = 3; var result = (() => arguments)() + arguments;"],
+];
+
 fn node_results(cases: &[&[&str]]) -> Option<Vec<String>> {
     let mut script = String::from(
         "const vm=require('vm');\
@@ -218,6 +253,11 @@ fn scripts_match_node() {
 #[test]
 fn strings_match_node() {
     match_node(STRING_CASES);
+}
+
+#[test]
+fn default_parameters_match_node() {
+    match_node(DEFAULT_CASES);
 }
 
 #[test]

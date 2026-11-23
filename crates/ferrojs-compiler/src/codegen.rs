@@ -27,6 +27,7 @@
 //! doesn't read: a fresh temporary, or a local `e` provably doesn't
 //! mention (see [`Gen::assign_local`]).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use ferrojs_bytecode::{
@@ -47,6 +48,9 @@ pub struct CompiledFunction {
     pub name: String,
     /// Declared parameter count `P`: parameters are `r0..rP`.
     pub params: u32,
+    /// The function's `length`: the parameters before the first one with
+    /// a default value (ExpectedArgumentCount).
+    pub length: u32,
     /// Register count `R`, parameters included.
     pub registers: u32,
     /// The constant pool: numbers and strings (global names so far).
@@ -240,6 +244,7 @@ fn compile_whole_script(parsed: &Parsed<'_>) -> CResult<CompiledFunction> {
     g.finish(
         String::new(),
         0,
+        0,
         scoping.scope_flags(scope).is_strict_mode(),
     )
 }
@@ -269,6 +274,10 @@ struct Analysis<'s> {
     global: Option<ScopeId>,
     /// [`Parsed::call_targets`]: calls assigned to in sloppy code (D-045).
     call_targets: Vec<u32>,
+    /// Parameters that a parameter initializer may use before they are
+    /// initialized (D-046): every use checks the TDZ marker. Filled in by
+    /// each function before its nested functions are compiled.
+    param_tdz: RefCell<HashSet<SymbolId>>,
 }
 
 impl<'s> Analysis<'s> {
@@ -304,6 +313,7 @@ impl<'s> Analysis<'s> {
             root,
             global,
             call_targets: Vec::new(),
+            param_tdz: RefCell::new(HashSet::new()),
         }
     }
 
@@ -456,32 +466,82 @@ fn compile_fn(
         return unsupported("rest parameters", rest.span);
     }
     let count = params.items.len() as u32;
+    let length = params
+        .items
+        .iter()
+        .position(|p| p.initializer.is_some())
+        .unwrap_or(params.items.len()) as u32;
     let mut param_syms = Vec::new();
-    for (i, p) in params.items.iter().enumerate() {
-        if p.initializer.is_some() {
-            return unsupported("default parameter values", p.span);
-        }
+    for p in &params.items {
         let BindingPattern::BindingIdentifier(id) = &p.pattern else {
             return unsupported("destructuring parameters", p.span);
         };
-        g.locals.insert(symbol_of(id), Reg(i as u32));
-        param_syms.push((symbol_of(id), Reg(i as u32)));
+        param_syms.push(symbol_of(id));
+    }
+    // With default values (D-046), parameters are initialized one by one,
+    // left to right: a parameter an initializer may reach before its turn
+    // (its own initializer or an earlier one, closures included) gets its
+    // own binding with the TDZ marker; the others stay in their argument
+    // registers.
+    let has_defaults = length < count;
+    let mut tdz = HashSet::new();
+    if has_defaults {
+        let mut refs = ParamRefs {
+            scoping,
+            params: &param_syms,
+            current: 0,
+            closures: 0,
+            found: Vec::new(),
+        };
+        for (i, p) in params.items.iter().enumerate() {
+            if let Some(init) = &p.initializer {
+                refs.current = i;
+                refs.visit_expression(init);
+            }
+        }
+        for &(i, j, in_closure) in &refs.found {
+            if i <= j {
+                tdz.insert(param_syms[j]);
+            }
+            // A closure in the parameters sees the parameter, but the body
+            // sees a separate `var` copy (FunctionDeclarationInstantiation
+            // step 28): two bindings for one symbol.
+            if in_closure && !scoping.symbol_redeclarations(param_syms[j]).is_empty() {
+                return unsupported(
+                    "a parameter redeclared in the body and used by a closure in the parameters",
+                    params.items[j].span,
+                );
+            }
+        }
+        an.param_tdz.borrow_mut().extend(tdz.iter().copied());
+    }
+    for (i, &sym) in param_syms.iter().enumerate() {
+        if !tdz.contains(&sym) {
+            g.locals.insert(sym, Reg(i as u32));
+        }
     }
     g.next_reg = count;
     g.claim_locals(count);
+    for &sym in &tdz {
+        if !an.captured.contains(&sym) {
+            g.needs_tdz.insert(sym);
+        }
+    }
     g.find_early_references(f.body);
 
     // Entry: the function's environment, captured parameters copied in
     // (the last one wins for repeated names), the TDZ marker in lexical
     // bindings, the function's own name, then hoisted declarations.
     let fn_scope_pushed = g.enter_scope(f.scope)?;
-    for &(sym, r) in &param_syms {
-        if an.captured.contains(&sym) {
-            let slot = EnvSlot {
-                depth: 0,
-                slot: an.slot_of[&sym],
-            };
-            g.asm.store_env(slot, r);
+    if !has_defaults {
+        for (i, &sym) in param_syms.iter().enumerate() {
+            if an.captured.contains(&sym) {
+                let slot = EnvSlot {
+                    depth: 0,
+                    slot: an.slot_of[&sym],
+                };
+                g.asm.store_env(slot, Reg(i as u32));
+            }
         }
     }
     if let Some(own) = f.own_name {
@@ -489,6 +549,9 @@ fn compile_fn(
         g.asm.load_closure(t);
         g.init_binding(own, f.scope, t);
         g.free(t);
+    }
+    if has_defaults {
+        g.init_params(&params.items, &param_syms, &tdz)?;
     }
     match f.body {
         Body::Block(body) => {
@@ -509,6 +572,7 @@ fn compile_fn(
     g.finish(
         f.name.clone(),
         count,
+        length,
         scoping.scope_flags(f.scope).is_strict_mode(),
     )
 }
@@ -827,6 +891,52 @@ impl<'s> Gen<'s> {
         Ok(())
     }
 
+    /// Initializes the parameters of a function with default values, left
+    /// to right (IteratorBindingInitialization, D-046): an `undefined`
+    /// argument is replaced by its initializer's value. Parameters in
+    /// `tdz` start as the TDZ marker in their own binding.
+    fn init_params(
+        &mut self,
+        items: &[FormalParameter<'_>],
+        syms: &[SymbolId],
+        tdz: &HashSet<SymbolId>,
+    ) -> CResult<()> {
+        if !tdz.is_empty() {
+            let t = self.temp()?;
+            self.asm.load_uninitialized(t);
+            for (p, sym) in items.iter().zip(syms) {
+                if tdz.contains(sym) {
+                    match self.locate(*sym, self.scope, p.span)? {
+                        Loc::Reg(r) => self.asm.mov(r, t),
+                        Loc::Env(slot) => self.asm.store_env(slot, t),
+                        Loc::Global { .. } => unreachable!("parameters are not globals"),
+                    }
+                }
+            }
+            self.free(t);
+        }
+        for (i, (p, &sym)) in items.iter().zip(syms).enumerate() {
+            // The argument register. Nothing reads it while the initializer
+            // runs: a parameter its own initializer uses is in `tdz`, with
+            // its binding elsewhere.
+            let arg = Reg(i as u32);
+            if let Some(init) = &p.initializer {
+                let skip = self.asm.new_label();
+                let t = self.temp()?;
+                self.asm.load_undefined(t);
+                self.asm.strict_equal(t, arg, t);
+                self.asm.jump_if_false(t, skip);
+                self.free(t);
+                self.expr_to(init, arg)?;
+                self.asm.bind(skip);
+            }
+            if tdz.contains(&sym) || self.an.captured.contains(&sym) {
+                self.init_binding(sym, self.scope, arg);
+            }
+        }
+        Ok(())
+    }
+
     /// Compiles a nested function and returns its index.
     fn nested(&mut self, f: &FnLike<'_, '_>) -> CResult<Func> {
         let compiled = compile_fn(self.an, f, Some(&self.scope_stack))?;
@@ -837,7 +947,13 @@ impl<'s> Gen<'s> {
     }
 
     /// Lays out the code and builds the compiled function.
-    fn finish(self, name: String, params: u32, strict: bool) -> CResult<CompiledFunction> {
+    fn finish(
+        self,
+        name: String,
+        params: u32,
+        length: u32,
+        strict: bool,
+    ) -> CResult<CompiledFunction> {
         let (code, labels) = self
             .asm
             .finish_with_labels()
@@ -858,6 +974,7 @@ impl<'s> Gen<'s> {
         Ok(CompiledFunction {
             name,
             params,
+            length,
             registers: self.max_reg.max(params),
             constants: self.constants,
             ics: self.ics,
@@ -943,6 +1060,24 @@ impl<'s> Gen<'s> {
         self.scoping.get_reference(rid).symbol_id()
     }
 
+    /// [`Gen::resolve`] for a use that compiles: refuses an unresolved
+    /// `arguments` inside a non-arrow function (the arguments object is
+    /// later work, not a global).
+    fn resolve_use(&self, id: &IdentifierReference<'_>) -> CResult<Option<SymbolId>> {
+        let sym = self.resolve(id);
+        if sym.is_none() && id.name == "arguments" {
+            let mut s = Some(self.reference_scope(id));
+            while let Some(scope) = s {
+                let flags = self.scoping.scope_flags(scope);
+                if flags.contains(ScopeFlags::Function) && !flags.contains(ScopeFlags::Arrow) {
+                    return unsupported("the arguments object", id.span);
+                }
+                s = self.scoping.scope_parent_id(scope);
+            }
+        }
+        Ok(sym)
+    }
+
     fn reference_scope(&self, id: &IdentifierReference<'_>) -> ScopeId {
         let rid = id.reference_id.get().expect("semantic analysis ran");
         self.scoping.get_reference(rid).scope_id()
@@ -1012,7 +1147,7 @@ impl<'s> Gen<'s> {
         if flags.intersects(SymbolFlags::Class) {
             return unsupported("class bindings", span);
         }
-        if !is_lexical(flags) {
+        if !is_lexical(flags) && !self.an.param_tdz.borrow().contains(&sym) {
             return Ok(false);
         }
         if let Loc::Env(_) = loc {
@@ -1032,7 +1167,7 @@ impl<'s> Gen<'s> {
     /// Reads `id` into a register (its own, for a register local), after
     /// its TDZ check. `None` for a global.
     fn read_binding(&mut self, id: &IdentifierReference<'_>) -> CResult<Option<Operand>> {
-        let Some(sym) = self.resolve(id) else {
+        let Some(sym) = self.resolve_use(id)? else {
             return Ok(None);
         };
         let loc = self.locate(sym, self.reference_scope(id), id.span)?;
@@ -1086,7 +1221,7 @@ impl<'s> Gen<'s> {
 
     /// Where an assignment to `id` stores.
     fn write_target(&mut self, id: &IdentifierReference<'_>) -> CResult<Target> {
-        let Some(sym) = self.resolve(id) else {
+        let Some(sym) = self.resolve_use(id)? else {
             // An undeclared name: a global, created on assignment in sloppy
             // code (the runtime decides).
             let name = self.string_const(id.name.as_str())?;
@@ -1906,7 +2041,7 @@ impl<'s> Gen<'s> {
             }
             Expression::TemplateLiteral(t) => self.template(t, dst),
             Expression::Identifier(id) => {
-                let Some(sym) = self.resolve(id) else {
+                let Some(sym) = self.resolve_use(id)? else {
                     // Unresolved: a global. These three are non-writable,
                     // non-configurable properties of the global object, and
                     // nothing in this subset can shadow them dynamically
@@ -2100,7 +2235,7 @@ impl<'s> Gen<'s> {
     /// `"undefined"` for an undeclared name instead of throwing.
     fn type_of(&mut self, e: &Expression<'_>, dst: Reg) -> CResult<()> {
         if let Expression::Identifier(id) = e.without_parentheses() {
-            let global = match self.resolve(id) {
+            let global = match self.resolve_use(id)? {
                 None => match id.name.as_str() {
                     // Always defined (see `expr_to`).
                     "undefined" | "NaN" | "Infinity" => None,
@@ -2387,6 +2522,41 @@ struct CallOperands {
     args: Reg,
     argc: Count,
     temps: Vec<Reg>,
+}
+
+/// Finds the uses of a function's parameters in its parameter
+/// initializers: (initializer's parameter index, used parameter index,
+/// whether the use is inside a nested function).
+struct ParamRefs<'s, 'p> {
+    scoping: &'s Scoping,
+    params: &'p [SymbolId],
+    current: usize,
+    closures: u32,
+    found: Vec<(usize, usize, bool)>,
+}
+
+impl<'a> Visit<'a> for ParamRefs<'_, '_> {
+    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+        let sym = it
+            .reference_id
+            .get()
+            .and_then(|r| self.scoping.get_reference(r).symbol_id());
+        if let Some(j) = sym.and_then(|s| self.params.iter().position(|&p| p == s)) {
+            self.found.push((self.current, j, self.closures > 0));
+        }
+    }
+
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        self.closures += 1;
+        walk::walk_function(self, it, flags);
+        self.closures -= 1;
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        self.closures += 1;
+        walk::walk_arrow_function_expression(self, it);
+        self.closures -= 1;
+    }
 }
 
 /// Records, per binding, where its first use starts and where its

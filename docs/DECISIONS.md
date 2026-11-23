@@ -1003,3 +1003,31 @@ planning document and gets logged here as each is implemented.
   D-026, and the fork would need upkeep across pins); an AST of our own
   (D-018); parsing the call separately and splicing it in (it would miss
   the scope analysis); a same-length rewrite (none preserves the call).
+
+## D-046 Default parameter values: argument registers, TDZ only where reachable
+- **Status:** Accepted (autopilot, 2026-11-23).
+- **Choice:** a function with any parameter initializer initializes its
+  parameters left to right after its environment and own name are set
+  up: `if (arg === undefined) arg = <initializer>`, compiled as
+  `LoadUndefined; StrictEqual; JumpIfFalse` (no new op). oxc resolves
+  references in initializers past the body's `var`s (to the enclosing
+  scope), so the compiler needs no separate parameter scope. A parameter
+  that an initializer may reach before its turn (used, read or written,
+  in its own initializer or an earlier one, closures in them included)
+  gets its own binding (a fresh register, or its environment slot),
+  starts as the TDZ marker, and every use of it checks the marker, in
+  nested functions too (`Analysis::param_tdz`). Other parameters stay
+  in their argument registers, unchecked. `CompiledFunction::length` is
+  the count before the first default (ExpectedArgumentCount).
+- **Refused (Unsupported) for now:** a parameter that a closure in the
+  parameters uses and the body redeclares with `var` or a function
+  declaration (the spec gives the body a separate copy, FunctionDeclaration-
+  Instantiation step 28; one symbol can't hold both); an unresolved
+  `arguments` inside a non-arrow function (the arguments object is later
+  work; before, it silently compiled as a global name).
+- **Cost:** uses of a TDZ parameter in the body still check the marker;
+  only functions whose initializers reach forward pay it.
+- **Rejected:** a parameter scope plus a body copy for every function
+  with defaults (an extra environment or copies for the common case);
+  a dedicated `JumpIfNotUndefined` op (worth it only once benchmarks
+  show default-heavy code).
