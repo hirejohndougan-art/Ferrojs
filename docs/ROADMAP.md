@@ -113,10 +113,17 @@ Order matters: each task builds on the ones above it.
   the dispatch loop per ARCHITECTURE.md §3.3–3.4), captured variables in
   environments, per-iteration `let` bindings; the toy context grows
   frames, closures and environments to run them. needs: 1.6c
-- [ ] 1.6e Bytecode compiler, part 1e: script top level and globals
-  (`LoadName`/`StoreName`), strings in the constant pool, `this`. Also
-  accept sloppy-mode call expressions as assignment targets (runtime
-  `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6d, 1.8a
+- [~] (claimed 2026-11-23 11:45 UTC) 1.6e Bytecode compiler, part 1e: scripts
+  and globals: `compile_script`, global var/function/let/const
+  declarations, `LoadName`/`StoreName` for top-level and undeclared
+  names (ReferenceError, sloppy implicit globals), global TDZ and const,
+  `this` in strict functions; the toy context grows globals and interned
+  name strings. needs: 1.6d
+- [ ] 1.6f Bytecode compiler, part 1f: string values: string literals and
+  templates in the constant pool, `typeof`, `+` concatenation and
+  Number::toString in the toy. needs: 1.6e
+- [ ] 1.6g Accept sloppy-mode call expressions as assignment targets
+  (runtime `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6e
 - [ ] 1.7a (risky; done on branch `auto/2026-11-23-core-handles`, reviewed,
   waiting for a CI Miri run: GitHub Actions has started no job since
   2026-11-21, likely out of minutes) Core handle API for the interpreter: a checked way to
