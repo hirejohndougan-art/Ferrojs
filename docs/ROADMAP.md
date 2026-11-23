@@ -147,7 +147,7 @@ Order matters: each task builds on the ones above it.
   objects. needs: 1.8a
 - [ ] 1.8d Objects, part d: accessor properties (getters and setters
   called from get/set), the lazy key table for large shapes. needs: 1.8b, 1.7
-- [~] (claimed 2026-11-23 10:35 UTC) 1.8c Objects, part c: indexed properties in the elements store
+- [x] 1.8c (2026-11-23) Objects, part c: indexed properties in the elements store
   (packed, holey, sparse) and Array length. needs: 1.8a
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7

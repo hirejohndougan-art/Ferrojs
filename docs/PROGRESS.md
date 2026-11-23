@@ -279,3 +279,15 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-039
 - Test262: 8699 (+0)
 - Next: 1.8c elements (indexed properties). 1.7a still waits for CI.
+
+## 2026-11-23 11:15 UTC — 1.8c Indexed properties and arrays
+- Result: merged
+- Changed: `ferrojs_vm::elements`: dense (hole markers) or sparse
+  stores, arrays with length in the store, get/set/delete/keys/
+  set_length, prototype fall-through for holes. Model-checked (30 runs,
+  3 under GC stress); element-liveness test verified by mutation.
+  Independent review: no must-fix; nice-to-haves applied (tracer hole
+  exemption only for elements, doc wording, a length-growth test).
+- Decisions: D-040
+- Test262: 8699 (+0)
+- Next: 1.11 host hooks (independent), or 1.7a once CI runs again.
