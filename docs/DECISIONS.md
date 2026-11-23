@@ -867,3 +867,23 @@ planning document and gets logged here as each is implemented.
   arrays); `undefined` for holes (indistinguishable from a stored
   `undefined`); a sorted sparse table now (insertion cost and code for
   a rare case).
+
+## D-041 Host hooks as one embedder trait
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** task 1.11 implements D-008 as `ferrojs_vm::host::Host`, a
+  trait object owned by the `Vm` (`Vm::with_host`; `Vm::new` uses
+  `SystemHost`). Hooks: `random` (`Math.random`, `[0, 1)`), `now`
+  (time value in ms), `local_offset` (LocalTZA, default 0 until the
+  `Date` built-in), `monotonic_now` (timers), and `enqueue_job` /
+  `next_job` for job order: the engine keeps job records (they hold heap
+  references) and gives the host opaque `JobId`s. `SystemHost`: system
+  clocks (whole ms for `now`), xorshift128+ seeded from the system's
+  hashing entropy and the time, FIFO jobs. `DeterministicHost`: seeded
+  generator, clocks starting at a fixed time and advancing a fixed step
+  per reading, FIFO, for tests and the differential harness. The random
+  generator returns multiples of 2^-53 (top 53 bits).
+- **Rejected:** separate traits per concern (one object to pass and to
+  replace is simpler for embedders); a `rand` dependency (a 20-line
+  generator is enough for `Math.random`, which needn't be secure); the
+  host owning the job records (it would need heap references, outside
+  the GC's view).

@@ -6,7 +6,7 @@ bytecode/bytecode/dispatch.count_loop 1138824
 heap/heap_alloc/bump_alloc.mixed 167391
 heap/heap_alloc/collect.half_live 439836
 heap/heap_alloc/cx_alloc.mixed 214725
-objects/objects/get_set.two_objects 2358858
+objects/objects/get_set.two_objects 5776
 parse/parse_group/front_end.mixed 1166440
 value/value_encoding/as_number.mixed 25447
 value/value_encoding/from_bits_checked.mixed 22236

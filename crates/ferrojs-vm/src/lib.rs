@@ -38,6 +38,7 @@ use ferrojs_core::{Cage, CageError, Gc, Heap, NoGc, Trace};
 use ferrojs_value::{Kind, Value};
 
 pub mod elements;
+pub mod host;
 pub mod object;
 pub mod shape;
 pub mod string;
@@ -201,25 +202,35 @@ impl Default for VmOptions {
     }
 }
 
-/// The runtime: the GC context and the engine tables.
+/// The runtime: the GC context, the engine tables and the embedder's
+/// host hooks.
 pub struct Vm {
     pub cx: Cx,
     pub tables: Tables,
+    /// Randomness, clocks and job order (D-008, D-041).
+    pub host: Box<dyn host::Host>,
 }
 
 impl Vm {
+    /// A runtime with the default host ([`host::SystemHost`]).
     pub fn new(options: VmOptions) -> Result<Vm, CageError> {
+        Vm::with_host(options, Box::new(host::SystemHost::new()))
+    }
+
+    /// A runtime with the embedder's host hooks.
+    pub fn with_host(options: VmOptions, host: Box<dyn host::Host>) -> Result<Vm, CageError> {
         let cage = Cage::new(options.heap_size)?;
         let heap = Heap::from_cage(cage, options.heap);
         Ok(Vm {
             cx: Cx::new(heap, Box::new(Tracer), options.cx),
             tables: Tables::default(),
+            host,
         })
     }
 
     /// Runs `f` in a new root scope with the engine tables.
     pub fn with<R>(&mut self, f: impl for<'s> FnOnce(&mut Scope<'s>, &mut Tables) -> R) -> R {
-        let Vm { cx, tables } = self;
+        let Vm { cx, tables, .. } = self;
         cx.scope(|s| f(s, tables))
     }
 }
