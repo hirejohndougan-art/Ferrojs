@@ -119,7 +119,7 @@ Order matters: each task builds on the ones above it.
   names (ReferenceError, sloppy implicit globals), global TDZ and const,
   `this` in strict functions; the toy context grows globals and interned
   name strings. needs: 1.6d
-- [ ] 1.6f Bytecode compiler, part 1f: string values: string literals and
+- [~] (claimed 2026-11-23 12:45 UTC) 1.6f Bytecode compiler, part 1f: string values: string literals and
   templates in the constant pool, `typeof`, `+` concatenation and
   Number::toString in the toy. needs: 1.6e
 - [ ] 1.6g Accept sloppy-mode call expressions as assignment targets
