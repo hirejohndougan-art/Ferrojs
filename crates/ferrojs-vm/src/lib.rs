@@ -55,6 +55,8 @@ pub enum CellKind {
     Object = 3,
     /// An object's out-of-line named-property slots.
     Slots = 4,
+    /// A dictionary-mode shape's property table.
+    Dict = 5,
 }
 
 impl CellKind {
@@ -64,6 +66,7 @@ impl CellKind {
             2 => Some(CellKind::Shape),
             3 => Some(CellKind::Object),
             4 => Some(CellKind::Slots),
+            5 => Some(CellKind::Dict),
             _ => None,
         }
     }
@@ -114,6 +117,17 @@ impl Trace for Tracer {
                 );
                 for i in 0..inline {
                     value_at(object::INLINE + 8 * i, edges);
+                }
+            }
+            CellKind::Dict => {
+                let cap = (header >> 32) as u32;
+                let len = shape::dict_len(cage, cell);
+                assert!(
+                    len <= cap && shape::DICT_ENTRIES + 16 * cap <= size,
+                    "bad table"
+                );
+                for i in 0..len {
+                    edges.push(cage.read_u32(cell + shape::DICT_ENTRIES + 16 * i));
                 }
             }
             CellKind::Slots => {

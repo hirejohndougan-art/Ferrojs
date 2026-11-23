@@ -819,3 +819,27 @@ planning document and gets logged here as each is implemented.
   in a separate header word (the architecture's layout puts it in the
   header's high half to keep objects small); per-object hash tables
   before dictionary mode is needed.
+
+## D-039 Dictionary mode: per-object shape with an ordered entry table
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** task 1.8b. A dictionary shape belongs to one object: flag
+  `DICT` in the shape header, prototype and inline count as usual, the
+  `KEY` field pointing at a `Dict` table (cell kind 5): entries of key,
+  attributes and slot in insertion order. Deleting leaves a tombstone
+  that keeps its slot for the next new property; a full table is
+  compacted into a new one (live entries plus free slots). Values stay in
+  the object's slots, so get/set paths are the same. An object goes to
+  dictionary mode when it deletes a property other than the last added
+  (deleting the last steps back to the parent shape), changes a
+  property's attributes, becomes non-extensible (the `NOT_EXTENSIBLE`
+  flag lives in its own shape), or would pass 128 properties
+  (`MAX_SHARED_PROPERTIES`). `define` follows
+  ValidateAndApplyPropertyDescriptor for complete data descriptors;
+  `delete` refuses non-configurable properties and clears the slot.
+- **Phase 1 simplifications:** lookup in a dictionary table is linear
+  (a hash table comes with the lazy key table, task 1.8d); objects never
+  leave dictionary mode.
+- **Rejected:** a non-extensible flag on shared shapes (needs extra
+  transitions for a rare operation); moving values into the dictionary
+  table (two value paths for get/set and the ICs); a Rust-side hash map
+  per object (pointers into the heap from Rust, D-009).

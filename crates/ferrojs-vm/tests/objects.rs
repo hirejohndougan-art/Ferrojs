@@ -2,8 +2,6 @@
 //! a plain Rust model through random operations, with the heap verifier
 //! on and collections at random points (or before every allocation).
 
-use std::collections::HashMap;
-
 use ferrojs_core::gc::{CxOptions, Root, Scope};
 use ferrojs_core::heap::HeapOptions;
 use ferrojs_value::{HeapRef, Kind, Value};
@@ -167,17 +165,24 @@ fn non_writable_properties_refuse_assignment_own_and_inherited() {
             "inherited read-only"
         );
         assert!(object::get_own(s.nogc(), child.get(s.nogc()), k.get(s.nogc())).is_none());
-        // Redefining with other attributes needs dictionary mode (1.8b).
-        assert!(!object::define(s, proto, k, two, Attrs::DEFAULT).unwrap());
-        assert!(object::define(s, proto, k, two, ro).unwrap());
+        // It is configurable, so it can become writable again (which moves
+        // the prototype to dictionary mode).
+        assert!(object::define(s, proto, k, two, Attrs::DEFAULT).unwrap());
+        assert!(object::is_dictionary(s.nogc(), proto.get(s.nogc())));
         assert_eq!(
             object::get(s.nogc(), child.get(s.nogc()), k.get(s.nogc())),
             Value::from_i32(2)
         );
+        assert!(object::set(s, child, k, one).unwrap(), "now writable");
+        assert_eq!(
+            object::get_own(s.nogc(), child.get(s.nogc()), k.get(s.nogc())).map(|p| p.0),
+            Some(Value::from_i32(1))
+        );
     });
 }
 
-/// The model: per object, its prototype and own properties.
+/// The model: per object, its prototype, extensibility and own properties
+/// in insertion order (key, value, attributes).
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum MVal {
     Int(i32),
@@ -187,38 +192,86 @@ enum MVal {
 
 struct MObj {
     proto: Option<usize>,
-    props: HashMap<usize, (MVal, bool)>,
+    extensible: bool,
+    props: Vec<(usize, MVal, u8)>,
+}
+
+const W: u8 = 1;
+const E: u8 = 2;
+const C: u8 = 4;
+
+impl MObj {
+    fn own(&self, k: usize) -> Option<usize> {
+        self.props.iter().position(|p| p.0 == k)
+    }
 }
 
 fn model_get(objs: &[MObj], mut o: usize, k: usize) -> Option<MVal> {
     loop {
-        if let Some(&(v, _)) = objs[o].props.get(&k) {
-            return Some(v);
+        if let Some(i) = objs[o].own(k) {
+            return Some(objs[o].props[i].1);
         }
         o = objs[o].proto?;
     }
 }
 
 fn model_set(objs: &mut [MObj], o: usize, k: usize, v: MVal) -> bool {
-    if let Some(p) = objs[o].props.get_mut(&k) {
-        if !p.1 {
+    if let Some(i) = objs[o].own(k) {
+        if objs[o].props[i].2 & W == 0 {
             return false;
         }
-        p.0 = v;
+        objs[o].props[i].1 = v;
         return true;
     }
     let mut cur = objs[o].proto;
     while let Some(p) = cur {
-        if let Some(&(_, writable)) = objs[p].props.get(&k) {
-            if !writable {
+        if let Some(i) = objs[p].own(k) {
+            if objs[p].props[i].2 & W == 0 {
                 return false;
             }
             break;
         }
         cur = objs[p].proto;
     }
-    objs[o].props.insert(k, (v, true));
+    if !objs[o].extensible {
+        return false;
+    }
+    objs[o].props.push((k, v, W | E | C));
     true
+}
+
+/// ValidateAndApplyPropertyDescriptor for complete data descriptors.
+/// Values compare by identity here, which is SameValue for these values.
+fn model_define(obj: &mut MObj, k: usize, v: MVal, a: u8) -> bool {
+    let Some(i) = obj.own(k) else {
+        if !obj.extensible {
+            return false;
+        }
+        obj.props.push((k, v, a));
+        return true;
+    };
+    let (_, old, cur) = obj.props[i];
+    if cur & C == 0 {
+        if a & C != 0 || (cur & E) != (a & E) {
+            return false;
+        }
+        if cur & W == 0 {
+            return a & W == 0 && old == v;
+        }
+    }
+    obj.props[i] = (k, v, a);
+    true
+}
+
+fn model_delete(obj: &mut MObj, k: usize) -> bool {
+    match obj.own(k) {
+        None => true,
+        Some(i) if obj.props[i].2 & C == 0 => false,
+        Some(i) => {
+            obj.props.remove(i);
+            true
+        }
+    }
 }
 
 /// A small deterministic generator (no dependency needed).
@@ -235,11 +288,11 @@ impl Rng {
     }
 }
 
-fn random_model_run(seed: u64, steps: usize, stress: bool) {
+fn random_model_run(seed: u64, steps: usize, stress: bool, nkeys: usize) {
     let mut vm = vm(stress);
     let mut rng = Rng(seed);
     vm.with(|s, t| {
-        let keys: Vec<_> = (0..6).map(|i| atom(s, t, &format!("k{i}"))).collect();
+        let keys: Vec<_> = (0..nkeys).map(|i| atom(s, t, &format!("k{i}"))).collect();
         let strs: Vec<_> = (0..3)
             .map(|i| {
                 let st = string::alloc_str(s, &format!("value {i}"))
@@ -251,8 +304,8 @@ fn random_model_run(seed: u64, steps: usize, stress: bool) {
         let mut objs: Vec<Root<'_, Object>> = Vec::new();
         let mut model: Vec<MObj> = Vec::new();
         for _ in 0..steps {
-            match rng.below(10) {
-                0 | 1 if objs.len() < 12 => {
+            match rng.below(16) {
+                0 if objs.len() < 12 => {
                     let proto = if objs.is_empty() || rng.below(3) == 0 {
                         None
                     } else {
@@ -265,14 +318,15 @@ fn random_model_run(seed: u64, steps: usize, stress: bool) {
                     objs.push(s.root(o));
                     model.push(MObj {
                         proto,
-                        props: HashMap::new(),
+                        extensible: true,
+                        props: Vec::new(),
                     });
                 }
                 _ if objs.is_empty() => {}
-                2..=5 => {
+                1..=6 => {
                     let (o, k) = (rng.below(objs.len()), rng.below(keys.len()));
                     let v = match rng.below(3) {
-                        0 => MVal::Int(rng.below(1000) as i32),
+                        0 => MVal::Int(rng.below(4) as i32),
                         1 => MVal::Obj(rng.below(objs.len())),
                         _ => MVal::Str(rng.below(strs.len())),
                     };
@@ -281,24 +335,26 @@ fn random_model_run(seed: u64, steps: usize, stress: bool) {
                         MVal::Obj(i) => RootedValue::Object(objs[i]),
                         MVal::Str(i) => RootedValue::String(strs[i]),
                     };
-                    let readonly = rng.below(8) == 0;
-                    if readonly {
-                        let attrs = Attrs(Attrs::ENUMERABLE.0);
-                        let fresh = !model[o].props.contains_key(&k);
-                        let ok = object::define(s, objs[o], keys[k], rv, attrs).unwrap();
-                        // A frozen (non-writable, non-configurable) property
-                        // only accepts its own value again.
-                        let expect = fresh || (!model[o].props[&k].1 && model[o].props[&k].0 == v);
-                        assert_eq!(ok, expect);
-                        if ok {
-                            model[o].props.insert(k, (v, false));
-                        }
+                    if rng.below(3) == 0 {
+                        let a = [W | E | C, E | C, E, 0, W, W | C][rng.below(6)];
+                        let ok = object::define(s, objs[o], keys[k], rv, Attrs(a)).unwrap();
+                        assert_eq!(ok, model_define(&mut model[o], k, v, a), "define");
                     } else {
                         let ok = object::set(s, objs[o], keys[k], rv).unwrap();
-                        assert_eq!(ok, model_set(&mut model, o, k, v));
+                        assert_eq!(ok, model_set(&mut model, o, k, v), "set");
                     }
                 }
-                6..=8 => {
+                7 | 8 => {
+                    let (o, k) = (rng.below(objs.len()), rng.below(keys.len()));
+                    let ok = object::delete(s, objs[o], keys[k]).unwrap();
+                    assert_eq!(ok, model_delete(&mut model[o], k), "delete");
+                }
+                9 if rng.below(8) == 0 => {
+                    let o = rng.below(objs.len());
+                    object::prevent_extensions(s, objs[o]).unwrap();
+                    model[o].extensible = false;
+                }
+                10..=13 => {
                     let (o, k) = (rng.below(objs.len()), rng.below(keys.len()));
                     let nogc = s.nogc();
                     let got = object::get(nogc, objs[o].get(nogc), keys[k].get(nogc));
@@ -318,10 +374,12 @@ fn random_model_run(seed: u64, steps: usize, stress: bool) {
                 }
             }
         }
-        // Every object still reads back the model exactly.
+        // Every object has exactly the model's own keys, in order, with the
+        // model's attributes and extensibility.
         let nogc = s.nogc();
         for (o, m) in model.iter().enumerate() {
-            let own: Vec<usize> = object::own_keys(nogc, objs[o].get(nogc))
+            let obj = objs[o].get(nogc);
+            let own: Vec<usize> = object::own_keys(nogc, obj)
                 .into_iter()
                 .map(|k| {
                     keys.iter()
@@ -329,7 +387,13 @@ fn random_model_run(seed: u64, steps: usize, stress: bool) {
                         .unwrap()
                 })
                 .collect();
-            assert_eq!(own.len(), m.props.len());
+            let want: Vec<usize> = m.props.iter().map(|p| p.0).collect();
+            assert_eq!(own, want, "keys of object {o}");
+            for &(k, _, a) in &m.props {
+                let (_, attrs) = object::get_own(nogc, obj, keys[k].get(nogc)).unwrap();
+                assert_eq!(attrs.0, a);
+            }
+            assert_eq!(object::is_extensible(nogc, obj), m.extensible);
         }
     });
 }
@@ -337,14 +401,14 @@ fn random_model_run(seed: u64, steps: usize, stress: bool) {
 #[test]
 fn random_operations_match_the_model() {
     for seed in 1..=40 {
-        random_model_run(seed * 0x9e37_79b9, 400, false);
+        random_model_run(seed * 0x9e37_79b9, 600, false, 6);
     }
 }
 
 #[test]
 fn random_operations_match_the_model_under_gc_stress() {
     for seed in 1..=4 {
-        random_model_run(seed * 0x51ed_270b, 150, true);
+        random_model_run(seed * 0x51ed_270b, 200, true, 6);
     }
 }
 
@@ -505,4 +569,165 @@ fn cells_reachable_only_through_edges_survive() {
             }
         });
     }
+}
+
+/// Many keys: shared shapes overflow into dictionary mode, and deletions
+/// churn the dictionary table (compaction and slot reuse).
+#[test]
+fn random_operations_with_many_keys_match_the_model() {
+    for seed in 1..=6 {
+        random_model_run(seed * 0x2545_f491, 3000, false, 200);
+    }
+    for seed in 1..=2 {
+        random_model_run(seed * 0x1b87_3593, 800, true, 200);
+    }
+}
+
+/// Running out of memory while adding properties leaves every visible
+/// property readable. (Which allocation fails first depends on the
+/// collector freeing old slots and tables at the retry, so this is a
+/// smoke test; `object::add` makes storage before it records a key.)
+#[test]
+fn a_failed_add_leaves_no_property_behind() {
+    let mut vm = Vm::new(VmOptions {
+        heap_size: 24 * ferrojs_core::cage::CHUNK_SIZE as u64,
+        heap: HeapOptions {
+            poison: true,
+            verify: true,
+        },
+        cx: CxOptions { gc_stress: false },
+    })
+    .unwrap();
+    vm.with(|s, t| {
+        let o = object::new_object(s, t, None, 0).unwrap().bind(s.nogc());
+        let o = s.root(o);
+        // A dictionary made early (by deleting a non-last property) grows
+        // its table ahead of the slots, so the failing allocation is the
+        // slots growth, after the table already has room.
+        let keys: Vec<_> = (0..20).map(|i| atom(s, t, &format!("f{i}"))).collect();
+        for &k in &keys {
+            object::set(s, o, k, RootedValue::Primitive(Value::from_i32(1))).unwrap();
+        }
+        object::delete(s, o, keys[0]).unwrap();
+        assert!(object::is_dictionary(s.nogc(), o.get(s.nogc())));
+        // Fill the heap so the next slots growth fails.
+        let mut hog = Vec::new();
+        while let Ok(c) = string::alloc_units(s, &vec![b'x' as u16; 4096]) {
+            hog.push(s.root(c.bind(s.nogc())));
+        }
+        // Make the keys before the heap is full.
+        let late: Vec<_> = (0..400).map(|i| atom(s, t, &format!("late{i}"))).collect();
+        while let Ok(c) = string::alloc_units(s, &[b'x' as u16; 2048]) {
+            hog.push(s.root(c.bind(s.nogc())));
+        }
+        let mut added = 0;
+        for (i, &k) in late.iter().enumerate() {
+            match object::set(s, o, k, RootedValue::Primitive(Value::from_i32(i as i32))) {
+                Ok(_) => added += 1,
+                Err(_) => {
+                    // The key must not be visible, and every key there must
+                    // read back.
+                    let nogc = s.nogc();
+                    let obj = o.get(nogc);
+                    assert!(object::get_own(nogc, obj, k.get(nogc)).is_none());
+                    for key in object::own_keys(nogc, obj) {
+                        let _ = object::get(nogc, obj, key);
+                    }
+                    return;
+                }
+            }
+        }
+        panic!("the heap never filled up ({added} added)");
+    });
+}
+
+#[test]
+fn deleting_the_last_property_steps_back_to_the_shared_shape() {
+    let mut vm = vm(true);
+    vm.with(|s, t| {
+        let (a, b) = (atom(s, t, "a"), atom(s, t, "b"));
+        let v = RootedValue::Primitive(Value::from_i32(1));
+        let o1 = object::new_object(s, t, None, DEFAULT_INLINE)
+            .unwrap()
+            .bind(s.nogc());
+        let o1 = s.root(o1);
+        let o2 = object::new_object(s, t, None, DEFAULT_INLINE)
+            .unwrap()
+            .bind(s.nogc());
+        let o2 = s.root(o2);
+        object::set(s, o1, a, v).unwrap();
+        object::set(s, o2, a, v).unwrap();
+        object::set(s, o2, b, v).unwrap();
+        assert!(object::delete(s, o2, b).unwrap());
+        let nogc = s.nogc();
+        assert!(!object::is_dictionary(nogc, o2.get(nogc)));
+        assert_eq!(
+            object::shape(nogc, o1.get(nogc)).offset(),
+            object::shape(nogc, o2.get(nogc)).offset()
+        );
+        assert_eq!(
+            object::get(nogc, o2.get(nogc), b.get(nogc)),
+            Value::UNDEFINED
+        );
+        // Deleting anything else goes to dictionary mode.
+        object::set(s, o2, b, v).unwrap();
+        assert!(object::delete(s, o2, a).unwrap());
+        let nogc = s.nogc();
+        assert!(object::is_dictionary(nogc, o2.get(nogc)));
+        assert_eq!(
+            object::get(nogc, o2.get(nogc), b.get(nogc)),
+            Value::from_i32(1)
+        );
+    });
+}
+
+#[test]
+fn objects_past_the_shared_limit_go_to_dictionary_mode() {
+    let mut vm = vm(false);
+    vm.with(|s, t| {
+        let o = object::new_object(s, t, None, DEFAULT_INLINE)
+            .unwrap()
+            .bind(s.nogc());
+        let o = s.root(o);
+        let n = object::MAX_SHARED_PROPERTIES + 40;
+        let keys: Vec<_> = (0..n).map(|i| atom(s, t, &format!("q{i}"))).collect();
+        for (i, &k) in keys.iter().enumerate() {
+            let v = RootedValue::Primitive(Value::from_i32(i as i32));
+            assert!(object::set(s, o, k, v).unwrap());
+            let dict = object::is_dictionary(s.nogc(), o.get(s.nogc()));
+            assert_eq!(dict, i as u32 >= object::MAX_SHARED_PROPERTIES, "after {i}");
+        }
+        s.collect();
+        // Delete every other key, then add them back: slots are reused and
+        // the order is the new insertion order.
+        for &k in keys.iter().step_by(2) {
+            assert!(object::delete(s, o, k).unwrap());
+        }
+        for &k in keys.iter().step_by(2) {
+            assert!(object::set(s, o, k, RootedValue::Primitive(Value::NULL)).unwrap());
+        }
+        s.collect();
+        let nogc = s.nogc();
+        let obj = o.get(nogc);
+        for (i, &k) in keys.iter().enumerate() {
+            let want = if i % 2 == 0 {
+                Value::NULL
+            } else {
+                Value::from_i32(i as i32)
+            };
+            assert_eq!(object::get(nogc, obj, k.get(nogc)), want);
+        }
+        let order: Vec<u32> = object::own_keys(nogc, obj)
+            .iter()
+            .map(|k| {
+                keys.iter()
+                    .position(|r| r.get(nogc).offset() == k.offset())
+                    .unwrap() as u32
+            })
+            .collect();
+        let want: Vec<u32> = (1..n).step_by(2).chain((0..n).step_by(2)).collect();
+        assert_eq!(order, want);
+        // Slots were reused: exactly one slot per property.
+        assert_eq!(shape::count(nogc, object::shape(nogc, obj)), n);
+    });
 }
