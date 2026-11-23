@@ -291,3 +291,15 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-040
 - Test262: 8699 (+0)
 - Next: 1.11 host hooks (independent), or 1.7a once CI runs again.
+
+## 2026-11-23 11:35 UTC — 1.11 Host hooks
+- Result: merged
+- Changed: `ferrojs_vm::host`: the `Host` trait (random, now,
+  local_offset, monotonic_now, enqueue_job/next_job), `SystemHost`,
+  `DeterministicHost`, xorshift128+; the `Vm` owns a host. Tests for
+  range and spread of random numbers, reproducibility, clocks and job
+  order (including a custom LIFO host). Not risky; no review needed.
+- Decisions: D-041
+- Test262: 8699 (+0)
+- Next: 1.7a once CI runs (everything else open needs 1.7 or 1.6e,
+  and 1.6e needs strings and globals from the VM side).

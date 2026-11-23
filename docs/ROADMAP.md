@@ -153,7 +153,7 @@ Order matters: each task builds on the ones above it.
   runs a script and prints uncaught errors. needs: 1.7
 - [ ] 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
   `print`, `$262` host object. First real baseline. needs: 1.9
-- [~] (claimed 2026-11-23 11:20 UTC) 1.11 Host hooks for randomness, clocks and job ordering (D-008).
+- [x] 1.11 (2026-11-23) Host hooks for randomness, clocks and job ordering (D-008).
 - [ ] 1.12 Bytecode compiler, part 2: classes, destructuring, spread,
   closures, generators and async (state machines). needs: 1.6d
 - [ ] 1.13 Basic built-ins: Object, Function, Error types, Array, String,
