@@ -117,7 +117,9 @@ Order matters: each task builds on the ones above it.
   (`LoadName`/`StoreName`), strings in the constant pool, `this`. Also
   accept sloppy-mode call expressions as assignment targets (runtime
   `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6d, 1.8
-- [~] (claimed 2026-11-23 08:30 UTC) 1.7a (risky) Core handle API for the interpreter: a checked way to
+- [ ] 1.7a (risky; done on branch `auto/2026-11-23-core-handles`, reviewed,
+  waiting for a CI Miri run: GitHub Actions has started no job since
+  2026-11-21, likely out of minutes) Core handle API for the interpreter: a checked way to
   turn a raw cell offset held in a register `Value` into a `Gc` handle
   (`NoGc::handle(offset) -> Option<Gc>`, live-cell check under the
   verifier), with tests. Every VM task needs it: registers hold raw
@@ -134,7 +136,7 @@ Order matters: each task builds on the ones above it.
   templates stay in a Rust-side table indexed from the closure header
   (no raw pointers in cells, D-009); reuse the compiler's Node.js cases
   and run them under GC stress. needs: 1.3b, 1.6d, 1.7a
-- [ ] 1.8 Objects and shapes (hidden classes), property get/set, prototype
+- [~] (claimed 2026-11-23 08:45 UTC) 1.8 Objects and shapes (hidden classes), property get/set, prototype
   chains. needs: 1.3b
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7

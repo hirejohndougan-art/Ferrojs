@@ -233,3 +233,17 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: none
 - Test262: 8699 (+0)
 - Next: 1.7a core handle API (risky; independent review and CI Miri).
+
+## 2026-11-23 08:40 UTC — 1.7a Core handle API (partial)
+- Result: partial (branch auto/2026-11-23-core-handles)
+- Changed: `NoGc::handle(offset) -> Option<Gc>`, always checked against
+  live cell starts, with tests and compile-fail rule 7. Independent
+  review: no soundness or rooting problems; one doc misplacement and
+  three test gaps (large tails, unused and free chunks, reuse), all
+  fixed. Local gate passes. Not merged: Miri must pass in CI, and every
+  CI run since 2026-11-21 15:49 UTC fails in about 3 seconds with no runner
+  assigned (runs 51–56), which points to exhausted Actions minutes. John
+  has been asked. Also wrote the first weekly report (2026-W47).
+- Decisions: D-037 (on the branch)
+- Test262: 8699 (+0)
+- Next: merge 1.7a once CI runs (record the run id); meanwhile 1.8.
