@@ -1,6 +1,6 @@
 [package]
 name = "ferrojs-vm"
-description = "The runtime: heap cell layouts, strings, atoms, shapes and objects (later the interpreter and built-ins)"
+description = "The runtime: heap cell layouts, strings, atoms, shapes, objects and the interpreter (later built-ins)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +8,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+ferrojs-bytecode = { path = "../ferrojs-bytecode" }
+ferrojs-compiler = { path = "../ferrojs-compiler" }
 ferrojs-core = { path = "../ferrojs-core" }
 ferrojs-value = { path = "../ferrojs-value" }
 

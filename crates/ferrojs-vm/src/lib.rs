@@ -4,7 +4,9 @@
 //! defines on top of `ferrojs-core`: strings and interned atoms
 //! ([`string`]), shapes ([`shape`]) and ordinary objects ([`object`]),
 //! plus the [`Tracer`] that tells the collector where each kind keeps its
-//! references. The interpreter (1.7) and built-ins (1.13) join it later.
+//! references. Task 1.7b adds the interpreter ([`interp`]): function and
+//! environment cells and the frame stack (D-047). Built-ins (1.13) come
+//! later.
 //!
 //! Every cell starts with an 8-byte header whose low byte is its
 //! [`CellKind`]. Cells hold only references (32-bit offsets) and value
@@ -31,6 +33,9 @@
 //! ```
 
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use ferrojs_core::gc::{Cx, CxOptions, Global, Root, Scope};
 use ferrojs_core::heap::HeapOptions;
@@ -39,6 +44,7 @@ use ferrojs_value::{Kind, Value};
 
 pub mod elements;
 pub mod host;
+pub mod interp;
 pub mod object;
 pub mod shape;
 pub mod string;
@@ -61,6 +67,13 @@ pub enum CellKind {
     Dict = 5,
     /// An object's indexed properties.
     Elements = 6,
+    /// A closure: function template index and captured environment.
+    Function = 7,
+    /// A declarative environment: parent and binding slots.
+    Env = 8,
+    /// The frame stack's anchor: tracing it reports every reference on
+    /// the live part of the frame stack.
+    Stack = 9,
 }
 
 impl CellKind {
@@ -72,6 +85,9 @@ impl CellKind {
             4 => Some(CellKind::Slots),
             5 => Some(CellKind::Dict),
             6 => Some(CellKind::Elements),
+            7 => Some(CellKind::Function),
+            8 => Some(CellKind::Env),
+            9 => Some(CellKind::Stack),
             _ => None,
         }
     }
@@ -85,17 +101,22 @@ pub fn value_ref(bits: u64) -> Option<u32> {
     }
 }
 
-/// Traces every engine cell kind (ARCHITECTURE.md §6.4).
+/// Traces every engine cell kind (ARCHITECTURE.md §6.4). It shares the
+/// frame stack with the interpreter so the stack anchor can report the
+/// references in it.
 #[derive(Debug, Default)]
-pub struct Tracer;
+pub struct Tracer {
+    stack: Rc<interp::FrameStack>,
+}
 
 impl Trace for Tracer {
     fn trace(&self, cage: &Cage, cell: u32, size: u32, edges: &mut Vec<u32>) {
         let header = cage.read_u64(cell);
         let kind = CellKind::from_byte(header as u8)
             .unwrap_or_else(|| panic!("cell {cell:#x} has unknown kind {:#x}", header as u8));
-        // Only elements stores hold the hole marker.
-        let holes_ok = kind == CellKind::Elements;
+        // Only elements stores (holes) and environments (bindings in
+        // their TDZ) hold the uninitialized marker.
+        let holes_ok = matches!(kind, CellKind::Elements | CellKind::Env);
         let value_at = |field: u32, edges: &mut Vec<u32>| {
             let bits = cage.read_u64(cell + field);
             debug_assert!(
@@ -156,6 +177,19 @@ impl Trace for Tracer {
                     }
                 }
             }
+            CellKind::Function => edges.push(cage.read_u32(cell + interp::FUNCTION_ENV)),
+            CellKind::Env => {
+                let count = (header >> 32) as u32;
+                assert!(
+                    interp::ENV_SLOTS + 8 * count <= size,
+                    "environment larger than its cell"
+                );
+                edges.push(cage.read_u32(cell + interp::ENV_PARENT));
+                for i in 0..count {
+                    value_at(interp::ENV_SLOTS + 8 * i, edges);
+                }
+            }
+            CellKind::Stack => self.stack.trace(edges),
             CellKind::Slots => {
                 let cap = (header >> 32) as u32;
                 assert!(8 + 8 * cap <= size, "slots larger than their cell");
@@ -190,6 +224,8 @@ pub struct VmOptions {
     pub heap_size: u64,
     pub heap: HeapOptions,
     pub cx: CxOptions,
+    /// Frame stack size in 8-byte slots (ARCHITECTURE.md §3.1).
+    pub stack_slots: u32,
 }
 
 impl Default for VmOptions {
@@ -198,6 +234,7 @@ impl Default for VmOptions {
             heap_size: 64 * ferrojs_core::cage::CHUNK_SIZE as u64,
             heap: HeapOptions::default(),
             cx: CxOptions::default(),
+            stack_slots: interp::DEFAULT_STACK_SLOTS,
         }
     }
 }
@@ -209,6 +246,10 @@ pub struct Vm {
     pub tables: Tables,
     /// Randomness, clocks and job order (D-008, D-041).
     pub host: Box<dyn host::Host>,
+    /// Set from any thread to stop running code (D-007): the next
+    /// interrupt check terminates execution. Stays set until cleared.
+    pub interrupt: Arc<AtomicBool>,
+    pub(crate) interp: interp::State,
 }
 
 impl Vm {
@@ -221,10 +262,19 @@ impl Vm {
     pub fn with_host(options: VmOptions, host: Box<dyn host::Host>) -> Result<Vm, CageError> {
         let cage = Cage::new(options.heap_size)?;
         let heap = Heap::from_cage(cage, options.heap);
+        let stack = Rc::new(interp::FrameStack::new(options.stack_slots));
         Ok(Vm {
-            cx: Cx::new(heap, Box::new(Tracer), options.cx),
+            cx: Cx::new(
+                heap,
+                Box::new(Tracer {
+                    stack: stack.clone(),
+                }),
+                options.cx,
+            ),
             tables: Tables::default(),
             host,
+            interrupt: Arc::new(AtomicBool::new(false)),
+            interp: interp::State::new(stack),
         })
     }
 

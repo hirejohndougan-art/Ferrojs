@@ -132,17 +132,20 @@ Order matters: each task builds on the ones above it.
   verifier), with tests. Every VM task needs it: registers hold raw
   values (ARCHITECTURE.md §2) and cells are only readable and writable
   through `Gc` handles. Core change: CI Miri required. needs: 1.3b
-- [~] (claimed 2026-11-23 16:27 UTC; stacked on the 1.7a branch, merges after it) 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
-  layout; proper tail calls designed in. Dispatch cost must not grow
-  with the number of ops (D-036): benchmark it. Plan (from the 1.6d
-  run): new `ferrojs-vm` crate; the frame stack is shared `Cell<u64>`
-  slots outside the cage, made a GC root by a small anchor cell held in
-  a `Global` whose trace callback pushes every reference on the live
-  part of the stack (raw header slots stay below 2^48, so they never
-  look like references); closures and environments are heap cells;
-  templates stay in a Rust-side table indexed from the closure header
-  (no raw pointers in cells, D-009); reuse the compiler's Node.js cases
-  and run them under GC stress. needs: 1.3b, 1.6d, 1.7a
+- 1.7 Interpreter (split 2026-11-23, D-047; stacked on the 1.7a branch,
+  merges after its Miri run):
+  - [x] 1.7b (2026-11-23, on branch `auto/2026-11-23-interpreter`, waiting for
+    1.7a's Miri run) Interpreter core: frame stack (ARCHITECTURE.md §3)
+    rooted through an anchor cell, function and environment cells, calls,
+    proper tail calls, returns, exception unwinding, interrupts, stack
+    overflow; every compiled function case matches the toy context, also
+    under GC stress. needs: 1.3b, 1.6d, 1.7a
+  - [ ] 1.7c Strings and globals in the interpreter: string values beyond
+    atoms (concatenation, Number::toString, comparisons), the global
+    object and global lexical environment; the script cases (1.6e, 1.6f)
+    match Node.js. needs: 1.7b, 1.8b
+  - [ ] 1.7d Dispatch cost against the op count (D-036): a benchmark that
+    shows it stays flat as ops are added. needs: 1.7b
 - [x] 1.8a (2026-11-23) Objects and shapes, part a: new
   `ferrojs-vm` crate with the cell tracer, string cells and atoms,
   shape transition trees with the prototype, ordinary objects with

@@ -1051,3 +1051,38 @@ planning document and gets logged here as each is implemented.
   with defaults (an extra environment or copies for the common case);
   a dedicated `JumpIfNotUndefined` op (worth it only once benchmarks
   show default-heavy code).
+
+## D-047 The interpreter: frame stack anchor, function and environment cells
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** Task 1.7 is split: 1.7b is the interpreter core
+  (`ferrojs_vm::interp`), 1.7c adds strings and globals, 1.7d measures
+  dispatch against the op count. The frame stack follows ARCHITECTURE.md
+  §3 exactly: `Cell<u64>` slots outside the cage, 8 header slots, frames
+  linked by slot index, slot 0 the pending exception. It is a GC root
+  through an anchor cell (`CellKind::Stack`) held in a `Global`; the
+  tracer shares the stack (`Rc`) and reports every reference in
+  `0..top`. `top` always equals the end of the current frame, and a new
+  frame is written completely before `top` is raised, so nothing above
+  `top` is ever live. Raw header words stay below 2^48 and decode as
+  doubles. Closures are `Function` cells (template index + environment;
+  they become ordinary objects with 1.13); environments are `Env` cells
+  (parent + slots, the TDZ marker allowed). Templates live in a Rust
+  table in the `Vm` (D-009), with per-template feedback; string
+  constants are atoms. Returns resume after the call instruction found
+  at the saved call pc, and unwinding looks up handlers at that pc. The
+  interrupt flag is an `Arc<AtomicBool>` on the `Vm`, checked at loop
+  edges and calls (stack overflow is checked first, as in the toy).
+  Allocation failure stops the run uncatchably (`Outcome::OutOfMemory`).
+- **Testing:** every Node.js-checked function case of the compiler runs
+  on the interpreter and must match the toy context, with the heap
+  verifier on and again under GC stress (the cases now live in a shared
+  file). Mutations of each new tracer edge (stack anchor, environment
+  parent, environment slots, function environment) are each caught.
+  Independent review: no GC-safety or frame bugs; its smaller findings
+  (string identity in `==`, overflow before interrupt, no half-loaded
+  templates, `call_template` docs) are fixed.
+- **Later:** the frame stack has no write barrier; a generational or
+  incremental collector must rescan the anchor at every collection.
+  Every `Vm` touches its whole stack (8 MB by default) when created.
+- **Merging:** the branch contains 1.7a, which changes `ferrojs-core`;
+  it merges after a passing Miri run.

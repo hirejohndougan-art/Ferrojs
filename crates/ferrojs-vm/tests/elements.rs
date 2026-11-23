@@ -17,6 +17,7 @@ fn vm(stress: bool) -> Vm {
             verify: true,
         },
         cx: CxOptions { gc_stress: stress },
+        ..VmOptions::default()
     })
     .unwrap()
 }

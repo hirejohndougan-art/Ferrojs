@@ -17,6 +17,7 @@ fn vm(stress: bool) -> Vm {
             verify: true,
         },
         cx: CxOptions { gc_stress: stress },
+        ..VmOptions::default()
     })
     .unwrap()
 }
@@ -493,7 +494,12 @@ fn the_tracer_reports_every_reference() {
         let nogc = s.nogc();
         let obj = o.get(nogc);
         let mut edges = Vec::new();
-        ferrojs_vm::Tracer.trace(nogc.cage(), obj.offset(), nogc.cell_size(obj), &mut edges);
+        ferrojs_vm::Tracer::default().trace(
+            nogc.cage(),
+            obj.offset(),
+            nogc.cell_size(obj),
+            &mut edges,
+        );
         let shape = object::shape(nogc, obj);
         assert!(edges.contains(&shape.offset()), "shape");
         // One value is inline; the rest are in the out-of-line slots cell,
@@ -502,12 +508,12 @@ fn the_tracer_reports_every_reference() {
         assert_ne!(slots, 0);
         assert!(edges.contains(&slots), "slots cell");
         let slots_cell = 8 + 8 * (nogc.cage().read_u64(slots) >> 32) as u32;
-        ferrojs_vm::Tracer.trace(nogc.cage(), slots, slots_cell, &mut edges);
+        ferrojs_vm::Tracer::default().trace(nogc.cage(), slots, slots_cell, &mut edges);
         for e in &expected {
             assert!(edges.contains(e), "value {e:#x} in a slot");
         }
         let mut shape_edges = Vec::new();
-        ferrojs_vm::Tracer.trace(
+        ferrojs_vm::Tracer::default().trace(
             nogc.cage(),
             shape.offset(),
             nogc.cell_size(shape),
@@ -596,6 +602,7 @@ fn a_failed_add_leaves_no_property_behind() {
             verify: true,
         },
         cx: CxOptions { gc_stress: false },
+        ..VmOptions::default()
     })
     .unwrap();
     vm.with(|s, t| {

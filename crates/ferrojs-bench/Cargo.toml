@@ -48,5 +48,9 @@ harness = false
 name = "objects"
 harness = false
 
+[[bench]]
+name = "interp"
+harness = false
+
 [lints]
 workspace = true

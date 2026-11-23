@@ -244,6 +244,8 @@ version = "0.0.1"
 name = "ferrojs-vm"
 version = "0.0.1"
 dependencies = [
+ "ferrojs-bytecode",
+ "ferrojs-compiler",
  "ferrojs-core",
  "ferrojs-value",
 ]

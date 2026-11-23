@@ -363,3 +363,21 @@ One entry per autopilot run, newest at the bottom. Format is in
   (every run fails in ~3 s since 2026-11-21) and rustup can't reach
   static.rust-lang.org here, so Miri can't run anywhere; every other
   open task waits on 1.7. John has been notified.
+
+## 2026-11-23 16:42 UTC — 1.7b Interpreter core (1.7 split b–d)
+- Result: done on branch `auto/2026-11-23-interpreter`, not merged: it
+  contains 1.7a (a `ferrojs-core` change), which needs a Miri run, and
+  GitHub CI isn't running jobs (no nightly toolchain here either).
+- Changed: `ferrojs_vm::interp`: the frame stack outside the cage,
+  rooted through an anchor cell; `Function` and `Env` cells; calls, tail
+  calls, returns, unwinding, interrupts, stack overflow, out of memory;
+  `Vm::load`, `Vm::call_template`, `Vm::run_function`. The compiler's
+  function cases moved to a shared file and run on the interpreter
+  against the toy context, also under GC stress; new benchmark
+  `interp/run.loop_with_calls`. Reviewed (risky: GC rooting): no serious
+  findings; four small ones fixed. Every new tracer edge is
+  mutation-checked.
+- Gate: everything passes except Miri (expected: waits for CI).
+- Decisions: D-047
+- Test262: 8699 (+0)
+- Next: 1.7c (strings and globals), stacked on this branch.
