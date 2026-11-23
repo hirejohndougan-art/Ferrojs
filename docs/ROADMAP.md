@@ -136,7 +136,7 @@ Order matters: each task builds on the ones above it.
   templates stay in a Rust-side table indexed from the closure header
   (no raw pointers in cells, D-009); reuse the compiler's Node.js cases
   and run them under GC stress. needs: 1.3b, 1.6d, 1.7a
-- [~] (claimed 2026-11-23 08:45 UTC) 1.8a Objects and shapes, part a: new
+- [x] 1.8a (2026-11-23) Objects and shapes, part a: new
   `ferrojs-vm` crate with the cell tracer, string cells and atoms,
   shape transition trees with the prototype, ordinary objects with
   inline and out-of-line slots, data-property get/set/define, model-

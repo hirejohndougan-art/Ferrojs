@@ -247,3 +247,20 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-037 (on the branch)
 - Test262: 8699 (+0)
 - Next: merge 1.7a once CI runs (record the run id); meanwhile 1.8.
+
+## 2026-11-23 09:40 UTC — 1.8a Objects and shapes, part a (1.8 split a–c)
+- Result: merged
+- Changed: new `ferrojs-vm` crate: cell tracer, string cells and
+  interned atoms, shape transition trees with the prototype, ordinary
+  objects with inline and out-of-line slots, data-property
+  get/set/define/own_keys. Model-checked (44 random runs, 4 under GC
+  stress, heap verifier and poisoning on); tracer tests fail if value or
+  prototype edges are dropped (checked by mutation). New
+  `objects/get_set` benchmark (3.0M instructions, about 1,500 per access
+  before inline caches). Independent review: `define` let a frozen
+  property's value change (fixed, SameValue) and the tests didn't cover
+  cells reachable only through slots (added). No `ferrojs-core` change.
+- Decisions: D-038
+- Test262: 8699 (+0)
+- Next: 1.8b (delete, dictionary mode, accessors) or 1.8c (elements);
+  1.7a still waits for CI.
