@@ -1,6 +1,7 @@
-//! Whole scripts and globals (task 1.6e, D-042): each script runs on the
-//! toy context, and the global `result` (or the error it throws) must
-//! match Node.js running the same script in a fresh context.
+//! Whole scripts and globals (task 1.6e, D-042) and strings (task 1.6f,
+//! D-044): each script runs on the toy context, and the global `result`
+//! (or the error it throws) must match Node.js running the same script in
+//! a fresh context. Strings are compared as UTF-16 code units.
 
 use ferrojs_bytecode::testing::{run_program, Outcome, ToyCtx, ToyFunction};
 use ferrojs_bytecode::{verify, verify_handlers, ErrorKind};
@@ -25,7 +26,11 @@ fn flatten(f: &CompiledFunction, cx: &mut ToyCtx, out: &mut Vec<ToyFunction>) ->
     index
 }
 
-fn show(v: Value) -> String {
+fn show(cx: &ToyCtx, v: Value) -> String {
+    if let Some(s) = cx.string_of(v) {
+        let units: Vec<String> = s.encode_utf16().map(|u| format!("{u:x}")).collect();
+        return format!("s:{}", units.join(","));
+    }
     match v.kind() {
         Kind::Undefined => "undefined".into(),
         Kind::Null => "null".into(),
@@ -60,14 +65,14 @@ fn run_scripts(sources: &[&str]) -> String {
                     }
                     Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
                     Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
-                    None => format!("throw:{}", show(v)),
+                    None => format!("throw:{}", show(&cx, v)),
                 }
             }
             Outcome::StepLimit => return "step limit".into(),
         }
     }
     match cx.global("result") {
-        Some(v) => show(v),
+        Some(v) => show(&cx, v),
         None => "no result".into(),
     }
 }
@@ -113,10 +118,52 @@ const CASES: &[&[&str]] = &[
     &["var NaNs = NaN; var result = NaNs !== NaNs && undefined === void 0;"],
 ];
 
-fn node_results() -> Option<Vec<String>> {
+/// Strings (task 1.6f): literals, templates, `typeof`, concatenation,
+/// Number::toString, StringToNumber, comparisons and equality.
+const STRING_CASES: &[&[&str]] = &[
+    &["var result = 'a' + 'b';"],
+    &["var result = 'x' + 1 + 2;"],
+    &["var result = 1 + 2 + 'x';"],
+    &["var result = '3' + 4 * '5';"],
+    &["var result = true + '1' + null + undefined;"],
+    &["var result = `${0.1 + 0.2}|${1e21}|${1e-7}|${123e-20}|${-0}|${NaN}|${Infinity}|${-Infinity}`;"],
+    &["var result = `${2 ** 53}|${5e-324}|${1.7976931348623157e308}|${100}|${0.000001}|${1234.5678}|${-1.5e-9}`;"],
+    &["var result = `${999999999999999900000}|${123456789012345680000}|${1.5e300}|${4.35}|${-12345678}|${0.1 * 3}|${1 / 3}`;"],
+    &["var result = typeof 'a' + typeof 1 + typeof undefined + typeof null + typeof true + typeof function () {} + typeof missing;"],
+    &["var result = typeof NaN + typeof (undefined) + typeof (missing) + typeof (() => 1);"],
+    &["var result = typeof x; let x;"],
+    &["let r = typeof y; var y = 1; var result = r + typeof y;"],
+    &["var result = (function () { let z = 's'; return typeof z + typeof q; })();"],
+    &["var result = ('a' < 'b') + ',' + ('B' < 'a') + ',' + ('10' < '9') + ',' + ('10' < 9) + ',' + ('abc' >= 'ab') + ',' + ('' <= '') + ',' + ('a' > 'b') + ',' + ('a' < 1);"],
+    &["var result = ('\\u{1F600}' < '\\uFFFF') + '' + ('\\uFFFF' > '\\u{10000}');"],
+    &["var result = `${'1' == 1}${'' == 0}${' \\n1\\t' == 1}${'0x10' == 16}${'a' == 'a'}${'a' === 'a'}${'1' === 1}${true == '1'}${null == ''}${undefined == 'undefined'}${'NaN' == NaN}${'1e3' == 1000}${'a' != 'b'}${'a' !== 'a'}`;"],
+    &["var result = ('6' * '7') + ('10' - 3) + ('8' / '2') + (+'  12  ') + (-'3') + ('5' % 3) + ('2' ** '3') + ('7' | 0) + (~'1') + ('1' << '4');"],
+    &["var result = `${+''}|${+'0b101'}|${+'0o17'}|${+'-0x1'}|${+'Infinity'}|${+'-Infinity'}|${+'infinity'}|${+'1_0'}|${+'.5'}|${+'5.'}|${+'.'}|${+'+.5e1'}|${+'1e'}|${+'\\u00a0 7 \\ufeff'}`;"],
+    &["var result = `${!''}${!'0'}${!' '}` + ('' ? 1 : 2) + ('x' && 'y') + ('' || 'z');"],
+    &["var s = ''; for (let i = 0; i < 5; i++) s += i; var result = s;"],
+    &["let a = 1, b = 'x'; var result = `${a}${b}` + `pre${a + 1}mid${b}post` + `` + `${null}${undefined}${true}`;"],
+    &["let n = 0; var result = `${n++}-${n++}-${n}`;"],
+    &["function f() { let s = 'a'; s = `${s}b${s}`; return s; } var result = f();"],
+    &["let s = 'q'; s += `${s}!`; var result = s;"],
+    &["var result = 'h\\u00e9llo \\u{1F600} ' + 'é' + `\\t${'\\x41'}`;"],
+    &["var result; try { throw 'boom' + 1; } catch (e) { result = e; }"],
+    &["throw 'uncaught';"],
+    &["var result; switch ('b') { case 'a': result = 1; break; case 'b': result = 2; break; }"],
+    &["var result = 'a\\tb\\n\\\\c\\'d\"';"],
+    &["let s = '5'; s++; var result = s;"],
+    &["let s = '5'; var result = s++ + s;"],
+    &["let s = 'ab'; for (let i = 0; i < 8; i++) s = s + s; var result = s;"],
+    &["var result = `line1
+line2` + `a\\
+b`;"],
+    &["var w = 'v'; var result = (() => { var w = 'inner'; return `${w}:${typeof w}`; })() + w;"],
+];
+
+fn node_results(cases: &[&[&str]]) -> Option<Vec<String>> {
     let mut script = String::from(
         "const vm=require('vm');\
          function show(v){if(v===undefined)return'undefined';if(v===null)return'null';\
+         if(typeof v==='string')return's:'+Array.from({length:v.length},(_,i)=>v.charCodeAt(i).toString(16)).join(',');\
          if(typeof v==='boolean')return String(v);if(typeof v==='function')return'function';\
          if(Number.isNaN(v))return'NaN';\
          const d=new DataView(new ArrayBuffer(8));d.setFloat64(0,v);\
@@ -126,7 +173,7 @@ fn node_results() -> Option<Vec<String>> {
          return 'throw:'+(e&&typeof e==='object'&&'name' in e?e.name:show(e));}}\
          try{return show(vm.runInContext('result',c));}catch(e){return 'no result';}}\nconst out=[];\n",
     );
-    for case in CASES {
+    for case in cases {
         let json: Vec<String> = case.iter().map(|s| format!("{:?}", s)).collect();
         script.push_str(&format!("out.push(run([{}]));\n", json.join(",")));
     }
@@ -150,16 +197,25 @@ fn node_results() -> Option<Vec<String>> {
     )
 }
 
-#[test]
-fn scripts_match_node() {
-    let Some(expected) = node_results() else {
+fn match_node(cases: &[&[&str]]) {
+    let Some(expected) = node_results(cases) else {
         eprintln!("node is not on the PATH; skipping the Node comparison");
         return;
     };
-    assert_eq!(expected.len(), CASES.len());
-    for (case, want) in CASES.iter().zip(&expected) {
+    assert_eq!(expected.len(), cases.len());
+    for (case, want) in cases.iter().zip(&expected) {
         assert_eq!(&run_scripts(case), want, "{case:?}");
     }
+}
+
+#[test]
+fn scripts_match_node() {
+    match_node(CASES);
+}
+
+#[test]
+fn strings_match_node() {
+    match_node(STRING_CASES);
 }
 
 #[test]

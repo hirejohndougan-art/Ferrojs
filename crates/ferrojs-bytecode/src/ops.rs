@@ -663,4 +663,37 @@ define_ops! {
                 Err(Thrown) => Flow::Throw,
             }
         }
+
+    /// `dst = typeof src`.
+    Typeof(type_of) { dst: Reg, src: Reg }
+        flags()
+        handler(cx) {
+            let v = cx.reg(src);
+            let t = cx.rt_typeof(v);
+            cx.set(dst, t);
+            Flow::Next
+        }
+
+    /// `dst = typeof ` the global name `constants[name]`: `"undefined"`
+    /// for an undeclared name instead of a `ReferenceError`.
+    TypeofName(type_of_name) { dst: Reg, name: Const }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let n = cx.constant(name);
+            let c = cx.rt_typeof_name(n);
+            cx.complete(dst, c)
+        }
+
+    /// `dst = ToString(src)` (template literal substitutions).
+    ToString(to_string) { dst: Reg, src: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let v = cx.reg(src);
+            if v.is_string() {
+                cx.set(dst, v);
+                return Flow::Next;
+            }
+            let c = cx.rt_to_string(v);
+            cx.complete(dst, c)
+        }
 }

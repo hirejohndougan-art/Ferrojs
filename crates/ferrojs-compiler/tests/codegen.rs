@@ -359,7 +359,9 @@ fn unsupported(src: &str) -> String {
 #[test]
 fn everything_else_is_unsupported_not_miscompiled() {
     for src in [
-        "function f() { return 'str'; }",
+        "function f() { return '\\uD800'; }",
+        "function f() { return `a\\uDC00${1}`; }",
+        "function f() { return f`x`; }",
         "function f() { if (1) { function g() {} } }",
         "function f() { return { a: 1 }.a; }",
         "function f() { return new f(); }",
@@ -369,7 +371,6 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function f() { let [a] = [1]; }",
         "function f() { return {}; }",
         "function f() { return this; }",
-        "function f() { return typeof 1; }",
         "function f(o) { return o.p; }",
         "function f() { try {} catch ({ e }) {} }",
         "function f() { try {} catch (e) { var e = 1; } }",

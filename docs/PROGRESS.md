@@ -317,3 +317,17 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-042, D-043
 - Test262: 8699 (+0)
 - Next: 1.6f strings (literals, typeof, concatenation, Number::toString).
+
+## 2026-11-23 09:25 UTC — 1.6f Strings
+- Result: merged
+- Changed: string literals and template literals compile to string
+  constants, `ToString` and `Add`; `typeof` (`Typeof`, `TypeofName`).
+  The toy context implements concatenation, Number::toString,
+  StringToNumber, code-unit comparison, loose equality and ToBoolean for
+  strings. 34 new script cases match Node.js, compared as UTF-16 code
+  units; a mutation (UTF-8 instead of UTF-16 order) is caught. Not
+  risky (no core, unsafe or GC code); no review needed.
+- Decisions: D-044
+- Test262: 8699 (+0)
+- Next: 1.6g (Annex B call-expression assignment targets), or 1.7a
+  once CI runs again.

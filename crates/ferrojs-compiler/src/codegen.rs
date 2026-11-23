@@ -9,14 +9,18 @@
 //! entered, and a use addresses its slot as (depth, slot) through the
 //! chain of environments.
 //!
-//! Values are numbers, booleans, `null`, `undefined` and functions; the
-//! code has the usual operators, structured control flow, `switch`,
-//! `try`/`catch`/`finally`, nested functions, closures and calls (proper
-//! tail calls in strict code). `let`/`const` bindings that may be used in
+//! Values are numbers, strings, booleans, `null`, `undefined` and
+//! functions; the code has the usual operators, `typeof`, template
+//! literals, structured control flow, `switch`, `try`/`catch`/`finally`,
+//! nested functions, closures and calls (proper tail calls in strict
+//! code). `let`/`const` bindings that may be used in
 //! their temporal dead zone hold the uninitialized marker until declared
 //! and are checked at every use. Everything else is reported as
-//! [`CompileError::Unsupported`], never miscompiled: objects, strings,
-//! `this`, globals, block-level function declarations, destructuring.
+//! [`CompileError::Unsupported`], never miscompiled: objects, tagged
+//! templates, `this` in sloppy functions, block-level function
+//! declarations, destructuring. String literals and template cooked
+//! strings become string constants (D-044); strings with lone surrogates
+//! are unsupported until the constant pool can hold UTF-16.
 //!
 //! Register-writing contract: `expr_to(e, dst)` may write `dst` before it
 //! has finished reading `e`'s operands, so `dst` must be a register `e`
@@ -1868,6 +1872,15 @@ impl<'s> Gen<'s> {
                 self.asm.load_null(dst);
                 Ok(())
             }
+            Expression::StringLiteral(lit) => {
+                let Some(text) = lit.value.as_str() else {
+                    return unsupported("strings with lone surrogates", lit.span);
+                };
+                let c = self.string_const(text)?;
+                self.asm.load_const(dst, c);
+                Ok(())
+            }
+            Expression::TemplateLiteral(t) => self.template(t, dst),
             Expression::Identifier(id) => {
                 let Some(sym) = self.resolve(id) else {
                     // Unresolved: a global. These three are non-writable,
@@ -2032,7 +2045,7 @@ impl<'s> Gen<'s> {
                 self.asm.load_undefined(dst);
                 return Ok(());
             }
-            UnaryOperator::Typeof => return unsupported("typeof (needs strings)", u.span),
+            UnaryOperator::Typeof => return self.type_of(&u.argument, dst),
             UnaryOperator::Delete => return unsupported("delete", u.span),
             op => op,
         };
@@ -2056,6 +2069,77 @@ impl<'s> Gen<'s> {
             }
         }
         self.release(a);
+        Ok(())
+    }
+
+    /// `typeof e`: a global name gets `TypeofName`, which gives
+    /// `"undefined"` for an undeclared name instead of throwing.
+    fn type_of(&mut self, e: &Expression<'_>, dst: Reg) -> CResult<()> {
+        if let Expression::Identifier(id) = e.without_parentheses() {
+            let global = match self.resolve(id) {
+                None => match id.name.as_str() {
+                    // Always defined (see `expr_to`).
+                    "undefined" | "NaN" | "Infinity" => None,
+                    name => Some(self.string_const(name)?),
+                },
+                Some(sym) => match self.locate(sym, self.reference_scope(id), id.span)? {
+                    Loc::Global { name, .. } => Some(name),
+                    _ => None,
+                },
+            };
+            if let Some(name) = global {
+                self.asm.type_of_name(dst, name);
+                return Ok(());
+            }
+        }
+        let a = self.expr_any(e)?;
+        self.asm.type_of(dst, a.reg);
+        self.release(a);
+        Ok(())
+    }
+
+    /// A template literal: the cooked strings and the ToString of each
+    /// substitution, concatenated left to right. Each substitution is
+    /// converted before the next one is evaluated.
+    fn template(&mut self, t: &TemplateLiteral<'_>, dst: Reg) -> CResult<()> {
+        let mut cooked = Vec::with_capacity(t.quasis.len());
+        for q in &t.quasis {
+            // Untagged templates with bad escapes are early errors, so
+            // `cooked` is always there.
+            match q.value.cooked.and_then(|c| c.as_str()) {
+                Some(text) => cooked.push(text),
+                None => return unsupported("strings with lone surrogates", q.span),
+            }
+        }
+        let (head, spans) = cooked.split_first().expect("a template has a head");
+        let mut started = !head.is_empty();
+        if started || t.expressions.is_empty() {
+            let c = self.string_const(head)?;
+            self.asm.load_const(dst, c);
+            started = true;
+        }
+        for (e, text) in t.expressions.iter().zip(spans) {
+            if started {
+                let v = self.temp()?;
+                self.expr_to(e, v)?;
+                self.asm.to_string(v, v);
+                let ic = self.ic()?;
+                self.asm.add(dst, dst, v, ic);
+                self.free(v);
+            } else {
+                self.expr_to(e, dst)?;
+                self.asm.to_string(dst, dst);
+                started = true;
+            }
+            if !text.is_empty() {
+                let v = self.temp()?;
+                let c = self.string_const(text)?;
+                self.asm.load_const(v, c);
+                let ic = self.ic()?;
+                self.asm.add(dst, dst, v, ic);
+                self.free(v);
+            }
+        }
         Ok(())
     }
 
@@ -2314,6 +2398,7 @@ fn writes_last(e: &Expression<'_>) -> bool {
         Expression::NumericLiteral(_)
         | Expression::BooleanLiteral(_)
         | Expression::NullLiteral(_)
+        | Expression::StringLiteral(_)
         | Expression::Identifier(_)
         | Expression::BinaryExpression(_) => true,
         Expression::UnaryExpression(u) => u.operator != UnaryOperator::Void,
@@ -2328,7 +2413,9 @@ fn has_side_effects(e: &Expression<'_>) -> bool {
         Expression::NumericLiteral(_)
         | Expression::BooleanLiteral(_)
         | Expression::NullLiteral(_)
+        | Expression::StringLiteral(_)
         | Expression::Identifier(_) => false,
+        Expression::TemplateLiteral(t) => t.expressions.iter().any(has_side_effects),
         Expression::UnaryExpression(u) => has_side_effects(&u.argument),
         Expression::BinaryExpression(b) => has_side_effects(&b.left) || has_side_effects(&b.right),
         Expression::LogicalExpression(l) => has_side_effects(&l.left) || has_side_effects(&l.right),
@@ -2367,6 +2454,11 @@ fn visit_identifiers<'a>(e: &Expression<'a>, f: &mut impl FnMut(&IdentifierRefer
                 visit_identifiers(e, f);
             }
         }
+        Expression::TemplateLiteral(t) => {
+            for e in &t.expressions {
+                visit_identifiers(e, f);
+            }
+        }
         Expression::AssignmentExpression(a) => {
             if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
                 f(id);
@@ -2394,7 +2486,7 @@ fn statement_name(s: &Statement<'_>) -> &'static str {
 
 fn expression_name(e: &Expression<'_>) -> &'static str {
     match e {
-        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => "strings",
+        Expression::TaggedTemplateExpression(_) => "tagged templates",
         Expression::BigIntLiteral(_) => "BigInt",
         Expression::RegExpLiteral(_) => "regular expressions",
         Expression::NewExpression(_) => "`new`",

@@ -936,3 +936,29 @@ planning document and gets logged here as each is implemented.
   monthly review should add the rule to AUTOPILOT.md's gate notes.
 - **Rejected:** a symmetric 3% band (ordinary optimizations would need a
   baseline rewrite each time).
+
+## D-044 Strings in the compiler and the toy context
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** String literals and the cooked parts of template literals
+  become string constants (shared with global names). Templates compile
+  to the head string, then for each substitution `ToString` (new op)
+  and `Add`, then the next cooked part, skipping empty parts; each
+  substitution is converted before the next is evaluated, as the spec
+  orders it. `typeof` is a new non-throwing `Typeof` op whose runtime
+  hook returns a pre-made name (no allocation); `typeof` of a global
+  name uses `TypeofName`, which gives `"undefined"` for an undeclared
+  name but still throws for a binding in its TDZ. The toy context
+  interns strings as Rust strings and implements `+` concatenation,
+  Number::toString (shortest round-trip digits in the spec's layouts),
+  StringToNumber, code-unit string comparison, loose equality and
+  ToBoolean for strings; it caps strings at 2^20 code units so fuzzed
+  doubling loops stay small. `Value::is_string` is added for the
+  `ToString` fast path.
+- **Limits:** strings with lone surrogates (`'\uD800'`) are reported as
+  unsupported, because the constant pool holds UTF-8 text; it moves to
+  UTF-16 (or WTF-8) when the VM's string constants arrive with 1.7.
+  Tagged templates need objects (the strings array) and stay
+  unsupported.
+- **Rejected:** compiling templates to `Add` alone (wrong for objects
+  and symbols: `+` uses ToPrimitive with the default hint and accepts
+  symbols' errors differently from ToString).

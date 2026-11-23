@@ -247,6 +247,16 @@ pub trait OpCtx {
     /// ToBoolean for values that aren't booleans. Must not allocate or run
     /// user code.
     fn rt_to_boolean(&mut self, v: Value) -> bool;
+    /// `typeof v`: one of the eight type-name strings. Must not allocate
+    /// (the names are pre-made atoms) or run user code.
+    fn rt_typeof(&mut self, v: Value) -> Value;
+    /// `typeof name` for a global name `name` (a string constant): like
+    /// [`rt_load_name`](Self::rt_load_name), except that an unresolvable
+    /// name gives `"undefined"` instead of throwing. A binding in its TDZ
+    /// still throws.
+    fn rt_typeof_name(&mut self, name: Value) -> Completion;
+    /// ToString for a value that isn't a string (template substitutions).
+    fn rt_to_string(&mut self, v: Value) -> Completion;
 
     /// Stores a completion's value in `dst`, or reports the throw.
     #[inline]
