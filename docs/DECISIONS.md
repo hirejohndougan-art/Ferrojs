@@ -843,3 +843,27 @@ planning document and gets logged here as each is implemented.
   transitions for a rare operation); moving values into the dictionary
   table (two value paths for get/set and the ICs); a Rust-side hash map
   per object (pointers into the heap from Rust, D-009).
+
+## D-040 Elements: dense with hole markers, or sparse; array length in the store
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** task 1.8c adds `ferrojs_vm::elements`. Array-index keys
+  (`0 ..= 2^32 - 2`) live in an `Elements` cell (kind 6) referenced from
+  the object's elements field, apart from named properties; callers
+  (interpreter, built-ins) route index keys there, and named keys never
+  hold indices. Dense stores keep `capacity` values with holes as the
+  internal uninitialized marker (D-034), growing by doubling; writing
+  at an index of twice the capacity plus 8 or more (or 2^20 or more) turns
+  the store sparse (unordered index/value entries, linear lookup) for
+  good. Arrays are ordinary objects with an `ARRAY` header flag; the
+  length lives in the elements header and grows past written indices;
+  `set_length` truncates. Elements are plain data properties; holes and
+  missing indices fall through to the prototype. Own keys are
+  `elements::keys` (ascending) then `object::own_keys`.
+- **Phase 1 simplifications:** no element attributes other than the
+  defaults (frozen and sealed objects later), no `length` property
+  object (the interpreter exposes it), no packed/holey distinction
+  beyond the markers, linear sparse lookup.
+- **Rejected:** indices as named properties (shape explosion for
+  arrays); `undefined` for holes (indistinguishable from a stored
+  `undefined`); a sorted sparse table now (insertion cost and code for
+  a rare case).
