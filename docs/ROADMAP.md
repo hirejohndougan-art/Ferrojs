@@ -117,7 +117,7 @@ Order matters: each task builds on the ones above it.
   (`LoadName`/`StoreName`), strings in the constant pool, `this`. Also
   accept sloppy-mode call expressions as assignment targets (runtime
   `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6d, 1.8
-- [ ] 1.7a (risky) Core handle API for the interpreter: a checked way to
+- [~] (claimed 2026-11-23 08:30 UTC) 1.7a (risky) Core handle API for the interpreter: a checked way to
   turn a raw cell offset held in a register `Value` into a `Gc` handle
   (`NoGc::handle(offset) -> Option<Gc>`, live-cell check under the
   verifier), with tests. Every VM task needs it: registers hold raw
