@@ -141,9 +141,12 @@ Order matters: each task builds on the ones above it.
   shape transition trees with the prototype, ordinary objects with
   inline and out-of-line slots, data-property get/set/define, model-
   checked under GC stress. needs: 1.3b
-- [ ] 1.8b Objects, part b: delete, attribute changes and dictionary
-  mode (ARCHITECTURE.md §7.2), the lazy key table for large shapes,
-  non-extensible objects, accessor properties. needs: 1.8a
+- [~] (claimed 2026-11-23 09:45 UTC) 1.8b Objects, part b: delete,
+  attribute changes (ValidateAndApplyPropertyDescriptor for data
+  properties), dictionary mode (ARCHITECTURE.md §7.2), non-extensible
+  objects. needs: 1.8a
+- [ ] 1.8d Objects, part d: accessor properties (getters and setters
+  called from get/set), the lazy key table for large shapes. needs: 1.8b, 1.7
 - [ ] 1.8c Objects, part c: indexed properties in the elements store
   (packed, holey, sparse) and Array length. needs: 1.8a
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
