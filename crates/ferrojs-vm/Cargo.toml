@@ -1,0 +1,15 @@
+[package]
+name = "ferrojs-vm"
+description = "The runtime: heap cell layouts, strings, atoms, shapes and objects (later the interpreter and built-ins)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ferrojs-core = { path = "../ferrojs-core" }
+ferrojs-value = { path = "../ferrojs-value" }
+
+[lints]
+workspace = true

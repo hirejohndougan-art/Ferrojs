@@ -805,3 +805,37 @@ planning document and gets logged here as each is implemented.
   field with `write_u32` + `read_ref` (bypasses the write barrier and the
   type-safety design); keeping register values as `Root`s (a handle-stack
   entry per register write).
+
+## D-038 Runtime cells: strings, strong atoms, shape trees, objects
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** task 1.8a starts `ferrojs-vm` with the engine's cell
+  layouts and a `Tracer` for them (kind byte at the start of every cell:
+  1 string, 2 shape, 3 object, 4 out-of-line slots).
+  - Strings: header with length in UTF-16 units, then Latin-1 bytes when
+    every unit fits, else UTF-16LE. Atoms are strings flagged `ATOM` and
+    interned in a Rust-side table (`Tables.atoms`, code units → `Global`).
+  - Shapes (32 bytes): parent, prototype, key atom, inline slot count,
+    first child and next sibling (transitions as a linked list),
+    attributes and property count in the header; a property's slot is its
+    shape's count minus one. Root shapes per (prototype, inline count) in
+    `Tables.root_shapes`. Lookup walks the parent chain.
+  - Objects: header with inline count and shape reference (high half),
+    elements and out-of-line slots references, then inline values
+    (default 4). Out-of-line slots grow by doubling from 4.
+  - Operations: `get` (own then prototype chain), `set` (OrdinarySet for
+    data properties: own non-writable or inherited non-writable refuses),
+    `define` (new property with attributes, or same-attribute update),
+    `own_keys` (insertion order). API functions that allocate take a
+    `Scope` and `Root`s; values to store come as `RootedValue`.
+- **Phase 1 simplifications, to revisit:** atoms and transition trees
+  are strong (never collected while the engine lives; Phase 2/5 make
+  them weak, ARCHITECTURE.md §5.4 and §7.3); no lazy key table yet, so
+  lookup is linear in the property count; attribute changes, deletion
+  and dictionary mode wait for 1.8b. The first `objects/get_set`
+  benchmark (about 1,500 instructions per access without inline caches)
+  is the baseline the ICs will be measured against.
+- **Rejected:** keeping transitions in a Rust map (pointers into the
+  heap from Rust, and not snapshot-friendly, D-009); storing the shape
+  in a separate header word (the architecture's layout puts it in the
+  header's high half to keep objects small); per-object hash tables
+  before dictionary mode is needed.
