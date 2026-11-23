@@ -3,7 +3,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use super::*;
 use crate::cage::CHUNK_SIZE;
-use crate::heap::HeapOptions;
+use crate::heap::{HeapOptions, CHUNK_HEADER_SIZE};
 
 const C: u64 = CHUNK_SIZE as u64;
 
@@ -551,8 +551,10 @@ fn handles_to_collected_cells_are_refused() {
         assert!(nogc.handle::<Node>(dead).is_none(), "poison {poison}");
         let h = nogc.handle::<Node>(kept).expect("still live");
         assert_eq!(id_of(nogc, h), 1);
-        // A new cell may reuse the slot; then the offset is live again.
+        // A new cell reuses the freed slot (free lists come first), so the
+        // same offset is live again: reuse can't be detected, by design.
         let again = node(&mut cx, 3, 0).bind(cx.nogc()).offset();
+        assert_eq!(again, dead);
         assert_eq!(
             cx.nogc().handle::<Node>(again).map(|h| h.offset()),
             Some(again)
@@ -574,4 +576,31 @@ fn handles_from_raw_offsets_survive_in_stress_mode_when_rooted() {
             assert_eq!(id_of(s.nogc(), a), 7);
         }
     });
+}
+
+#[test]
+fn handles_are_refused_in_large_tails_and_unused_or_free_chunks() {
+    let mut cx = checked(8, false);
+    let h = CHUNK_HEADER_SIZE;
+    // A cell longer than one chunk: its second chunk is a large tail, and
+    // the spot where a cell would start there must be refused.
+    let big = cx.alloc::<()>(300_000).unwrap().bind(cx.nogc());
+    let g = cx.nogc().global(big);
+    let big = big.offset();
+    let head_chunk = big - big % CHUNK_SIZE;
+    assert!(cx.nogc().handle::<()>(big).is_some());
+    assert!(cx
+        .nogc()
+        .handle::<()>(head_chunk + CHUNK_SIZE + h)
+        .is_none());
+    // A chunk inside the cage that was never used.
+    assert!(cx.nogc().handle::<()>((5 * C) as u32 + h).is_none());
+    // Once collected, the large cell's chunks are free: refused too.
+    drop(g);
+    cx.collect();
+    assert!(cx.nogc().handle::<()>(big).is_none());
+    assert!(cx
+        .nogc()
+        .handle::<()>(head_chunk + CHUNK_SIZE + h)
+        .is_none());
 }

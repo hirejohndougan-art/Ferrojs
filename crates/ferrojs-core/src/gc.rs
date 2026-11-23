@@ -321,7 +321,6 @@ impl<'a> NoGc<'a> {
         self.cx.heap.cage()
     }
 
-    /// Whether `cell` is a live cell of this context's heap.
     /// The live cell that starts at `offset`, as an unrooted handle: for
     /// references the engine holds as raw offsets outside cells, such as
     /// heap references in interpreter registers (ARCHITECTURE.md §2,
@@ -342,6 +341,7 @@ impl<'a> NoGc<'a> {
         NonZeroU32::new(offset).map(Gc::new)
     }
 
+    /// Whether `cell` is a live cell of this context's heap.
     pub fn is_live<T>(self, cell: Gc<'_, T>) -> bool {
         self.cx.heap.is_live_cell(cell.offset())
     }
@@ -831,7 +831,7 @@ impl<T> fmt::Debug for Global<T> {
 /// 7. A handle made from a raw offset with [`NoGc::handle`] can't be held
 ///    across a collection either:
 ///
-/// ```compile_fail
+/// ```compile_fail,E0502
 /// # use ferrojs_core::gc::*;
 /// # let heap = ferrojs_core::Heap::new(16 * ferrojs_core::cage::CHUNK_SIZE as u64).unwrap();
 /// # let mut cx = Cx::new(heap, Box::new(NoEdges), CxOptions { gc_stress: false });
