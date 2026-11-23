@@ -15,6 +15,7 @@
 //! assert!(err.message.contains("x"));
 //! ```
 
+pub mod call_target;
 pub mod codegen;
 pub mod early;
 
@@ -84,6 +85,20 @@ impl SyntaxError {
 pub struct Parsed<'a> {
     pub program: &'a Program<'a>,
     pub semantic: Semantic<'a>,
+    /// Sloppy-mode calls used as assignment targets (D-045): the span ends
+    /// of the member expressions they were rewritten to, sorted. Empty for
+    /// almost every program.
+    pub call_targets: Vec<u32>,
+    rewrites: call_target::Rewrites,
+}
+
+impl Parsed<'_> {
+    /// Maps an offset in the AST's spans back to the source text passed to
+    /// [`parse`]. The two differ only when the program has
+    /// [`call_targets`](Parsed::call_targets).
+    pub fn original_offset(&self, offset: u32) -> u32 {
+        self.rewrites.original(offset)
+    }
 }
 
 /// Parses `source` with the given goal and runs every early-error check.
@@ -100,16 +115,21 @@ pub fn parse<'a>(
         parse_regular_expression: true,
         ..ParseOptions::default()
     };
-    let ret = Parser::new(allocator, source, goal.source_type())
-        .with_options(options)
-        .parse();
-    let errors: Vec<SyntaxError> = ret
-        .diagnostics
-        .errors()
-        .map(SyntaxError::from_oxc)
-        .collect();
-    if ret.fatal_error || !errors.is_empty() {
-        return Err(non_empty(errors, "invalid syntax"));
+    let parse_text = |text: &'a str| {
+        Parser::new(allocator, text, goal.source_type())
+            .with_options(options)
+            .parse()
+    };
+    let mut ret = parse_text(source);
+    let mut rewrites = call_target::Rewrites::default();
+    if !is_clean(&ret) {
+        // Sloppy scripts may assign to calls, which oxc rejects: rewrite
+        // each such call (D-045, `call_target`).
+        rewrites = rewrite_call_targets(source, goal, options, &ret)?;
+        ret = parse_text(allocator.alloc_str(&rewrites.apply(source)));
+        if !is_clean(&ret) {
+            return Err(syntax_errors(&ret, &rewrites));
+        }
     }
 
     let program: &'a Program<'a> = allocator.alloc(ret.program);
@@ -119,16 +139,104 @@ pub fn parse<'a>(
     let mut errors: Vec<SyntaxError> = built
         .diagnostics
         .errors()
-        .map(SyntaxError::from_oxc)
+        .map(|d| rewrites_error(&rewrites, SyntaxError::from_oxc(d)))
         .collect();
-    errors.extend(early::check(program, goal));
+    errors.extend(
+        early::check(program, goal)
+            .into_iter()
+            .map(|e| rewrites_error(&rewrites, e)),
+    );
     if !errors.is_empty() {
         return Err(errors);
     }
+    let call_targets = if rewrites.is_empty() {
+        Vec::new()
+    } else {
+        call_target::validate(program, built.semantic.scoping(), &rewrites).map_err(|e| vec![e])?
+    };
     Ok(Parsed {
         program,
         semantic: built.semantic,
+        call_targets,
+        rewrites,
     })
+}
+
+fn is_clean(ret: &oxc_parser::ParserReturn<'_>) -> bool {
+    !ret.fatal_error && ret.diagnostics.errors().next().is_none()
+}
+
+/// The errors of a failed parse of `rewrites` applied to the source, at
+/// offsets in the source.
+fn syntax_errors(
+    ret: &oxc_parser::ParserReturn<'_>,
+    rewrites: &call_target::Rewrites,
+) -> Vec<SyntaxError> {
+    let errors = ret
+        .diagnostics
+        .errors()
+        .map(|d| rewrites_error(rewrites, SyntaxError::from_oxc(d)))
+        .collect();
+    non_empty(errors, "invalid syntax")
+}
+
+/// If `ret` failed only because of a call used as an assignment target,
+/// records a site for it. Returns whether it did.
+fn add_call_site(
+    ret: &oxc_parser::ParserReturn<'_>,
+    goal: Goal,
+    rewrites: &mut call_target::Rewrites,
+    source: &str,
+) -> bool {
+    let mut errors = ret.diagnostics.errors();
+    let (Some(d), None) = (errors.next(), errors.next()) else {
+        return false;
+    };
+    if goal != Goal::Script || !ret.fatal_error || d.message != call_target::INVALID_TARGET {
+        return false;
+    }
+    match d.labels.first() {
+        Some(label) => rewrites.add(label.offset() + label.len(), source),
+        None => false,
+    }
+}
+
+/// Rewrites every call assignment target in `source`, given the failed
+/// parse `first` of the unchanged text. The rounds parse in a scratch
+/// arena so failed attempts don't pile up in the caller's. Returns the
+/// errors of the last attempt if it fails for another reason.
+fn rewrite_call_targets(
+    source: &str,
+    goal: Goal,
+    options: ParseOptions,
+    first: &oxc_parser::ParserReturn<'_>,
+) -> Result<call_target::Rewrites, Vec<SyntaxError>> {
+    let mut rewrites = call_target::Rewrites::default();
+    if !add_call_site(first, goal, &mut rewrites, source) {
+        return Err(syntax_errors(first, &rewrites));
+    }
+    let mut scratch = Allocator::default();
+    loop {
+        let text = rewrites.apply(source);
+        {
+            let ret = Parser::new(&scratch, &text, goal.source_type())
+                .with_options(options)
+                .parse();
+            if is_clean(&ret) {
+                return Ok(rewrites);
+            }
+            if !add_call_site(&ret, goal, &mut rewrites, source) {
+                return Err(syntax_errors(&ret, &rewrites));
+            }
+        }
+        scratch.reset();
+    }
+}
+
+/// Maps a syntax error found in rewritten text back to the source.
+fn rewrites_error(rewrites: &call_target::Rewrites, mut e: SyntaxError) -> SyntaxError {
+    e.offset = e.offset.map(|o| rewrites.original(o));
+    e
 }
 
 /// Checks `source` for syntax and early errors, discarding the AST. Returns

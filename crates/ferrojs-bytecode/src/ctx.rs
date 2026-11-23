@@ -92,6 +92,9 @@ pub enum ErrorKind {
     /// `SyntaxError`: a global declaration clashes with an existing one
     /// (GlobalDeclarationInstantiation).
     GlobalRedeclaration,
+    /// `ReferenceError`: sloppy code assigned to a call, like `f() = 1`
+    /// (assignment target type *web-compat*, D-045).
+    InvalidAssignmentTarget,
 }
 
 /// What a global declaration creates (GlobalDeclarationInstantiation).

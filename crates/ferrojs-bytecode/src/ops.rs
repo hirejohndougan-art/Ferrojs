@@ -510,6 +510,14 @@ define_ops! {
             cx.rt_throw_error(ErrorKind::ConstAssignment)
         }
 
+    /// Throws the `ReferenceError` for an assignment to a call in sloppy
+    /// code (`f() = 1`, D-045).
+    ThrowInvalidAssignment(throw_invalid_assignment) {}
+        flags(terminator, may_throw, may_gc)
+        handler(cx) {
+            cx.rt_throw_error(ErrorKind::InvalidAssignmentTarget)
+        }
+
     /// `dst = ` a new closure of nested function `func` over the current
     /// environment.
     CreateClosure(create_closure) { dst: Reg, func: Func }

@@ -151,10 +151,26 @@ pub fn compile_function_source(source: &str) -> CResult<CompiledFunction> {
 /// Compiles `func`, which must belong to `parsed`, with the functions
 /// nested in it. A use of a binding outside `func` is unsupported.
 pub fn compile_function<'a>(parsed: &Parsed<'a>, func: &Function<'a>) -> CResult<CompiledFunction> {
-    let scoping = parsed.semantic.scoping();
-    let f = FnLike::function(func)?;
-    let an = Analysis::new(scoping, f.scope, global_scope(parsed));
-    compile_fn(&an, &f, None)
+    let compile = || {
+        let scoping = parsed.semantic.scoping();
+        let f = FnLike::function(func)?;
+        let mut an = Analysis::new(scoping, f.scope, global_scope(parsed));
+        an.call_targets = parsed.call_targets.clone();
+        compile_fn(&an, &f, None)
+    };
+    compile().map_err(|e| original_offsets(parsed, e))
+}
+
+/// Maps the offset of an error found in `parsed`'s AST back to its source
+/// (they differ when the front end rewrote call targets, D-045).
+fn original_offsets(parsed: &Parsed<'_>, e: CompileError) -> CompileError {
+    match e {
+        CompileError::Unsupported { what, offset } => CompileError::Unsupported {
+            what,
+            offset: parsed.original_offset(offset),
+        },
+        other => other,
+    }
 }
 
 /// A script's top-level scope, whose bindings are globals (None for a
@@ -171,11 +187,16 @@ fn global_scope(parsed: &Parsed<'_>) -> Option<ScopeId> {
 /// (GlobalDeclarationInstantiation), with every function nested in it.
 /// Returns `undefined`.
 pub fn compile_script(parsed: &Parsed<'_>) -> CResult<CompiledFunction> {
+    compile_whole_script(parsed).map_err(|e| original_offsets(parsed, e))
+}
+
+fn compile_whole_script(parsed: &Parsed<'_>) -> CResult<CompiledFunction> {
     let Some(scope) = global_scope(parsed) else {
         return unsupported("modules", parsed.program.span);
     };
     let scoping = parsed.semantic.scoping();
-    let an = Analysis::new(scoping, scope, Some(scope));
+    let mut an = Analysis::new(scoping, scope, Some(scope));
+    an.call_targets = parsed.call_targets.clone();
     let mut g = Gen::new(&an, scope);
     g.claim_locals(0);
     let body = &parsed.program.body;
@@ -246,6 +267,8 @@ struct Analysis<'s> {
     /// A script's top-level scope: its bindings are globals, reached by
     /// name (D-042).
     global: Option<ScopeId>,
+    /// [`Parsed::call_targets`]: calls assigned to in sloppy code (D-045).
+    call_targets: Vec<u32>,
 }
 
 impl<'s> Analysis<'s> {
@@ -280,6 +303,7 @@ impl<'s> Analysis<'s> {
             slot_of,
             root,
             global,
+            call_targets: Vec::new(),
         }
     }
 
@@ -2208,6 +2232,13 @@ impl<'s> Gen<'s> {
     }
 
     fn assignment(&mut self, a: &AssignmentExpression<'_>, dst: Reg) -> CResult<()> {
+        if let Some(call) = a
+            .left
+            .as_simple_assignment_target()
+            .and_then(|t| self.call_target(t))
+        {
+            return self.assign_to_call(call);
+        }
         let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left else {
             return unsupported("assignment to a property or a pattern", a.left.span());
         };
@@ -2275,9 +2306,28 @@ impl<'s> Gen<'s> {
         Ok(())
     }
 
+    /// The call, if `t` is a call that sloppy code assigns to (D-045).
+    fn call_target<'b, 'a>(&self, t: &'b SimpleAssignmentTarget<'a>) -> Option<&'b Expression<'a>> {
+        crate::call_target::site_call(t, &self.an.call_targets)
+    }
+
+    /// `f() = e`, `f() += e`, `f()++`, … in sloppy code: the call runs,
+    /// then a `ReferenceError` is thrown before anything else is evaluated
+    /// (13.15.2 step 1.c, 13.4.2.1). The result register is never written:
+    /// the throw ends the block.
+    fn assign_to_call(&mut self, call: &Expression<'_>) -> CResult<()> {
+        let r = self.expr_any(call)?;
+        self.release(r);
+        self.asm.throw_invalid_assignment();
+        Ok(())
+    }
+
     /// `x++`, `--x`, …: the result (the old value converted with ToNumeric,
     /// or the new value) goes to `dst` if there is one.
     fn update(&mut self, u: &UpdateExpression<'_>, dst: Option<Reg>) -> CResult<()> {
+        if let Some(call) = self.call_target(&u.argument) {
+            return self.assign_to_call(call);
+        }
         let t = match &u.argument {
             SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => self.write_target(id)?,
             other => return unsupported("update of a property", other.span()),

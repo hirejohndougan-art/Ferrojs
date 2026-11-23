@@ -57,9 +57,11 @@ fn run_scripts(sources: &[&str]) -> String {
             Outcome::Returned(_) => {}
             Outcome::Threw(v) => {
                 return match cx.last_error {
-                    Some(ErrorKind::UninitializedBinding | ErrorKind::UnresolvableReference) => {
-                        "throw:ReferenceError".into()
-                    }
+                    Some(
+                        ErrorKind::UninitializedBinding
+                        | ErrorKind::UnresolvableReference
+                        | ErrorKind::InvalidAssignmentTarget,
+                    ) => "throw:ReferenceError".into(),
                     Some(ErrorKind::ConstAssignment | ErrorKind::NotCallable) => {
                         "throw:TypeError".into()
                     }

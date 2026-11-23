@@ -78,9 +78,11 @@ fn show_outcome((o, cx): (Outcome, ToyCtx)) -> String {
         Outcome::Returned(v) => show(v),
         // The toy has no error objects; it records which error was thrown.
         Outcome::Threw(v) => match cx.last_error {
-            Some(ErrorKind::UninitializedBinding | ErrorKind::UnresolvableReference) => {
-                "throw:ReferenceError".into()
-            }
+            Some(
+                ErrorKind::UninitializedBinding
+                | ErrorKind::UnresolvableReference
+                | ErrorKind::InvalidAssignmentTarget,
+            ) => "throw:ReferenceError".into(),
             Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
             Some(ErrorKind::ConstAssignment | ErrorKind::NotCallable) => "throw:TypeError".into(),
             Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
