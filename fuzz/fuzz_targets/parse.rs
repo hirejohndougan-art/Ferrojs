@@ -9,7 +9,9 @@
 
 use ferrojs_bytecode::testing::{run_program, ToyCtx, ToyFunction};
 use ferrojs_bytecode::{verify, verify_handlers};
-use ferrojs_compiler::{compile_function, parse, Allocator, CompiledFunction, Goal};
+use ferrojs_compiler::{
+    compile_function, compile_script, parse, Allocator, CompiledFunction, Goal,
+};
 use ferrojs_value::Value;
 use libfuzzer_sys::fuzz_target;
 use oxc_ast::ast::Statement;
@@ -34,6 +36,15 @@ fuzz_target!(|data: &[u8]| {
             return;
         }
     };
+    // The whole script, with its globals.
+    if goal == Goal::Script {
+        if let Ok(compiled) = compile_script(&parsed) {
+            let mut program = Vec::new();
+            let mut cx = ToyCtx::default();
+            flatten(&compiled, &mut cx, &mut program);
+            run_program(&program, 0, &[], &mut cx, 10_000);
+        }
+    }
     for stmt in &parsed.program.body {
         let Statement::FunctionDeclaration(func) = stmt else {
             continue;
@@ -42,8 +53,8 @@ fuzz_target!(|data: &[u8]| {
             continue;
         };
         let mut program = Vec::new();
-        flatten(&compiled, &mut program);
         let mut cx = ToyCtx::default();
+        flatten(&compiled, &mut cx, &mut program);
         let args = [Value::from_i32(i32::from(*g)); 2];
         run_program(&program, 0, &args, &mut cx, 10_000);
     }
@@ -51,17 +62,17 @@ fuzz_target!(|data: &[u8]| {
 
 /// Verifies every function of the tree and flattens it into a toy program
 /// (root at index 0).
-fn flatten(f: &CompiledFunction, out: &mut Vec<ToyFunction>) -> usize {
+fn flatten(f: &CompiledFunction, cx: &mut ToyCtx, out: &mut Vec<ToyFunction>) -> usize {
     let limits = f.limits();
     verify(&f.code, &limits).expect("compiler output verifies");
     verify_handlers(&f.code, &f.handlers, &limits).expect("compiler exception tables verify");
     let index = out.len();
     out.push(ToyFunction::default());
-    let functions = f.functions.iter().map(|g| flatten(g, out)).collect();
+    let functions = f.functions.iter().map(|g| flatten(g, cx, out)).collect();
     out[index] = ToyFunction {
         code: f.code.clone(),
         handlers: f.handlers.clone(),
-        constants: f.constant_values(),
+        constants: f.constant_values(|s| cx.intern(s)),
         limits,
         params: f.params,
         functions,

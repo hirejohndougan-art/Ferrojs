@@ -62,11 +62,18 @@ pub struct Comparison {
     pub regressions: Vec<String>,
     /// Baseline benchmarks that didn't run.
     pub missing: Vec<String>,
+    /// Benchmarks whose count fell by more than [`COLLAPSE_PCT`]: usually
+    /// a benchmark that stopped measuring its work (D-043).
+    pub collapsed: Vec<String>,
 }
+
+/// A drop bigger than this (in percent) fails the check until the
+/// baseline is rewritten on purpose.
+pub const COLLAPSE_PCT: f64 = 50.0;
 
 impl Comparison {
     pub fn passed(&self) -> bool {
-        self.regressions.is_empty() && self.missing.is_empty()
+        self.regressions.is_empty() && self.missing.is_empty() && self.collapsed.is_empty()
     }
 }
 
@@ -88,11 +95,21 @@ pub fn compare(base: &Counts, new: &Counts, threshold_pct: f64) -> Comparison {
                     (now as f64 - before as f64) * 100.0 / before as f64
                 };
                 let slower = change > threshold_pct;
-                let tag = if slower { "SLOWER " } else { "ok     " };
+                let collapsed = change < -COLLAPSE_PCT;
+                let tag = if slower {
+                    "SLOWER "
+                } else if collapsed {
+                    "DROPPED"
+                } else {
+                    "ok     "
+                };
                 c.report
                     .push(format!("  {tag} {id}: {before} -> {now} ({change:+.2}%)"));
                 if slower {
                     c.regressions.push(id.clone());
+                }
+                if collapsed {
+                    c.collapsed.push(id.clone());
                 }
             }
         }
@@ -183,6 +200,11 @@ mod tests {
 
     #[test]
     fn missing_benchmark_fails() {
+        let c = compare(&counts(&[("a", 100)]), &counts(&[("a", 40)]), 3.0);
+        assert_eq!(c.collapsed, ["a"], "a 60% drop needs a look");
+        assert!(!c.passed());
+        let c = compare(&counts(&[("a", 100)]), &counts(&[("a", 60)]), 3.0);
+        assert!(c.passed(), "a 40% speedup is fine");
         let c = compare(&counts(&[("a", 1)]), &counts(&[]), 3.0);
         assert_eq!(c.missing, vec!["a".to_string()]);
         assert!(!c.passed());

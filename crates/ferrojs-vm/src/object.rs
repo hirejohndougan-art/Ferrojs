@@ -13,8 +13,9 @@
 //! A property's slot index comes from the shape; slots below N are
 //! inline, the rest live in the out-of-line `Slots` cell (header: kind |
 //! capacity << 32, then the values), which grows by doubling. Property
-//! keys are atoms. Getters, setters, deletion, attribute changes and
-//! dictionary mode come with task 1.8b; indexed properties with 1.8c.
+//! keys are atoms. Deletion, attribute changes, non-extensible objects
+//! and dictionary mode came with task 1.8b (D-039); accessors come with
+//! 1.8d, indexed properties with 1.8c.
 
 use ferrojs_core::gc::{Root, Scope};
 use ferrojs_core::{AllocError, Gc, NoGc, Unbound};
@@ -171,14 +172,21 @@ pub fn set(
         }
         proto = prototype(nogc, p);
     }
+    if !is_extensible(s.nogc(), o.get(s.nogc())) {
+        return Ok(false);
+    }
     add(s, o, key, value, Attrs::DEFAULT)?;
     Ok(true)
 }
 
-/// Defines a new own data property with `attrs`, or updates the value of
-/// an existing one whose attributes are the same. Changing the attributes
-/// of an existing property needs dictionary mode (task 1.8b) and returns
-/// `Ok(false)` for now. `key` must be an atom.
+/// Defines an own data property with `attrs` and `value`
+/// (\[\[DefineOwnProperty\]\] with a complete data descriptor, following
+/// ValidateAndApplyPropertyDescriptor). A new property needs an
+/// extensible object. An existing non-configurable property can't become
+/// configurable or change enumerability, and if it is also non-writable it
+/// can't become writable or change value (SameValue). Other attribute
+/// changes move the object to dictionary mode. Returns whether it
+/// succeeded. `key` must be an atom.
 pub fn define(
     s: &mut Scope<'_>,
     o: Root<'_, Object>,
@@ -189,28 +197,121 @@ pub fn define(
     let nogc = s.nogc();
     let (obj, k) = (o.get(nogc), key.get(nogc));
     debug_assert!(crate::string::is_atom(nogc, k), "property keys are atoms");
-    match shape::lookup(nogc, shape(nogc, obj), k) {
-        Some(Property { slot, attrs: a }) if a == attrs => {
-            let (bits, referent) = value.resolve(nogc);
-            // ValidateAndApplyPropertyDescriptor: a non-configurable,
-            // non-writable property only accepts its own value (SameValue).
-            if !a.contains(Attrs::WRITABLE) && !a.contains(Attrs::CONFIGURABLE) {
-                let old = read_slot(nogc, obj, slot);
-                let new = Value::from_bits_checked(bits).expect("valid value");
-                return Ok(same_value(nogc, old, new));
-            }
-            write_slot(nogc, obj, slot, bits, referent);
-            Ok(true)
+    let sh = shape(nogc, obj);
+    let Some(Property { slot, attrs: a }) = shape::lookup(nogc, sh, k) else {
+        if !shape::is_extensible(nogc, sh) {
+            return Ok(false);
         }
-        Some(_) => Ok(false),
-        None => {
-            add(s, o, key, value, attrs)?;
-            Ok(true)
+        add(s, o, key, value, attrs)?;
+        return Ok(true);
+    };
+    if !a.contains(Attrs::CONFIGURABLE) {
+        if attrs.contains(Attrs::CONFIGURABLE)
+            || a.contains(Attrs::ENUMERABLE) != attrs.contains(Attrs::ENUMERABLE)
+        {
+            return Ok(false);
+        }
+        if !a.contains(Attrs::WRITABLE) {
+            let old = read_slot(nogc, obj, slot);
+            let new = Value::from_bits_checked(value.resolve(nogc).0).expect("valid value");
+            return Ok(!attrs.contains(Attrs::WRITABLE) && same_value(nogc, old, new));
         }
     }
+    if a != attrs {
+        let sh = to_own_dictionary(s, o)?;
+        let nogc = s.nogc();
+        shape::dict_set_attrs(nogc, sh.get(nogc), key.get(nogc), attrs);
+    }
+    let nogc = s.nogc();
+    let (bits, referent) = value.resolve(nogc);
+    write_slot(nogc, o.get(nogc), slot, bits, referent);
+    Ok(true)
 }
 
-/// Adds a property that isn't there yet: transition, make room, store.
+/// \[\[Delete\]\] for own data properties: removes `key` unless it is
+/// non-configurable. Deleting the property added last steps back to the
+/// parent shape; any other moves the object to dictionary mode. Returns
+/// whether the property is gone.
+pub fn delete(
+    s: &mut Scope<'_>,
+    o: Root<'_, Object>,
+    key: Root<'_, JsString>,
+) -> Result<bool, AllocError> {
+    let nogc = s.nogc();
+    let (obj, k) = (o.get(nogc), key.get(nogc));
+    debug_assert!(crate::string::is_atom(nogc, k), "property keys are atoms");
+    let sh = shape(nogc, obj);
+    let Some(p) = shape::lookup(nogc, sh, k) else {
+        return Ok(true);
+    };
+    if !p.attrs.contains(Attrs::CONFIGURABLE) {
+        return Ok(false);
+    }
+    let last = !shape::is_dictionary(nogc, sh)
+        && shape::last_key(nogc, sh).map(|l| l.offset()) == Some(k.offset());
+    if last {
+        let parent = shape::parent(nogc, sh).expect("a shape with a key has a parent");
+        nogc.write_ref(obj, 4, Some(parent));
+    } else {
+        let sh = to_own_dictionary(s, o)?;
+        let nogc = s.nogc();
+        shape::dict_remove(nogc, sh.get(nogc), key.get(nogc));
+    }
+    // Clear the slot so it doesn't keep its old value alive.
+    let nogc = s.nogc();
+    write_slot(
+        nogc,
+        o.get(nogc),
+        p.slot,
+        Value::UNDEFINED.to_bits(),
+        None::<Gc<'_, ()>>,
+    );
+    Ok(true)
+}
+
+/// \[\[PreventExtensions\]\]: no new properties from now on. Moves the
+/// object to dictionary mode (Phase 1 keeps the flag in its own shape).
+pub fn prevent_extensions(s: &mut Scope<'_>, o: Root<'_, Object>) -> Result<(), AllocError> {
+    let sh = to_own_dictionary(s, o)?;
+    let nogc = s.nogc();
+    shape::dict_prevent_extensions(nogc, sh.get(nogc));
+    Ok(())
+}
+
+/// \[\[IsExtensible\]\].
+pub fn is_extensible(nogc: NoGc<'_>, o: Gc<'_, Object>) -> bool {
+    shape::is_extensible(nogc, shape(nogc, o))
+}
+
+/// Whether the object is in dictionary mode.
+pub fn is_dictionary(nogc: NoGc<'_>, o: Gc<'_, Object>) -> bool {
+    shape::is_dictionary(nogc, shape(nogc, o))
+}
+
+/// Puts the object in dictionary mode if it isn't; returns its (own)
+/// dictionary shape, rooted.
+fn to_own_dictionary<'s>(
+    s: &mut Scope<'s>,
+    o: Root<'_, Object>,
+) -> Result<Root<'s, Shape>, AllocError> {
+    let nogc = s.nogc();
+    let sh = shape(nogc, o.get(nogc));
+    if shape::is_dictionary(nogc, sh) {
+        return Ok(s.root(sh));
+    }
+    let sh = s.root(sh);
+    let dict = shape::to_dictionary(s, sh)?.bind(s.nogc());
+    let nogc = s.nogc();
+    nogc.write_ref(o.get(nogc), 4, Some(dict));
+    Ok(s.root(dict))
+}
+
+/// Shared shapes with more properties than this switch to dictionary mode
+/// (ARCHITECTURE.md §7.2).
+pub const MAX_SHARED_PROPERTIES: u32 = 128;
+
+/// Adds a property that isn't there yet: transition (or dictionary
+/// entry), make room, store.
 fn add(
     s: &mut Scope<'_>,
     o: Root<'_, Object>,
@@ -218,7 +319,21 @@ fn add(
     value: RootedValue<'_>,
     attrs: Attrs,
 ) -> Result<(), AllocError> {
-    let old = s.root(shape(s.nogc(), o.get(s.nogc())));
+    let nogc = s.nogc();
+    let sh = shape(nogc, o.get(nogc));
+    if shape::is_dictionary(nogc, sh) || shape::count(nogc, sh) >= MAX_SHARED_PROPERTIES {
+        let dict = to_own_dictionary(s, o)?;
+        // Storage first: if it can't be had, the property isn't added.
+        let slot = shape::dict_next_slot(s.nogc(), dict.get(s.nogc()));
+        ensure_slot(s, o, slot)?;
+        let got = shape::dict_add(s, dict, key, attrs)?;
+        debug_assert_eq!(got, slot);
+        let nogc = s.nogc();
+        let (bits, referent) = value.resolve(nogc);
+        write_slot(nogc, o.get(nogc), slot, bits, referent);
+        return Ok(());
+    }
+    let old = s.root(sh);
     let new_shape = shape::add_property(s, old, key, attrs)?.bind(s.nogc());
     let new_shape = s.root(new_shape);
     let slot = shape::count(s.nogc(), new_shape.get(s.nogc())) - 1;

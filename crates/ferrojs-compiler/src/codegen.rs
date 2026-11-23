@@ -9,20 +9,25 @@
 //! entered, and a use addresses its slot as (depth, slot) through the
 //! chain of environments.
 //!
-//! Values are numbers, booleans, `null`, `undefined` and functions; the
-//! code has the usual operators, structured control flow, `switch`,
-//! `try`/`catch`/`finally`, nested functions, closures and calls (proper
-//! tail calls in strict code). `let`/`const` bindings that may be used in
+//! Values are numbers, strings, booleans, `null`, `undefined` and
+//! functions; the code has the usual operators, `typeof`, template
+//! literals, structured control flow, `switch`, `try`/`catch`/`finally`,
+//! nested functions, closures and calls (proper tail calls in strict
+//! code). `let`/`const` bindings that may be used in
 //! their temporal dead zone hold the uninitialized marker until declared
 //! and are checked at every use. Everything else is reported as
-//! [`CompileError::Unsupported`], never miscompiled: objects, strings,
-//! `this`, globals, block-level function declarations, destructuring.
+//! [`CompileError::Unsupported`], never miscompiled: objects, tagged
+//! templates, `this` in sloppy functions, block-level function
+//! declarations, destructuring. String literals and template cooked
+//! strings become string constants (D-044); strings with lone surrogates
+//! are unsupported until the constant pool can hold UTF-16.
 //!
 //! Register-writing contract: `expr_to(e, dst)` may write `dst` before it
 //! has finished reading `e`'s operands, so `dst` must be a register `e`
 //! doesn't read: a fresh temporary, or a local `e` provably doesn't
 //! mention (see [`Gen::assign_local`]).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use ferrojs_bytecode::{
@@ -43,10 +48,13 @@ pub struct CompiledFunction {
     pub name: String,
     /// Declared parameter count `P`: parameters are `r0..rP`.
     pub params: u32,
+    /// The function's `length`: the parameters before the first one with
+    /// a default value (ExpectedArgumentCount).
+    pub length: u32,
     /// Register count `R`, parameters included.
     pub registers: u32,
-    /// Number constants; strings join them in 1.6e.
-    pub constants: Vec<f64>,
+    /// The constant pool: numbers and strings (global names so far).
+    pub constants: Vec<Constant>,
     /// Feedback slots.
     pub ics: u32,
     pub strict: bool,
@@ -68,10 +76,24 @@ impl CompiledFunction {
         }
     }
 
-    /// The constant pool as values.
-    pub fn constant_values(&self) -> Vec<Value> {
-        self.constants.iter().map(|&d| Value::number(d)).collect()
+    /// The constant pool as values; `string` makes the value of a string
+    /// constant (the runtime allocates or interns it).
+    pub fn constant_values(&self, mut string: impl FnMut(&str) -> Value) -> Vec<Value> {
+        self.constants
+            .iter()
+            .map(|c| match c {
+                Constant::Number(d) => Value::number(*d),
+                Constant::String(s) => string(s),
+            })
+            .collect()
     }
+}
+
+/// A constant-pool entry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Constant {
+    Number(f64),
+    String(String),
 }
 
 /// Why a function couldn't be compiled.
@@ -133,10 +155,105 @@ pub fn compile_function_source(source: &str) -> CResult<CompiledFunction> {
 /// Compiles `func`, which must belong to `parsed`, with the functions
 /// nested in it. A use of a binding outside `func` is unsupported.
 pub fn compile_function<'a>(parsed: &Parsed<'a>, func: &Function<'a>) -> CResult<CompiledFunction> {
+    let compile = || {
+        let scoping = parsed.semantic.scoping();
+        let f = FnLike::function(func)?;
+        let mut an = Analysis::new(scoping, f.scope, global_scope(parsed));
+        an.call_targets = parsed.call_targets.clone();
+        compile_fn(&an, &f, None)
+    };
+    compile().map_err(|e| original_offsets(parsed, e))
+}
+
+/// Maps the offset of an error found in `parsed`'s AST back to its source
+/// (they differ when the front end rewrote call targets, D-045).
+fn original_offsets(parsed: &Parsed<'_>, e: CompileError) -> CompileError {
+    match e {
+        CompileError::Unsupported { what, offset } => CompileError::Unsupported {
+            what,
+            offset: parsed.original_offset(offset),
+        },
+        other => other,
+    }
+}
+
+/// A script's top-level scope, whose bindings are globals (None for a
+/// module).
+fn global_scope(parsed: &Parsed<'_>) -> Option<ScopeId> {
+    if parsed.program.source_type.is_module() {
+        return None;
+    }
+    parsed.program.scope_id.get()
+}
+
+/// Compiles a whole script (D-042): its top-level code as a function of no
+/// parameters whose bindings are globals, declared up front
+/// (GlobalDeclarationInstantiation), with every function nested in it.
+/// Returns `undefined`.
+pub fn compile_script(parsed: &Parsed<'_>) -> CResult<CompiledFunction> {
+    compile_whole_script(parsed).map_err(|e| original_offsets(parsed, e))
+}
+
+fn compile_whole_script(parsed: &Parsed<'_>) -> CResult<CompiledFunction> {
+    let Some(scope) = global_scope(parsed) else {
+        return unsupported("modules", parsed.program.span);
+    };
     let scoping = parsed.semantic.scoping();
-    let f = FnLike::function(func)?;
-    let an = Analysis::new(scoping, f.scope);
-    compile_fn(&an, &f, None)
+    let mut an = Analysis::new(scoping, scope, Some(scope));
+    an.call_targets = parsed.call_targets.clone();
+    let mut g = Gen::new(&an, scope);
+    g.claim_locals(0);
+    let body = &parsed.program.body;
+    g.find_early_references_in(body);
+
+    // GlobalDeclarationInstantiation: lexical names, then var names
+    // (functions included), then the functions themselves.
+    let mut lexical = Vec::new();
+    let mut vars = Vec::new();
+    for sym in scoping.iter_bindings_in(scope) {
+        let flags = scoping.symbol_flags(sym);
+        let name = scoping.symbol_ident(sym).as_str().to_owned();
+        if flags.intersects(SymbolFlags::Class) {
+            return unsupported("classes", parsed.program.span);
+        } else if flags.contains(SymbolFlags::ConstVariable) {
+            lexical.push((name, ferrojs_bytecode::GlobalKind::Const));
+        } else if flags.contains(SymbolFlags::BlockScopedVariable) {
+            lexical.push((name, ferrojs_bytecode::GlobalKind::Let));
+        } else {
+            vars.push(name);
+        }
+    }
+    for (name, kind) in lexical {
+        let c = g.string_const(&name)?;
+        g.asm.declare_global(c, Imm(kind.imm()));
+    }
+    for name in vars {
+        let c = g.string_const(&name)?;
+        g.asm
+            .declare_global(c, Imm(ferrojs_bytecode::GlobalKind::Var.imm()));
+    }
+    g.enter_lexical(body.iter());
+    g.hoist_functions(body)?;
+    for stmt in body {
+        g.statement(stmt)?;
+    }
+    let r = g.temp()?;
+    g.asm.load_undefined(r);
+    g.asm.ret(r);
+    g.free(r);
+    g.finish(
+        String::new(),
+        0,
+        0,
+        scoping.scope_flags(scope).is_strict_mode(),
+    )
+}
+
+/// Parses `source` as a script and compiles it.
+pub fn compile_script_source(source: &str) -> CResult<CompiledFunction> {
+    let allocator = Allocator::default();
+    let parsed = parse(&allocator, source, Goal::Script).map_err(CompileError::Syntax)?;
+    compile_script(&parsed)
 }
 
 /// Which bindings live in environments, and where (D-036).
@@ -152,12 +269,24 @@ struct Analysis<'s> {
     /// The scope of the function being compiled: bindings outside it are
     /// out of reach.
     root: ScopeId,
+    /// A script's top-level scope: its bindings are globals, reached by
+    /// name (D-042).
+    global: Option<ScopeId>,
+    /// [`Parsed::call_targets`]: calls assigned to in sloppy code (D-045).
+    call_targets: Vec<u32>,
+    /// Parameters that a parameter initializer may use before they are
+    /// initialized (D-046): every use checks the TDZ marker. Filled in by
+    /// each function before its nested functions are compiled.
+    param_tdz: RefCell<HashSet<SymbolId>>,
 }
 
 impl<'s> Analysis<'s> {
-    fn new(scoping: &'s Scoping, root: ScopeId) -> Analysis<'s> {
+    fn new(scoping: &'s Scoping, root: ScopeId, global: Option<ScopeId>) -> Analysis<'s> {
         let mut captured = HashSet::new();
         for sym in scoping.symbol_ids() {
+            if Some(scoping.symbol_scope_id(sym)) == global {
+                continue;
+            }
             let home = owner(scoping, scoping.symbol_scope_id(sym));
             let used_elsewhere = scoping
                 .get_resolved_reference_ids(sym)
@@ -182,6 +311,9 @@ impl<'s> Analysis<'s> {
             env_slots,
             slot_of,
             root,
+            global,
+            call_targets: Vec::new(),
+            param_tdz: RefCell::new(HashSet::new()),
         }
     }
 
@@ -236,6 +368,7 @@ struct FnLike<'b, 'a> {
     scope: ScopeId,
     /// A named function expression's own name binding.
     own_name: Option<SymbolId>,
+    arrow: bool,
 }
 
 impl<'b, 'a> FnLike<'b, 'a> {
@@ -261,6 +394,7 @@ impl<'b, 'a> FnLike<'b, 'a> {
             body: Body::Block(body),
             scope: f.scope_id.get().expect("semantic analysis ran"),
             own_name,
+            arrow: false,
         })
     }
 
@@ -279,6 +413,7 @@ impl<'b, 'a> FnLike<'b, 'a> {
             body,
             scope: f.scope_id.get().expect("semantic analysis ran"),
             own_name: None,
+            arrow: true,
         })
     }
 }
@@ -319,6 +454,10 @@ fn compile_fn(
     }
     let mut g = Gen::new(an, f.scope);
     g.own_name = f.own_name;
+    // `this` is the frame's `this` in strict non-arrow functions. Sloppy
+    // functions box it (needs the global object) and arrows take their
+    // enclosing function's: later.
+    g.this_ok = !f.arrow && scoping.scope_flags(f.scope).is_strict_mode();
 
     // Parameters first, in order: r0..rP. A repeated name (sloppy mode)
     // binds the last parameter with that name.
@@ -327,32 +466,82 @@ fn compile_fn(
         return unsupported("rest parameters", rest.span);
     }
     let count = params.items.len() as u32;
+    let length = params
+        .items
+        .iter()
+        .position(|p| p.initializer.is_some())
+        .unwrap_or(params.items.len()) as u32;
     let mut param_syms = Vec::new();
-    for (i, p) in params.items.iter().enumerate() {
-        if p.initializer.is_some() {
-            return unsupported("default parameter values", p.span);
-        }
+    for p in &params.items {
         let BindingPattern::BindingIdentifier(id) = &p.pattern else {
             return unsupported("destructuring parameters", p.span);
         };
-        g.locals.insert(symbol_of(id), Reg(i as u32));
-        param_syms.push((symbol_of(id), Reg(i as u32)));
+        param_syms.push(symbol_of(id));
+    }
+    // With default values (D-046), parameters are initialized one by one,
+    // left to right: a parameter an initializer may reach before its turn
+    // (its own initializer or an earlier one, closures included) gets its
+    // own binding with the TDZ marker; the others stay in their argument
+    // registers.
+    let has_defaults = length < count;
+    let mut tdz = HashSet::new();
+    if has_defaults {
+        let mut refs = ParamRefs {
+            scoping,
+            params: &param_syms,
+            current: 0,
+            closures: 0,
+            found: Vec::new(),
+        };
+        for (i, p) in params.items.iter().enumerate() {
+            if let Some(init) = &p.initializer {
+                refs.current = i;
+                refs.visit_expression(init);
+            }
+        }
+        for &(i, j, in_closure) in &refs.found {
+            if i <= j {
+                tdz.insert(param_syms[j]);
+            }
+            // A closure in the parameters sees the parameter, but the body
+            // sees a separate `var` copy (FunctionDeclarationInstantiation
+            // step 28): two bindings for one symbol.
+            if in_closure && !scoping.symbol_redeclarations(param_syms[j]).is_empty() {
+                return unsupported(
+                    "a parameter redeclared in the body and used by a closure in the parameters",
+                    params.items[j].span,
+                );
+            }
+        }
+        an.param_tdz.borrow_mut().extend(tdz.iter().copied());
+    }
+    for (i, &sym) in param_syms.iter().enumerate() {
+        if !tdz.contains(&sym) {
+            g.locals.insert(sym, Reg(i as u32));
+        }
     }
     g.next_reg = count;
     g.claim_locals(count);
+    for &sym in &tdz {
+        if !an.captured.contains(&sym) {
+            g.needs_tdz.insert(sym);
+        }
+    }
     g.find_early_references(f.body);
 
     // Entry: the function's environment, captured parameters copied in
     // (the last one wins for repeated names), the TDZ marker in lexical
     // bindings, the function's own name, then hoisted declarations.
     let fn_scope_pushed = g.enter_scope(f.scope)?;
-    for &(sym, r) in &param_syms {
-        if an.captured.contains(&sym) {
-            let slot = EnvSlot {
-                depth: 0,
-                slot: an.slot_of[&sym],
-            };
-            g.asm.store_env(slot, r);
+    if !has_defaults {
+        for (i, &sym) in param_syms.iter().enumerate() {
+            if an.captured.contains(&sym) {
+                let slot = EnvSlot {
+                    depth: 0,
+                    slot: an.slot_of[&sym],
+                };
+                g.asm.store_env(slot, Reg(i as u32));
+            }
         }
     }
     if let Some(own) = f.own_name {
@@ -360,6 +549,9 @@ fn compile_fn(
         g.asm.load_closure(t);
         g.init_binding(own, f.scope, t);
         g.free(t);
+    }
+    if has_defaults {
+        g.init_params(&params.items, &param_syms, &tdz)?;
     }
     match f.body {
         Body::Block(body) => {
@@ -377,34 +569,12 @@ fn compile_fn(
     }
     let _ = fn_scope_pushed;
 
-    let (code, labels) = g
-        .asm
-        .finish_with_labels()
-        .map_err(|e| CompileError::TooLarge(format!("{e:?}")))?;
-    let at = |l| label_offset(&labels, l).expect("handler labels are bound");
-    let handlers = g
-        .handlers
-        .iter()
-        .map(|&(start, end, target, exception)| Handler {
-            start: at(start),
-            end: at(end),
-            target: at(target),
-            exception,
-        })
-        // A try block that compiled to nothing protects nothing.
-        .filter(|h| h.start < h.end)
-        .collect();
-    Ok(CompiledFunction {
-        name: f.name.clone(),
-        params: count,
-        registers: g.max_reg.max(count),
-        constants: g.constants,
-        ics: g.ics,
-        strict: scoping.scope_flags(f.scope).is_strict_mode(),
-        code,
-        handlers,
-        functions: g.functions,
-    })
+    g.finish(
+        f.name.clone(),
+        count,
+        length,
+        scoping.scope_flags(f.scope).is_strict_mode(),
+    )
 }
 
 fn symbol_of(id: &BindingIdentifier<'_>) -> SymbolId {
@@ -451,6 +621,12 @@ const K_JUMPS: i32 = 3;
 enum Loc {
     Reg(Reg),
     Env(EnvSlot),
+    /// A global, by name (D-042): a script's top-level binding, or an
+    /// undeclared name. `lexical` for a top-level `let`/`const`.
+    Global {
+        name: Const,
+        lexical: bool,
+    },
 }
 
 /// What a store to a binding does.
@@ -468,7 +644,8 @@ enum WriteMode {
 #[derive(Clone, Copy)]
 struct Target {
     loc: Loc,
-    sym: SymbolId,
+    /// `None` for an undeclared global.
+    sym: Option<SymbolId>,
     /// Lexical binding that may be in its TDZ: check before storing.
     tdz: bool,
     mode: WriteMode,
@@ -498,8 +675,9 @@ struct Gen<'s> {
     needs_tdz: HashSet<SymbolId>,
     next_reg: u32,
     max_reg: u32,
-    constants: Vec<f64>,
+    constants: Vec<Constant>,
     constant_index: HashMap<u64, u32>,
+    string_index: HashMap<String, u32>,
     ics: u32,
     breakables: Vec<Breakable>,
     /// Labels seen on the way to the statement being compiled.
@@ -516,6 +694,8 @@ struct Gen<'s> {
     /// Function declarations already created at their scope's entry.
     hoisted: HashSet<u32>,
     own_name: Option<SymbolId>,
+    /// `this` compiles to `LoadThis`.
+    this_ok: bool,
     /// Inside a `try` block (or the `catch` of a `try … finally`): no
     /// tail calls.
     no_tail: u32,
@@ -541,6 +721,7 @@ impl<'s> Gen<'s> {
             max_reg: 0,
             constants: Vec::new(),
             constant_index: HashMap::new(),
+            string_index: HashMap::new(),
             ics: 0,
             breakables: Vec::new(),
             pending_labels: Vec::new(),
@@ -551,6 +732,7 @@ impl<'s> Gen<'s> {
             functions: Vec::new(),
             hoisted: HashSet::new(),
             own_name: None,
+            this_ok: false,
             no_tail: 0,
             uses_envs,
         }
@@ -595,6 +777,25 @@ impl<'s> Gen<'s> {
         match body {
             Body::Block(b) => v.visit_function_body(b),
             Body::Expr(e) => v.visit_expression(e),
+        }
+        for (sym, end) in v.decl_end {
+            if v.first_use.get(&sym).is_some_and(|&start| start < end)
+                && is_lexical(self.scoping.symbol_flags(sym))
+            {
+                self.needs_tdz.insert(sym);
+            }
+        }
+    }
+
+    /// [`Gen::find_early_references`] for a script's statements.
+    fn find_early_references_in(&mut self, body: &[Statement<'_>]) {
+        let mut v = UseOrder {
+            scoping: self.scoping,
+            first_use: HashMap::new(),
+            decl_end: HashMap::new(),
+        };
+        for s in body {
+            v.visit_statement(s);
         }
         for (sym, end) in v.decl_end {
             if v.first_use.get(&sym).is_some_and(|&start| start < end)
@@ -690,6 +891,52 @@ impl<'s> Gen<'s> {
         Ok(())
     }
 
+    /// Initializes the parameters of a function with default values, left
+    /// to right (IteratorBindingInitialization, D-046): an `undefined`
+    /// argument is replaced by its initializer's value. Parameters in
+    /// `tdz` start as the TDZ marker in their own binding.
+    fn init_params(
+        &mut self,
+        items: &[FormalParameter<'_>],
+        syms: &[SymbolId],
+        tdz: &HashSet<SymbolId>,
+    ) -> CResult<()> {
+        if !tdz.is_empty() {
+            let t = self.temp()?;
+            self.asm.load_uninitialized(t);
+            for (p, sym) in items.iter().zip(syms) {
+                if tdz.contains(sym) {
+                    match self.locate(*sym, self.scope, p.span)? {
+                        Loc::Reg(r) => self.asm.mov(r, t),
+                        Loc::Env(slot) => self.asm.store_env(slot, t),
+                        Loc::Global { .. } => unreachable!("parameters are not globals"),
+                    }
+                }
+            }
+            self.free(t);
+        }
+        for (i, (p, &sym)) in items.iter().zip(syms).enumerate() {
+            // The argument register. Nothing reads it while the initializer
+            // runs: a parameter its own initializer uses is in `tdz`, with
+            // its binding elsewhere.
+            let arg = Reg(i as u32);
+            if let Some(init) = &p.initializer {
+                let skip = self.asm.new_label();
+                let t = self.temp()?;
+                self.asm.load_undefined(t);
+                self.asm.strict_equal(t, arg, t);
+                self.asm.jump_if_false(t, skip);
+                self.free(t);
+                self.expr_to(init, arg)?;
+                self.asm.bind(skip);
+            }
+            if tdz.contains(&sym) || self.an.captured.contains(&sym) {
+                self.init_binding(sym, self.scope, arg);
+            }
+        }
+        Ok(())
+    }
+
     /// Compiles a nested function and returns its index.
     fn nested(&mut self, f: &FnLike<'_, '_>) -> CResult<Func> {
         let compiled = compile_fn(self.an, f, Some(&self.scope_stack))?;
@@ -697,6 +944,45 @@ impl<'s> Gen<'s> {
             .map_err(|_| CompileError::TooLarge("nested functions".into()))?;
         self.functions.push(compiled);
         Ok(Func(i))
+    }
+
+    /// Lays out the code and builds the compiled function.
+    fn finish(
+        self,
+        name: String,
+        params: u32,
+        length: u32,
+        strict: bool,
+    ) -> CResult<CompiledFunction> {
+        let (code, labels) = self
+            .asm
+            .finish_with_labels()
+            .map_err(|e| CompileError::TooLarge(format!("{e:?}")))?;
+        let at = |l| label_offset(&labels, l).expect("handler labels are bound");
+        let handlers = self
+            .handlers
+            .iter()
+            .map(|&(start, end, target, exception)| Handler {
+                start: at(start),
+                end: at(end),
+                target: at(target),
+                exception,
+            })
+            // A try block that compiled to nothing protects nothing.
+            .filter(|h| h.start < h.end)
+            .collect();
+        Ok(CompiledFunction {
+            name,
+            params,
+            length,
+            registers: self.max_reg.max(params),
+            constants: self.constants,
+            ics: self.ics,
+            strict,
+            code,
+            handlers,
+            functions: self.functions,
+        })
     }
 
     fn temp(&mut self) -> CResult<Reg> {
@@ -737,17 +1023,32 @@ impl<'s> Gen<'s> {
         let index = match self.constant_index.get(&bits) {
             Some(&i) => i,
             None => {
-                let i = self.constants.len() as u32;
-                if i >= MAX_OPERAND {
-                    return Err(CompileError::TooLarge("constants".into()));
-                }
-                self.constants.push(d);
+                let i = self.push_const(Constant::Number(d))?;
                 self.constant_index.insert(bits, i);
                 i
             }
         };
         self.asm.load_const(dst, Const(index));
         Ok(())
+    }
+
+    fn push_const(&mut self, c: Constant) -> CResult<u32> {
+        let i = self.constants.len() as u32;
+        if i >= MAX_OPERAND {
+            return Err(CompileError::TooLarge("constants".into()));
+        }
+        self.constants.push(c);
+        Ok(i)
+    }
+
+    /// The constant index of string `text` (shared).
+    fn string_const(&mut self, text: &str) -> CResult<Const> {
+        if let Some(&i) = self.string_index.get(text) {
+            return Ok(Const(i));
+        }
+        let i = self.push_const(Constant::String(text.to_owned()))?;
+        self.string_index.insert(text.to_owned(), i);
+        Ok(Const(i))
     }
 
     // ---- bindings ----
@@ -759,13 +1060,39 @@ impl<'s> Gen<'s> {
         self.scoping.get_reference(rid).symbol_id()
     }
 
+    /// [`Gen::resolve`] for a use that compiles: refuses an unresolved
+    /// `arguments` inside a non-arrow function (the arguments object is
+    /// later work, not a global).
+    fn resolve_use(&self, id: &IdentifierReference<'_>) -> CResult<Option<SymbolId>> {
+        let sym = self.resolve(id);
+        if sym.is_none() && id.name == "arguments" {
+            let mut s = Some(self.reference_scope(id));
+            while let Some(scope) = s {
+                let flags = self.scoping.scope_flags(scope);
+                if flags.contains(ScopeFlags::Function) && !flags.contains(ScopeFlags::Arrow) {
+                    return unsupported("the arguments object", id.span);
+                }
+                s = self.scoping.scope_parent_id(scope);
+            }
+        }
+        Ok(sym)
+    }
+
     fn reference_scope(&self, id: &IdentifierReference<'_>) -> ScopeId {
         let rid = id.reference_id.get().expect("semantic analysis ran");
         self.scoping.get_reference(rid).scope_id()
     }
 
     /// Where `sym` lives, seen from code in scope `from`.
-    fn locate(&self, sym: SymbolId, from: ScopeId, span: oxc_span::Span) -> CResult<Loc> {
+    fn locate(&mut self, sym: SymbolId, from: ScopeId, span: oxc_span::Span) -> CResult<Loc> {
+        if Some(self.scoping.symbol_scope_id(sym)) == self.an.global {
+            let name = self.scoping.symbol_ident(sym).as_str().to_owned();
+            let lexical = is_lexical(self.scoping.symbol_flags(sym));
+            return Ok(Loc::Global {
+                name: self.string_const(&name)?,
+                lexical,
+            });
+        }
         if !self.an.captured.contains(&sym) {
             return match self.locals.get(&sym) {
                 Some(&r) => Ok(Loc::Reg(r)),
@@ -812,11 +1139,15 @@ impl<'s> Gen<'s> {
     /// Rejects bindings this part can't handle; returns whether a use
     /// needs a run-time TDZ check.
     fn binding_kind(&self, sym: SymbolId, loc: Loc, span: oxc_span::Span) -> CResult<bool> {
+        if let Loc::Global { .. } = loc {
+            // The runtime checks globals' TDZ and constness.
+            return Ok(false);
+        }
         let flags = self.scoping.symbol_flags(sym);
         if flags.intersects(SymbolFlags::Class) {
             return unsupported("class bindings", span);
         }
-        if !is_lexical(flags) {
+        if !is_lexical(flags) && !self.an.param_tdz.borrow().contains(&sym) {
             return Ok(false);
         }
         if let Loc::Env(_) = loc {
@@ -836,7 +1167,7 @@ impl<'s> Gen<'s> {
     /// Reads `id` into a register (its own, for a register local), after
     /// its TDZ check. `None` for a global.
     fn read_binding(&mut self, id: &IdentifierReference<'_>) -> CResult<Option<Operand>> {
-        let Some(sym) = self.resolve(id) else {
+        let Some(sym) = self.resolve_use(id)? else {
             return Ok(None);
         };
         let loc = self.locate(sym, self.reference_scope(id), id.span)?;
@@ -859,6 +1190,11 @@ impl<'s> Gen<'s> {
                 }
                 Operand { reg: t, temp: true }
             }
+            Loc::Global { name, .. } => {
+                let t = self.temp()?;
+                self.asm.load_name(t, name);
+                Operand { reg: t, temp: true }
+            }
         }))
     }
 
@@ -872,13 +1208,32 @@ impl<'s> Gen<'s> {
             Loc::Reg(r) if r != v => self.asm.mov(r, v),
             Loc::Reg(_) => {}
             Loc::Env(slot) => self.asm.store_env(slot, v),
+            Loc::Global {
+                name,
+                lexical: true,
+            } => self.asm.init_global(name, v),
+            Loc::Global {
+                name,
+                lexical: false,
+            } => self.asm.store_name(name, v),
         }
     }
 
     /// Where an assignment to `id` stores.
-    fn write_target(&self, id: &IdentifierReference<'_>) -> CResult<Target> {
-        let Some(sym) = self.resolve(id) else {
-            return unsupported("assignment to a global variable", id.span);
+    fn write_target(&mut self, id: &IdentifierReference<'_>) -> CResult<Target> {
+        let Some(sym) = self.resolve_use(id)? else {
+            // An undeclared name: a global, created on assignment in sloppy
+            // code (the runtime decides).
+            let name = self.string_const(id.name.as_str())?;
+            return Ok(Target {
+                loc: Loc::Global {
+                    name,
+                    lexical: false,
+                },
+                sym: None,
+                tdz: false,
+                mode: WriteMode::Normal,
+            });
         };
         let loc = self.locate(sym, self.reference_scope(id), id.span)?;
         let tdz = self.binding_kind(sym, loc, id.span)?;
@@ -886,7 +1241,10 @@ impl<'s> Gen<'s> {
         let own_name = self.own_name == Some(sym)
             || (flags.contains(SymbolFlags::FunctionExpression)
                 && !flags.intersects(SymbolFlags::Variable));
-        let mode = if flags.contains(SymbolFlags::ConstVariable) {
+        let mode = if let Loc::Global { .. } = loc {
+            // The runtime throws for global consts.
+            WriteMode::Normal
+        } else if flags.contains(SymbolFlags::ConstVariable) {
             WriteMode::Const
         } else if own_name {
             // The name of a named function expression is immutable.
@@ -900,7 +1258,7 @@ impl<'s> Gen<'s> {
         };
         Ok(Target {
             loc,
-            sym,
+            sym: Some(sym),
             tdz,
             mode,
         })
@@ -927,6 +1285,11 @@ impl<'s> Gen<'s> {
                 }
                 Operand { reg: v, temp: true }
             }
+            Loc::Global { name, .. } => {
+                let v = self.temp()?;
+                self.asm.load_name(v, name);
+                Operand { reg: v, temp: true }
+            }
         })
     }
 
@@ -942,6 +1305,7 @@ impl<'s> Gen<'s> {
                     self.asm.check_initialized(c);
                     self.free(c);
                 }
+                Loc::Global { .. } => unreachable!("globals have no static TDZ"),
             }
         }
         match t.mode {
@@ -951,6 +1315,8 @@ impl<'s> Gen<'s> {
                 Loc::Reg(r) if r != v => self.asm.mov(r, v),
                 Loc::Reg(_) => {}
                 Loc::Env(slot) => self.asm.store_env(slot, v),
+                Loc::Global { name, .. } if self.strict() => self.asm.store_name_strict(name, v),
+                Loc::Global { name, .. } => self.asm.store_name(name, v),
             },
         }
         Ok(())
@@ -1553,6 +1919,24 @@ impl<'s> Gen<'s> {
                     self.asm.store_env(slot, t);
                     self.free(t);
                 }
+                (Some(init), Loc::Global { name, lexical }) => {
+                    let t = self.temp()?;
+                    self.expr_to(init, t)?;
+                    if lexical {
+                        self.asm.init_global(name, t);
+                    } else if self.strict() {
+                        self.asm.store_name_strict(name, t);
+                    } else {
+                        self.asm.store_name(name, t);
+                    }
+                    self.free(t);
+                }
+                (None, Loc::Global { name, .. }) => {
+                    let t = self.temp()?;
+                    self.asm.load_undefined(t);
+                    self.asm.init_global(name, t);
+                    self.free(t);
+                }
             }
             if d.kind != VariableDeclarationKind::Var {
                 self.initialized.insert(sym);
@@ -1647,8 +2031,17 @@ impl<'s> Gen<'s> {
                 self.asm.load_null(dst);
                 Ok(())
             }
+            Expression::StringLiteral(lit) => {
+                let Some(text) = lit.value.as_str() else {
+                    return unsupported("strings with lone surrogates", lit.span);
+                };
+                let c = self.string_const(text)?;
+                self.asm.load_const(dst, c);
+                Ok(())
+            }
+            Expression::TemplateLiteral(t) => self.template(t, dst),
             Expression::Identifier(id) => {
-                let Some(sym) = self.resolve(id) else {
+                let Some(sym) = self.resolve_use(id)? else {
                     // Unresolved: a global. These three are non-writable,
                     // non-configurable properties of the global object, and
                     // nothing in this subset can shadow them dynamically
@@ -1660,7 +2053,11 @@ impl<'s> Gen<'s> {
                         }
                         "NaN" => self.load_number(dst, f64::NAN),
                         "Infinity" => self.load_number(dst, f64::INFINITY),
-                        _ => unsupported("global variables", id.span),
+                        name => {
+                            let c = self.string_const(name)?;
+                            self.asm.load_name(dst, c);
+                            Ok(())
+                        }
                     };
                 };
                 let loc = self.locate(sym, self.reference_scope(id), id.span)?;
@@ -1680,6 +2077,7 @@ impl<'s> Gen<'s> {
                             self.asm.check_initialized(dst);
                         }
                     }
+                    Loc::Global { name, .. } => self.asm.load_name(dst, name),
                 }
                 Ok(())
             }
@@ -1726,6 +2124,13 @@ impl<'s> Gen<'s> {
                 let f = FnLike::arrow(f)?;
                 let func = self.nested(&f)?;
                 self.asm.create_closure(dst, func);
+                Ok(())
+            }
+            Expression::ThisExpression(t) => {
+                if !self.this_ok {
+                    return unsupported("`this` outside strict functions", t.span);
+                }
+                self.asm.load_this(dst);
                 Ok(())
             }
             Expression::CallExpression(c) => {
@@ -1799,7 +2204,7 @@ impl<'s> Gen<'s> {
                 self.asm.load_undefined(dst);
                 return Ok(());
             }
-            UnaryOperator::Typeof => return unsupported("typeof (needs strings)", u.span),
+            UnaryOperator::Typeof => return self.type_of(&u.argument, dst),
             UnaryOperator::Delete => return unsupported("delete", u.span),
             op => op,
         };
@@ -1823,6 +2228,77 @@ impl<'s> Gen<'s> {
             }
         }
         self.release(a);
+        Ok(())
+    }
+
+    /// `typeof e`: a global name gets `TypeofName`, which gives
+    /// `"undefined"` for an undeclared name instead of throwing.
+    fn type_of(&mut self, e: &Expression<'_>, dst: Reg) -> CResult<()> {
+        if let Expression::Identifier(id) = e.without_parentheses() {
+            let global = match self.resolve_use(id)? {
+                None => match id.name.as_str() {
+                    // Always defined (see `expr_to`).
+                    "undefined" | "NaN" | "Infinity" => None,
+                    name => Some(self.string_const(name)?),
+                },
+                Some(sym) => match self.locate(sym, self.reference_scope(id), id.span)? {
+                    Loc::Global { name, .. } => Some(name),
+                    _ => None,
+                },
+            };
+            if let Some(name) = global {
+                self.asm.type_of_name(dst, name);
+                return Ok(());
+            }
+        }
+        let a = self.expr_any(e)?;
+        self.asm.type_of(dst, a.reg);
+        self.release(a);
+        Ok(())
+    }
+
+    /// A template literal: the cooked strings and the ToString of each
+    /// substitution, concatenated left to right. Each substitution is
+    /// converted before the next one is evaluated.
+    fn template(&mut self, t: &TemplateLiteral<'_>, dst: Reg) -> CResult<()> {
+        let mut cooked = Vec::with_capacity(t.quasis.len());
+        for q in &t.quasis {
+            // Untagged templates with bad escapes are early errors, so
+            // `cooked` is always there.
+            match q.value.cooked.and_then(|c| c.as_str()) {
+                Some(text) => cooked.push(text),
+                None => return unsupported("strings with lone surrogates", q.span),
+            }
+        }
+        let (head, spans) = cooked.split_first().expect("a template has a head");
+        let mut started = !head.is_empty();
+        if started || t.expressions.is_empty() {
+            let c = self.string_const(head)?;
+            self.asm.load_const(dst, c);
+            started = true;
+        }
+        for (e, text) in t.expressions.iter().zip(spans) {
+            if started {
+                let v = self.temp()?;
+                self.expr_to(e, v)?;
+                self.asm.to_string(v, v);
+                let ic = self.ic()?;
+                self.asm.add(dst, dst, v, ic);
+                self.free(v);
+            } else {
+                self.expr_to(e, dst)?;
+                self.asm.to_string(dst, dst);
+                started = true;
+            }
+            if !text.is_empty() {
+                let v = self.temp()?;
+                let c = self.string_const(text)?;
+                self.asm.load_const(v, c);
+                let ic = self.ic()?;
+                self.asm.add(dst, dst, v, ic);
+                self.free(v);
+            }
+        }
         Ok(())
     }
 
@@ -1891,6 +2367,13 @@ impl<'s> Gen<'s> {
     }
 
     fn assignment(&mut self, a: &AssignmentExpression<'_>, dst: Reg) -> CResult<()> {
+        if let Some(call) = a
+            .left
+            .as_simple_assignment_target()
+            .and_then(|t| self.call_target(t))
+        {
+            return self.assign_to_call(call);
+        }
         let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left else {
             return unsupported("assignment to a property or a pattern", a.left.span());
         };
@@ -1898,7 +2381,7 @@ impl<'s> Gen<'s> {
         match a.operator {
             AssignmentOperator::Assign => {
                 if let Some(r) = t.simple_reg() {
-                    self.assign_local(r, t.sym, &a.right)?;
+                    self.assign_local(r, t.sym.expect("register targets are bindings"), &a.right)?;
                     if r != dst {
                         self.asm.mov(dst, r);
                     }
@@ -1958,9 +2441,28 @@ impl<'s> Gen<'s> {
         Ok(())
     }
 
+    /// The call, if `t` is a call that sloppy code assigns to (D-045).
+    fn call_target<'b, 'a>(&self, t: &'b SimpleAssignmentTarget<'a>) -> Option<&'b Expression<'a>> {
+        crate::call_target::site_call(t, &self.an.call_targets)
+    }
+
+    /// `f() = e`, `f() += e`, `f()++`, … in sloppy code: the call runs,
+    /// then a `ReferenceError` is thrown before anything else is evaluated
+    /// (13.15.2 step 1.c, 13.4.2.1). The result register is never written:
+    /// the throw ends the block.
+    fn assign_to_call(&mut self, call: &Expression<'_>) -> CResult<()> {
+        let r = self.expr_any(call)?;
+        self.release(r);
+        self.asm.throw_invalid_assignment();
+        Ok(())
+    }
+
     /// `x++`, `--x`, …: the result (the old value converted with ToNumeric,
     /// or the new value) goes to `dst` if there is one.
     fn update(&mut self, u: &UpdateExpression<'_>, dst: Option<Reg>) -> CResult<()> {
+        if let Some(call) = self.call_target(&u.argument) {
+            return self.assign_to_call(call);
+        }
         let t = match &u.argument {
             SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => self.write_target(id)?,
             other => return unsupported("update of a property", other.span()),
@@ -2022,6 +2524,41 @@ struct CallOperands {
     temps: Vec<Reg>,
 }
 
+/// Finds the uses of a function's parameters in its parameter
+/// initializers: (initializer's parameter index, used parameter index,
+/// whether the use is inside a nested function).
+struct ParamRefs<'s, 'p> {
+    scoping: &'s Scoping,
+    params: &'p [SymbolId],
+    current: usize,
+    closures: u32,
+    found: Vec<(usize, usize, bool)>,
+}
+
+impl<'a> Visit<'a> for ParamRefs<'_, '_> {
+    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+        let sym = it
+            .reference_id
+            .get()
+            .and_then(|r| self.scoping.get_reference(r).symbol_id());
+        if let Some(j) = sym.and_then(|s| self.params.iter().position(|&p| p == s)) {
+            self.found.push((self.current, j, self.closures > 0));
+        }
+    }
+
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        self.closures += 1;
+        walk::walk_function(self, it, flags);
+        self.closures -= 1;
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        self.closures += 1;
+        walk::walk_arrow_function_expression(self, it);
+        self.closures -= 1;
+    }
+}
+
 /// Records, per binding, where its first use starts and where its
 /// declaration ends.
 struct UseOrder<'s> {
@@ -2081,6 +2618,7 @@ fn writes_last(e: &Expression<'_>) -> bool {
         Expression::NumericLiteral(_)
         | Expression::BooleanLiteral(_)
         | Expression::NullLiteral(_)
+        | Expression::StringLiteral(_)
         | Expression::Identifier(_)
         | Expression::BinaryExpression(_) => true,
         Expression::UnaryExpression(u) => u.operator != UnaryOperator::Void,
@@ -2095,7 +2633,9 @@ fn has_side_effects(e: &Expression<'_>) -> bool {
         Expression::NumericLiteral(_)
         | Expression::BooleanLiteral(_)
         | Expression::NullLiteral(_)
+        | Expression::StringLiteral(_)
         | Expression::Identifier(_) => false,
+        Expression::TemplateLiteral(t) => t.expressions.iter().any(has_side_effects),
         Expression::UnaryExpression(u) => has_side_effects(&u.argument),
         Expression::BinaryExpression(b) => has_side_effects(&b.left) || has_side_effects(&b.right),
         Expression::LogicalExpression(l) => has_side_effects(&l.left) || has_side_effects(&l.right),
@@ -2134,6 +2674,11 @@ fn visit_identifiers<'a>(e: &Expression<'a>, f: &mut impl FnMut(&IdentifierRefer
                 visit_identifiers(e, f);
             }
         }
+        Expression::TemplateLiteral(t) => {
+            for e in &t.expressions {
+                visit_identifiers(e, f);
+            }
+        }
         Expression::AssignmentExpression(a) => {
             if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
                 f(id);
@@ -2161,7 +2706,7 @@ fn statement_name(s: &Statement<'_>) -> &'static str {
 
 fn expression_name(e: &Expression<'_>) -> &'static str {
     match e {
-        Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => "strings",
+        Expression::TaggedTemplateExpression(_) => "tagged templates",
         Expression::BigIntLiteral(_) => "BigInt",
         Expression::RegExpLiteral(_) => "regular expressions",
         Expression::NewExpression(_) => "`new`",

@@ -113,10 +113,17 @@ Order matters: each task builds on the ones above it.
   the dispatch loop per ARCHITECTURE.md §3.3–3.4), captured variables in
   environments, per-iteration `let` bindings; the toy context grows
   frames, closures and environments to run them. needs: 1.6c
-- [ ] 1.6e Bytecode compiler, part 1e: script top level and globals
-  (`LoadName`/`StoreName`), strings in the constant pool, `this`. Also
-  accept sloppy-mode call expressions as assignment targets (runtime
-  `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6d, 1.8a
+- [x] 1.6e (2026-11-23) Bytecode compiler, part 1e: scripts
+  and globals: `compile_script`, global var/function/let/const
+  declarations, `LoadName`/`StoreName` for top-level and undeclared
+  names (ReferenceError, sloppy implicit globals), global TDZ and const,
+  `this` in strict functions; the toy context grows globals and interned
+  name strings. needs: 1.6d
+- [x] 1.6f Bytecode compiler, part 1f: string values: string literals and
+  templates in the constant pool, `typeof`, `+` concatenation and
+  Number::toString in the toy. needs: 1.6e
+- [x] 1.6g (2026-11-23) Accept sloppy-mode call expressions as assignment targets
+  (runtime `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6e
 - [ ] 1.7a (risky; done on branch `auto/2026-11-23-core-handles`, reviewed,
   waiting for a CI Miri run: GitHub Actions has started no job since
   2026-11-21, likely out of minutes) Core handle API for the interpreter: a checked way to
@@ -125,7 +132,7 @@ Order matters: each task builds on the ones above it.
   verifier), with tests. Every VM task needs it: registers hold raw
   values (ARCHITECTURE.md §2) and cells are only readable and writable
   through `Gc` handles. Core change: CI Miri required. needs: 1.3b
-- [ ] 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
+- [~] (claimed 2026-11-23 16:27 UTC; stacked on the 1.7a branch, merges after it) 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
   layout; proper tail calls designed in. Dispatch cost must not grow
   with the number of ops (D-036): benchmark it. Plan (from the 1.6d
   run): new `ferrojs-vm` crate; the frame stack is shared `Cell<u64>`
@@ -141,18 +148,33 @@ Order matters: each task builds on the ones above it.
   shape transition trees with the prototype, ordinary objects with
   inline and out-of-line slots, data-property get/set/define, model-
   checked under GC stress. needs: 1.3b
-- [ ] 1.8b Objects, part b: delete, attribute changes and dictionary
-  mode (ARCHITECTURE.md §7.2), the lazy key table for large shapes,
-  non-extensible objects, accessor properties. needs: 1.8a
-- [ ] 1.8c Objects, part c: indexed properties in the elements store
+- [x] 1.8b (2026-11-23) Objects, part b: delete,
+  attribute changes (ValidateAndApplyPropertyDescriptor for data
+  properties), dictionary mode (ARCHITECTURE.md §7.2), non-extensible
+  objects. needs: 1.8a
+- [ ] 1.8d Objects, part d: accessor properties (getters and setters
+  called from get/set), the lazy key table for large shapes. needs: 1.8b, 1.7
+- [x] 1.8c (2026-11-23) Objects, part c: indexed properties in the elements store
   (packed, holey, sparse) and Array length. needs: 1.8a
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7
 - [ ] 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
   `print`, `$262` host object. First real baseline. needs: 1.9
-- [ ] 1.11 Host hooks for randomness, clocks and job ordering (D-008).
-- [ ] 1.12 Bytecode compiler, part 2: classes, destructuring, spread,
-  closures, generators and async (state machines). needs: 1.6d
+- [x] 1.11 (2026-11-23) Host hooks for randomness, clocks and job ordering (D-008).
+- 1.12 Bytecode compiler, part 2 (split 2026-11-23: everything but
+  default values needs objects, iterators or the interpreter):
+  - [x] 1.12a (2026-11-23) Default parameter values: left-to-right
+    initialization, parameter TDZ, `length` (D-046). needs: 1.6d
+  - [ ] 1.12b Rest parameters, spread arguments and array literals.
+    needs: 1.7, 1.8c
+  - [ ] 1.12c Destructuring (declarations, parameters, assignment,
+    catch), with the iterator protocol for arrays. needs: 1.12b, 1.8b
+  - [ ] 1.12d The arguments object (mapped and unmapped), sloppy `this`.
+    needs: 1.7, 1.8c
+  - [ ] 1.12e Classes: constructors, methods, fields, `super`.
+    needs: 1.7, 1.8d
+  - [ ] 1.12f Generators as state machines. needs: 1.7, 1.12c
+  - [ ] 1.12g Async functions and await. needs: 1.12f, 1.14
 - [ ] 1.13 Basic built-ins: Object, Function, Error types, Array, String,
   Number, Boolean, Math, JSON (hand-written; spec generation comes in 2).
 - [ ] 1.14 Promise and the job queue.

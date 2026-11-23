@@ -1,9 +1,10 @@
 //! A reference context and dispatch loop over plain values, for tests,
 //! benchmarks and fuzzing of the op definitions and the compiler before
 //! the real interpreter (task 1.7) exists. Primitives only: the slow paths
-//! convert `undefined`, `null`, booleans and numbers as ToNumber does, and
-//! throw `undefined` for heap values (strings, objects, symbols), which the
-//! toy can't look inside. Functions, closures and environments live in
+//! implement the operators' semantics for `undefined`, `null`, booleans,
+//! numbers and strings (interned Rust strings, D-044), and throw
+//! `undefined` where an object would need ToPrimitive, which the toy can't
+//! do. Functions, closures and environments live in
 //! vectors; [`run_program`] runs calls with a frame stack, the way the
 //! interpreter will (ARCHITECTURE.md §3.3–3.4), without Rust recursion.
 
@@ -12,7 +13,7 @@ use ferrojs_value::{HeapRef, Kind, Value};
 use crate::number::{self, CompareOp, NumericOp, UnaryOp};
 use crate::{
     decode, execute, CallSite, Completion, Const, Count, EnvSlot, ErrorKind, Feedback, Flow, Func,
-    Handler, Ic, Limits, OpCtx, Reg, Thrown,
+    GlobalKind, Handler, Ic, Limits, OpCtx, Reg, Thrown,
 };
 
 /// Toy closures are object values with this bit set in the reference.
@@ -22,6 +23,9 @@ const ENV_BIT: u32 = 1 << 29;
 /// The most slots one toy environment may have (fuzzed code can ask for
 /// 2^32).
 const MAX_ENV_SLOTS: u32 = 1 << 16;
+/// The longest string the toy makes, in UTF-16 code units (fuzzed code can
+/// double a string in a loop); longer results throw.
+pub const MAX_STRING_UNITS: usize = 1 << 20;
 
 /// One function of a program for [`run_program`].
 #[derive(Clone, Debug, Default)]
@@ -75,6 +79,17 @@ pub struct ToyCtx {
     closure: Option<Value>,
     /// The running function's nested-function table.
     functions: Vec<usize>,
+    /// The frame's `this` (`None` reads as `undefined`).
+    this: Option<Value>,
+    /// Interned strings: string values are `Value::string(HeapRef(i))`.
+    strings: Vec<String>,
+    string_ids: std::collections::HashMap<String, u32>,
+    /// The global lexical environment: value (the TDZ marker until
+    /// initialized) and whether it is `const`.
+    pub global_lexical: std::collections::HashMap<String, (Value, bool)>,
+    /// The global object's properties: value and whether configurable
+    /// (implicit sloppy globals are; declared `var`s aren't).
+    pub global_object: std::collections::HashMap<String, (Value, bool)>,
 }
 
 impl ToyCtx {
@@ -85,6 +100,43 @@ impl ToyCtx {
             constants: vec![Value::UNDEFINED; limits.constants as usize],
             feedback: vec![Feedback::NONE; limits.ics as usize],
             ..ToyCtx::default()
+        }
+    }
+
+    /// The string value for `text`, interned.
+    pub fn intern(&mut self, text: &str) -> Value {
+        let i = match self.string_ids.get(text) {
+            Some(&i) => i,
+            None => {
+                let i = self.strings.len() as u32;
+                self.strings.push(text.to_owned());
+                self.string_ids.insert(text.to_owned(), i);
+                i
+            }
+        };
+        Value::string(HeapRef(i))
+    }
+
+    /// The text of a string value made by [`ToyCtx::intern`].
+    pub fn string_of(&self, v: Value) -> Option<&str> {
+        match v.kind() {
+            Kind::String(HeapRef(i)) => self.strings.get(i as usize).map(String::as_str),
+            _ => None,
+        }
+    }
+
+    /// A global's value (lexical first, then the global object).
+    pub fn global(&self, name: &str) -> Option<Value> {
+        self.global_lexical
+            .get(name)
+            .or_else(|| self.global_object.get(name))
+            .map(|&(v, _)| v)
+    }
+
+    fn name_of(&mut self, name: Value) -> Result<String, Thrown> {
+        match self.string_of(name) {
+            Some(s) => Ok(s.to_owned()),
+            None => self.fail(),
         }
     }
 
@@ -141,6 +193,68 @@ impl ToyCtx {
         }
     }
 
+    /// ToNumber for the primitives the toy understands, strings included.
+    fn num(&self, v: Value) -> Option<f64> {
+        match self.string_of(v) {
+            Some(s) => Some(number::string_to_number(s)),
+            None => Self::to_number(v),
+        }
+    }
+
+    /// ToString for the primitives the toy understands.
+    fn text(&self, v: Value) -> Option<String> {
+        if let Some(s) = self.string_of(v) {
+            return Some(s.to_owned());
+        }
+        match v.kind() {
+            Kind::Undefined => Some("undefined".into()),
+            Kind::Null => Some("null".into()),
+            Kind::Bool(b) => Some(b.to_string()),
+            _ => v.as_number().map(number::to_js_string),
+        }
+    }
+
+    /// The interned string for `text`, or a throw if it is too long.
+    fn make_string(&mut self, text: &str) -> Completion {
+        // UTF-16 length is at most the UTF-8 length: only count when it
+        // might matter.
+        if text.len() > MAX_STRING_UNITS && text.encode_utf16().count() > MAX_STRING_UNITS {
+            return self.fail();
+        }
+        Ok(self.intern(text))
+    }
+
+    /// `typeof v` for the values the toy has.
+    fn type_name(&mut self, v: Value) -> Value {
+        let name = match v.kind() {
+            Kind::Undefined | Kind::Uninitialized => "undefined",
+            Kind::Null => "object",
+            Kind::Bool(_) => "boolean",
+            Kind::Int32(_) | Kind::Double(_) => "number",
+            Kind::String(_) => "string",
+            Kind::Object(HeapRef(r)) if r & CLOSURE_BIT != 0 => "function",
+            Kind::Object(_) => "object",
+            Kind::Other(ferrojs_value::OtherKind::Symbol, _) => "symbol",
+            Kind::Other(ferrojs_value::OtherKind::BigInt, _) => "bigint",
+        };
+        self.intern(name)
+    }
+
+    /// Code-unit order of two strings, if both are.
+    fn string_order(&self, a: Value, b: Value) -> Option<std::cmp::Ordering> {
+        match (self.string_of(a), self.string_of(b)) {
+            (Some(x), Some(y)) => Some(x.encode_utf16().cmp(y.encode_utf16())),
+            _ => None,
+        }
+    }
+
+    /// Records error `e` as the pending exception.
+    fn error(&mut self, e: ErrorKind) -> Thrown {
+        self.last_error = Some(e);
+        self.exception = Some(Value::UNDEFINED);
+        Thrown
+    }
+
     fn fail<T>(&mut self) -> Result<T, Thrown> {
         self.last_error = None;
         self.exception = Some(Value::UNDEFINED);
@@ -149,7 +263,7 @@ impl ToyCtx {
 
     fn numbers(&mut self, a: Value, b: Value, f: impl FnOnce(f64, f64) -> f64) -> Completion {
         self.slow_calls += 1;
-        match (Self::to_number(a), Self::to_number(b)) {
+        match (self.num(a), self.num(b)) {
             (Some(x), Some(y)) => Ok(Value::number(f(x, y))),
             _ => self.fail(),
         }
@@ -157,7 +271,7 @@ impl ToyCtx {
 
     fn predicate(&mut self, a: Value, b: Value, f: impl FnOnce(f64, f64) -> bool) -> Completion {
         self.slow_calls += 1;
-        match (Self::to_number(a), Self::to_number(b)) {
+        match (self.num(a), self.num(b)) {
             (Some(x), Some(y)) => Ok(Value::from_bool(f(x, y))),
             _ => self.fail(),
         }
@@ -285,7 +399,88 @@ impl OpCtx for ToyCtx {
             _ => self.fail(),
         }
     }
+    fn this_value(&self) -> Value {
+        self.this.unwrap_or(Value::UNDEFINED)
+    }
+    fn rt_load_name(&mut self, name: Value) -> Completion {
+        let n = self.name_of(name)?;
+        if let Some(&(v, _)) = self.global_lexical.get(&n) {
+            if v.is_uninitialized() {
+                return Err(self.error(ErrorKind::UninitializedBinding));
+            }
+            return Ok(v);
+        }
+        match self.global_object.get(&n) {
+            Some(&(v, _)) => Ok(v),
+            None => Err(self.error(ErrorKind::UnresolvableReference)),
+        }
+    }
+    fn rt_store_name(&mut self, name: Value, v: Value, strict: bool) -> Result<(), Thrown> {
+        let n = self.name_of(name)?;
+        if let Some(&(old, constant)) = self.global_lexical.get(&n) {
+            if old.is_uninitialized() {
+                return Err(self.error(ErrorKind::UninitializedBinding));
+            }
+            if constant {
+                return Err(self.error(ErrorKind::ConstAssignment));
+            }
+            self.global_lexical.insert(n, (v, false));
+            return Ok(());
+        }
+        match self.global_object.get_mut(&n) {
+            Some(slot) => slot.0 = v,
+            None if strict => return Err(self.error(ErrorKind::UnresolvableReference)),
+            None => {
+                self.global_object.insert(n, (v, true));
+            }
+        }
+        Ok(())
+    }
+    fn rt_declare_global(&mut self, name: Value, kind: GlobalKind) -> Result<(), Thrown> {
+        let n = self.name_of(name)?;
+        let lexical = self.global_lexical.contains_key(&n);
+        match kind {
+            GlobalKind::Var => {
+                if lexical {
+                    return Err(self.error(ErrorKind::GlobalRedeclaration));
+                }
+                let slot = self
+                    .global_object
+                    .entry(n)
+                    .or_insert((Value::UNDEFINED, false));
+                slot.1 = false;
+            }
+            GlobalKind::Let | GlobalKind::Const => {
+                // HasRestrictedGlobalProperty: a declared var can't be
+                // shadowed; an implicit (configurable) global can.
+                let restricted = self.global_object.get(&n).is_some_and(|&(_, c)| !c);
+                if lexical || restricted {
+                    return Err(self.error(ErrorKind::GlobalRedeclaration));
+                }
+                self.global_lexical
+                    .insert(n, (Value::UNINITIALIZED, kind == GlobalKind::Const));
+            }
+        }
+        Ok(())
+    }
+    fn rt_init_global(&mut self, name: Value, v: Value) -> Result<(), Thrown> {
+        let n = self.name_of(name)?;
+        match self.global_lexical.get_mut(&n) {
+            Some(slot) => {
+                slot.0 = v;
+                Ok(())
+            }
+            None => self.fail(),
+        }
+    }
     fn rt_add(&mut self, a: Value, b: Value) -> Completion {
+        if a.is_string() || b.is_string() {
+            self.slow_calls += 1;
+            return match (self.text(a), self.text(b)) {
+                (Some(x), Some(y)) => self.make_string(&(x + &y)),
+                _ => self.fail(),
+            };
+        }
         self.numbers(a, b, |x, y| x + y)
     }
     fn rt_sub(&mut self, a: Value, b: Value) -> Completion {
@@ -295,41 +490,60 @@ impl OpCtx for ToyCtx {
         self.numbers(a, b, |x, y| x * y)
     }
     fn rt_throw_error(&mut self, e: ErrorKind) -> Flow {
-        self.last_error = Some(e);
-        self.exception = Some(Value::UNDEFINED);
+        self.error(e);
         Flow::Throw
     }
     fn rt_less_than(&mut self, a: Value, b: Value) -> Completion {
+        if let Some(o) = self.string_order(a, b) {
+            self.slow_calls += 1;
+            return Ok(Value::from_bool(o.is_lt()));
+        }
         self.predicate(a, b, |x, y| x < y)
     }
     fn rt_numeric(&mut self, op: NumericOp, a: Value, b: Value) -> Completion {
         self.numbers(a, b, |x, y| number::numeric(op, x, y))
     }
     fn rt_compare(&mut self, op: CompareOp, a: Value, b: Value) -> Completion {
+        if let Some(o) = self.string_order(a, b) {
+            self.slow_calls += 1;
+            return Ok(Value::from_bool(match op {
+                CompareOp::Greater => o.is_gt(),
+                CompareOp::LessEq => o.is_le(),
+                CompareOp::GreaterEq => o.is_ge(),
+            }));
+        }
         self.predicate(a, b, |x, y| number::compare(op, x, y))
     }
     fn rt_unary(&mut self, op: UnaryOp, a: Value) -> Completion {
         self.slow_calls += 1;
-        match Self::to_number(a) {
+        match self.num(a) {
             Some(x) => Ok(Value::number(number::unary(op, x))),
             None => self.fail(),
         }
     }
     fn rt_loose_equal(&mut self, a: Value, b: Value) -> Completion {
         self.slow_calls += 1;
-        // IsLooselyEqual on primitives the toy has: null and undefined
-        // equal each other only; booleans compare as numbers.
+        // IsLooselyEqual on the values the toy has: null and undefined
+        // equal each other only; two strings or two objects compare by
+        // identity (strings are interned); an object against a primitive
+        // needs ToPrimitive, which the toy can't do; any other mix of
+        // numbers, booleans and strings compares as numbers.
         if a.is_nullish() || b.is_nullish() {
             return Ok(Value::from_bool(a.is_nullish() && b.is_nullish()));
         }
-        match (Self::to_number(a), Self::to_number(b)) {
+        let object = |v: Value| matches!(v.kind(), Kind::Object(_));
+        if (a.is_string() && b.is_string()) || (object(a) && object(b)) {
+            return Ok(Value::from_bool(a == b));
+        }
+        match (self.num(a), self.num(b)) {
             (Some(x), Some(y)) => Ok(Value::from_bool(x == y)),
             _ => self.fail(),
         }
     }
     fn rt_strict_equal(&mut self, a: Value, b: Value) -> bool {
         self.slow_calls += 1;
-        // No strings or objects in the toy: identity is bit equality.
+        // Strings are interned and objects are references: for anything
+        // but two numbers (handled inline), identity is bit equality.
         a == b
     }
     fn rt_to_boolean(&mut self, v: Value) -> bool {
@@ -339,7 +553,32 @@ impl OpCtx for ToyCtx {
             Kind::Bool(b) => b,
             Kind::Int32(i) => i != 0,
             Kind::Double(d) => !(d == 0.0 || d.is_nan()),
-            Kind::Object(_) | Kind::String(_) | Kind::Other(..) | Kind::Uninitialized => true,
+            Kind::String(_) => self.string_of(v).is_some_and(|s| !s.is_empty()),
+            Kind::Object(_) | Kind::Other(..) | Kind::Uninitialized => true,
+        }
+    }
+    fn rt_typeof(&mut self, v: Value) -> Value {
+        self.type_name(v)
+    }
+    fn rt_typeof_name(&mut self, name: Value) -> Completion {
+        let n = self.name_of(name)?;
+        if let Some(&(v, _)) = self.global_lexical.get(&n) {
+            if v.is_uninitialized() {
+                return Err(self.error(ErrorKind::UninitializedBinding));
+            }
+            return Ok(self.type_name(v));
+        }
+        let v = self
+            .global_object
+            .get(&n)
+            .map_or(Value::UNDEFINED, |&(v, _)| v);
+        Ok(self.type_name(v))
+    }
+    fn rt_to_string(&mut self, v: Value) -> Completion {
+        self.slow_calls += 1;
+        match self.text(v) {
+            Some(t) => self.make_string(&t),
+            None => self.fail(),
         }
     }
 }
@@ -425,6 +664,7 @@ struct Saved {
     feedback: Vec<Feedback>,
     env: Option<usize>,
     closure: Option<Value>,
+    this: Option<Value>,
 }
 
 /// Runs `program[entry]` as a function called with `args`, for at most
@@ -460,7 +700,7 @@ pub fn run_program(
     });
     let closure = Value::object(HeapRef(CLOSURE_BIT | (cx.closures.len() as u32 - 1)));
     let mut func = entry;
-    enter(cx, program, entry, closure, None, args);
+    enter(cx, program, entry, closure, Value::UNDEFINED, None, args);
     let mut pc = 0usize;
     for _ in 0..max_steps {
         let f = &program[func];
@@ -527,6 +767,7 @@ fn enter(
     program: &[ToyFunction],
     func: usize,
     closure: Value,
+    this: Value,
     env: Option<usize>,
     args: &[Value],
 ) {
@@ -540,6 +781,7 @@ fn enter(
     cx.functions = f.functions.clone();
     cx.env = env;
     cx.closure = Some(closure);
+    cx.this = Some(this);
 }
 
 fn restore(cx: &mut ToyCtx, program: &[ToyFunction], saved: Saved) -> usize {
@@ -550,6 +792,7 @@ fn restore(cx: &mut ToyCtx, program: &[ToyFunction], saved: Saved) -> usize {
     cx.functions = f.functions.clone();
     cx.env = saved.env;
     cx.closure = saved.closure;
+    cx.this = saved.this;
     saved.func
 }
 
@@ -576,6 +819,7 @@ fn call(
     if let Flow::Throw = cx.check_interrupt() {
         return Flow::Throw;
     }
+    let this = cx.reg(site.this);
     let args: Vec<Value> = (0..site.argc.0)
         .map(|i| cx.reg(Reg(site.args.0 + i)))
         .collect();
@@ -589,9 +833,10 @@ fn call(
             feedback: std::mem::take(&mut cx.feedback),
             env: cx.env,
             closure: cx.closure,
+            this: cx.this,
         });
     }
-    enter(cx, program, closure.func, callee, closure.env, &args);
+    enter(cx, program, closure.func, callee, this, closure.env, &args);
     *func = closure.func;
     *pc = 0;
     Flow::Next

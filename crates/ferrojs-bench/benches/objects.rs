@@ -72,7 +72,15 @@ fn two_objects() -> Setup {
 #[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::two_objects(setup = two_objects)]
-fn get_set((mut vm, child, keys): Setup) -> u64 {
+fn get_set(setup: Setup) -> u64 {
+    // Out of line, so the measured function always contains the work
+    // (inlined into the harness, it once measured only the drops).
+    work(black_box(setup))
+}
+
+#[cfg(target_os = "linux")]
+#[inline(never)]
+fn work((mut vm, child, keys): Setup) -> u64 {
     vm.with(|s, _| {
         let child = s.root(child.get(s.nogc()));
         let keys: Vec<_> = keys.iter().map(|k| s.root(k.get(s.nogc()))).collect();

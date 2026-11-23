@@ -264,3 +264,102 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 8699 (+0)
 - Next: 1.8b (delete, dictionary mode, accessors) or 1.8c (elements);
   1.7a still waits for CI.
+
+## 2026-11-23 10:30 UTC — 1.8b Delete, attributes, dictionary mode
+- Result: merged
+- Changed: dictionary-mode shapes with an ordered entry table (slot
+  reuse, compaction); `define` per ValidateAndApplyPropertyDescriptor,
+  `delete`, `prevent_extensions`/`is_extensible`; 128-property limit for
+  shared shapes. Faster shared-shape lookup: `objects/get_set` 2.94M ->
+  2.36M instructions (-20%; baseline rewritten). Model test now covers
+  delete, attribute changes and non-extensible objects with 6 and 200
+  keys, two runs under GC stress. Independent review: one must-fix
+  (dictionary entry recorded before its storage existed; fixed), test
+  gaps addressed. Accessors and the lazy key table split to 1.8d.
+- Decisions: D-039
+- Test262: 8699 (+0)
+- Next: 1.8c elements (indexed properties). 1.7a still waits for CI.
+
+## 2026-11-23 11:15 UTC — 1.8c Indexed properties and arrays
+- Result: merged
+- Changed: `ferrojs_vm::elements`: dense (hole markers) or sparse
+  stores, arrays with length in the store, get/set/delete/keys/
+  set_length, prototype fall-through for holes. Model-checked (30 runs,
+  3 under GC stress); element-liveness test verified by mutation.
+  Independent review: no must-fix; nice-to-haves applied (tracer hole
+  exemption only for elements, doc wording, a length-growth test).
+- Decisions: D-040
+- Test262: 8699 (+0)
+- Next: 1.11 host hooks (independent), or 1.7a once CI runs again.
+
+## 2026-11-23 11:35 UTC — 1.11 Host hooks
+- Result: merged
+- Changed: `ferrojs_vm::host`: the `Host` trait (random, now,
+  local_offset, monotonic_now, enqueue_job/next_job), `SystemHost`,
+  `DeterministicHost`, xorshift128+; the `Vm` owns a host. Tests for
+  range and spread of random numbers, reproducibility, clocks and job
+  order (including a custom LIFO host). Not risky; no review needed.
+- Decisions: D-041
+- Test262: 8699 (+0)
+- Next: 1.7a once CI runs (everything else open needs 1.7 or 1.6e,
+  and 1.6e needs strings and globals from the VM side).
+
+## 2026-11-23 12:40 UTC — 1.6e Scripts and globals (1.6e split e–g)
+- Result: merged
+- Changed: `compile_script`; globals and undeclared names by name
+  (`LoadName`, `StoreName`, `StoreNameStrict`, `DeclareGlobal`,
+  `InitGlobal`), `LoadThis` in strict functions, string constants. The
+  toy context models the global lexical environment and global object.
+  31 multi-script cases match Node.js (including cross-script
+  redeclaration SyntaxErrors and TDZ). Gate fix: `objects/get_set` had
+  measured nothing since 1.11 (5,776 instead of 2.36M); fixed, and the
+  benchmark check now fails on drops over 50% (D-043).
+- Decisions: D-042, D-043
+- Test262: 8699 (+0)
+- Next: 1.6f strings (literals, typeof, concatenation, Number::toString).
+
+## 2026-11-23 09:25 UTC — 1.6f Strings
+- Result: merged
+- Changed: string literals and template literals compile to string
+  constants, `ToString` and `Add`; `typeof` (`Typeof`, `TypeofName`).
+  The toy context implements concatenation, Number::toString,
+  StringToNumber, code-unit comparison, loose equality and ToBoolean for
+  strings. 34 new script cases match Node.js, compared as UTF-16 code
+  units; a mutation (UTF-8 instead of UTF-16 order) is caught. Not
+  risky (no core, unsafe or GC code); no review needed.
+- Decisions: D-044
+- Test262: 8699 (+0)
+- Next: 1.6g (Annex B call-expression assignment targets), or 1.7a
+  once CI runs again.
+
+## 2026-11-23 09:32 UTC — 1.6g Sloppy-mode calls as assignment targets
+- Result: merged
+- Changed: front end rewrites `f() = e`, `f() op= e`, `f()++`, `--f()`
+  and `for (f() in/of …)` in sloppy scripts so oxc accepts them, then
+  validates each site (strict, logical assignment, destructuring,
+  `super()`, optional and non-call targets stay SyntaxErrors); offsets
+  map back to the source. The compiler runs the call, then throws a
+  `ReferenceError` (`ThrowInvalidAssignment`). 21 run cases match
+  Node.js; validation rules checked by mutation. Not risky (no core,
+  unsafe or GC code); no review needed.
+- Decisions: D-045
+- Test262: 8699 (+0); failures 7 -> 0 (the 7 Annex B runs now parse and
+  are "not run" until the interpreter is hooked up)
+- Next: 1.7a once CI runs again (everything else open needs 1.7).
+
+## 2026-11-23 11:50 UTC — 1.12a Default parameter values (1.12 split a–g)
+- Result: merged
+- Changed: parameter initializers compile (left to right, `undefined`
+  triggers the default); parameters reachable early get a TDZ binding
+  checked everywhere, closures included; `CompiledFunction::length`.
+  28 new script cases match Node.js; mutations (no TDZ, no env store
+  for captured params, no TDZ check in nested functions) are caught. An
+  unresolved `arguments` in a function is now refused instead of
+  compiling as a global. Not risky (no core, unsafe or GC code); no
+  review needed. 1.12 split: the rest needs objects or the interpreter.
+- Decisions: D-046
+- Test262: 8699 (+0)
+- Next: 1.7a once CI runs again. GitHub Actions still starts no job
+  (every run fails in ~3 s since 2026-11-21) and rustup can't reach
+  static.rust-lang.org here, so Miri can't run anywhere; every other
+  open task waits on 1.7. John has been notified.

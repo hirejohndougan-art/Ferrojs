@@ -205,6 +205,11 @@ impl Value {
     }
 
     #[inline]
+    pub const fn is_string(self) -> bool {
+        self.tag() == TAG_STRING
+    }
+
+    #[inline]
     pub const fn is_undefined(self) -> bool {
         self.0 == Value::UNDEFINED.0
     }
@@ -418,6 +423,7 @@ mod tests {
             Value::other(OtherKind::BigInt, r),
         ];
         for (i, a) in vals.iter().enumerate() {
+            assert_eq!(a.is_string(), i == 6, "{a:?}");
             for b in &vals[i + 1..] {
                 assert_ne!(a.to_bits(), b.to_bits(), "{a:?} vs {b:?}");
             }

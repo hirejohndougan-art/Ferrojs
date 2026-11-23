@@ -37,6 +37,8 @@ use ferrojs_core::heap::HeapOptions;
 use ferrojs_core::{Cage, CageError, Gc, Heap, NoGc, Trace};
 use ferrojs_value::{Kind, Value};
 
+pub mod elements;
+pub mod host;
 pub mod object;
 pub mod shape;
 pub mod string;
@@ -55,6 +57,10 @@ pub enum CellKind {
     Object = 3,
     /// An object's out-of-line named-property slots.
     Slots = 4,
+    /// A dictionary-mode shape's property table.
+    Dict = 5,
+    /// An object's indexed properties.
+    Elements = 6,
 }
 
 impl CellKind {
@@ -64,6 +70,8 @@ impl CellKind {
             2 => Some(CellKind::Shape),
             3 => Some(CellKind::Object),
             4 => Some(CellKind::Slots),
+            5 => Some(CellKind::Dict),
+            6 => Some(CellKind::Elements),
             _ => None,
         }
     }
@@ -86,10 +94,13 @@ impl Trace for Tracer {
         let header = cage.read_u64(cell);
         let kind = CellKind::from_byte(header as u8)
             .unwrap_or_else(|| panic!("cell {cell:#x} has unknown kind {:#x}", header as u8));
+        // Only elements stores hold the hole marker.
+        let holes_ok = kind == CellKind::Elements;
         let value_at = |field: u32, edges: &mut Vec<u32>| {
             let bits = cage.read_u64(cell + field);
             debug_assert!(
-                Value::from_bits_checked(bits).is_some(),
+                Value::from_bits_checked(bits).is_some()
+                    || (holes_ok && bits == Value::UNINITIALIZED.to_bits()),
                 "cell {cell:#x} holds invalid value bits {bits:#x} at {field:#x}"
             );
             if let Some(r) = value_ref(bits) {
@@ -114,6 +125,35 @@ impl Trace for Tracer {
                 );
                 for i in 0..inline {
                     value_at(object::INLINE + 8 * i, edges);
+                }
+            }
+            CellKind::Dict => {
+                let cap = (header >> 32) as u32;
+                let len = shape::dict_len(cage, cell);
+                assert!(
+                    len <= cap && shape::DICT_ENTRIES + 16 * cap <= size,
+                    "bad table"
+                );
+                for i in 0..len {
+                    edges.push(cage.read_u32(cell + shape::DICT_ENTRIES + 16 * i));
+                }
+            }
+            CellKind::Elements => {
+                let cap = (header >> 32) as u32;
+                if header & elements::SPARSE != 0 {
+                    let count = cage.read_u32(cell + elements::COUNT);
+                    assert!(
+                        count <= cap && elements::DATA + 16 * cap <= size,
+                        "bad elements"
+                    );
+                    for i in 0..count {
+                        value_at(elements::DATA + 16 * i + 8, edges);
+                    }
+                } else {
+                    assert!(elements::DATA + 8 * cap <= size, "bad elements");
+                    for i in 0..cap {
+                        value_at(elements::DATA + 8 * i, edges);
+                    }
                 }
             }
             CellKind::Slots => {
@@ -162,25 +202,35 @@ impl Default for VmOptions {
     }
 }
 
-/// The runtime: the GC context and the engine tables.
+/// The runtime: the GC context, the engine tables and the embedder's
+/// host hooks.
 pub struct Vm {
     pub cx: Cx,
     pub tables: Tables,
+    /// Randomness, clocks and job order (D-008, D-041).
+    pub host: Box<dyn host::Host>,
 }
 
 impl Vm {
+    /// A runtime with the default host ([`host::SystemHost`]).
     pub fn new(options: VmOptions) -> Result<Vm, CageError> {
+        Vm::with_host(options, Box::new(host::SystemHost::new()))
+    }
+
+    /// A runtime with the embedder's host hooks.
+    pub fn with_host(options: VmOptions, host: Box<dyn host::Host>) -> Result<Vm, CageError> {
         let cage = Cage::new(options.heap_size)?;
         let heap = Heap::from_cage(cage, options.heap);
         Ok(Vm {
             cx: Cx::new(heap, Box::new(Tracer), options.cx),
             tables: Tables::default(),
+            host,
         })
     }
 
     /// Runs `f` in a new root scope with the engine tables.
     pub fn with<R>(&mut self, f: impl for<'s> FnOnce(&mut Scope<'s>, &mut Tables) -> R) -> R {
-        let Vm { cx, tables } = self;
+        let Vm { cx, tables, .. } = self;
         cx.scope(|s| f(s, tables))
     }
 }

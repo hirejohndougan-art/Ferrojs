@@ -839,3 +839,215 @@ planning document and gets logged here as each is implemented.
   in a separate header word (the architecture's layout puts it in the
   header's high half to keep objects small); per-object hash tables
   before dictionary mode is needed.
+
+## D-039 Dictionary mode: per-object shape with an ordered entry table
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** task 1.8b. A dictionary shape belongs to one object: flag
+  `DICT` in the shape header, prototype and inline count as usual, the
+  `KEY` field pointing at a `Dict` table (cell kind 5): entries of key,
+  attributes and slot in insertion order. Deleting leaves a tombstone
+  that keeps its slot for the next new property; a full table is
+  compacted into a new one (live entries plus free slots). Values stay in
+  the object's slots, so get/set paths are the same. An object goes to
+  dictionary mode when it deletes a property other than the last added
+  (deleting the last steps back to the parent shape), changes a
+  property's attributes, becomes non-extensible (the `NOT_EXTENSIBLE`
+  flag lives in its own shape), or would pass 128 properties
+  (`MAX_SHARED_PROPERTIES`). `define` follows
+  ValidateAndApplyPropertyDescriptor for complete data descriptors;
+  `delete` refuses non-configurable properties and clears the slot.
+- **Phase 1 simplifications:** lookup in a dictionary table is linear
+  (a hash table comes with the lazy key table, task 1.8d); objects never
+  leave dictionary mode.
+- **Rejected:** a non-extensible flag on shared shapes (needs extra
+  transitions for a rare operation); moving values into the dictionary
+  table (two value paths for get/set and the ICs); a Rust-side hash map
+  per object (pointers into the heap from Rust, D-009).
+
+## D-040 Elements: dense with hole markers, or sparse; array length in the store
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** task 1.8c adds `ferrojs_vm::elements`. Array-index keys
+  (`0 ..= 2^32 - 2`) live in an `Elements` cell (kind 6) referenced from
+  the object's elements field, apart from named properties; callers
+  (interpreter, built-ins) route index keys there, and named keys never
+  hold indices. Dense stores keep `capacity` values with holes as the
+  internal uninitialized marker (D-034), growing by doubling; writing
+  at an index of twice the capacity plus 8 or more (or 2^20 or more) turns
+  the store sparse (unordered index/value entries, linear lookup) for
+  good. Arrays are ordinary objects with an `ARRAY` header flag; the
+  length lives in the elements header and grows past written indices;
+  `set_length` truncates. Elements are plain data properties; holes and
+  missing indices fall through to the prototype. Own keys are
+  `elements::keys` (ascending) then `object::own_keys`.
+- **Phase 1 simplifications:** no element attributes other than the
+  defaults (frozen and sealed objects later), no `length` property
+  object (the interpreter exposes it), no packed/holey distinction
+  beyond the markers, linear sparse lookup.
+- **Rejected:** indices as named properties (shape explosion for
+  arrays); `undefined` for holes (indistinguishable from a stored
+  `undefined`); a sorted sparse table now (insertion cost and code for
+  a rare case).
+
+## D-041 Host hooks as one embedder trait
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** task 1.11 implements D-008 as `ferrojs_vm::host::Host`, a
+  trait object owned by the `Vm` (`Vm::with_host`; `Vm::new` uses
+  `SystemHost`). Hooks: `random` (`Math.random`, `[0, 1)`), `now`
+  (time value in ms), `local_offset` (LocalTZA, default 0 until the
+  `Date` built-in), `monotonic_now` (timers), and `enqueue_job` /
+  `next_job` for job order: the engine keeps job records (they hold heap
+  references) and gives the host opaque `JobId`s. `SystemHost`: system
+  clocks (whole ms for `now`), xorshift128+ seeded from the system's
+  hashing entropy and the time, FIFO jobs. `DeterministicHost`: seeded
+  generator, clocks starting at a fixed time and advancing a fixed step
+  per reading, FIFO, for tests and the differential harness. The random
+  generator returns multiples of 2^-53 (top 53 bits).
+- **Rejected:** separate traits per concern (one object to pass and to
+  replace is simpler for embedders); a `rand` dependency (a 20-line
+  generator is enough for `Math.random`, which needn't be secure); the
+  host owning the job records (it would need heap references, outside
+  the GC's view).
+
+## D-042 Scripts and globals by name
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** task 1.6e adds `compile_script`. A script's top-level
+  bindings, and every name no scope declares, are globals reached by
+  name: `LoadName`, `StoreName` (sloppy: an undeclared name becomes a
+  configurable global property) and `StoreNameStrict` (ReferenceError),
+  with the name in the constant pool (which now holds `Constant::Number`
+  and `Constant::String`). Script code starts with `DeclareGlobal name,
+  kind` for each top-level lexical name, then each var/function name
+  (GlobalDeclarationInstantiation, one name at a time), creates the
+  top-level functions, and initializes `let`/`const` with `InitGlobal`.
+  The runtime (`OpCtx::rt_load_name` and friends) owns the global
+  lexical environment and the global object: TDZ, `const`, and
+  redeclaration `SyntaxError`s (lexical vs anything, var vs lexical,
+  lexical vs a non-configurable global property) are its checks, so
+  functions compiled separately agree with scripts loaded later.
+  Top-level bindings are never captured into environments. `this`
+  compiles to `LoadThis` in strict non-arrow functions; elsewhere it is
+  unsupported until the global object and lexical `this` exist.
+  Unresolved `undefined`, `NaN` and `Infinity` still compile to
+  constants (they are non-writable, non-configurable, and a global
+  `let` of those names is a redeclaration error).
+- **Known deviation:** GlobalDeclarationInstantiation checks all names
+  before creating any; declaring one name per op can create some
+  bindings before a later clash throws. A single op over a list of
+  names fixes it once the constant pool has lists.
+- **Toy context:** global lexical bindings and global object properties,
+  interned strings for names, `this` per frame. Script tests run several
+  scripts in one context and compare the global `result` with Node.js
+  running them in a fresh `vm` context.
+- **Rejected:** resolving globals to slots at compile time (later
+  scripts and `eval` add globals; that is an inline-cache job); treating
+  top-level `let` as locals of the script function (they must be visible
+  to later scripts).
+
+## D-043 The benchmark check also fails on big drops
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** `objects/get_set` silently stopped measuring its work in
+  the 1.11 commit (the compiler inlined the body away from the symbol
+  Callgrind counts; it measured only the setup's drops: 2.36M -> 5,776
+  instructions), and `--write` took the drop as a speedup. The body now
+  sits in an `#[inline(never)]` function (2.36M again), and `benchcheck`
+  fails when a count falls by more than 50% (`DROPPED`), with a hint to
+  check the benchmark and, if the speedup is real, rewrite the baseline
+  on purpose with a decision entry. This strengthens the gate; the next
+  monthly review should add the rule to AUTOPILOT.md's gate notes.
+- **Rejected:** a symmetric 3% band (ordinary optimizations would need a
+  baseline rewrite each time).
+
+## D-044 Strings in the compiler and the toy context
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** String literals and the cooked parts of template literals
+  become string constants (shared with global names). Templates compile
+  to the head string, then for each substitution `ToString` (new op)
+  and `Add`, then the next cooked part, skipping empty parts; each
+  substitution is converted before the next is evaluated, as the spec
+  orders it. `typeof` is a new non-throwing `Typeof` op whose runtime
+  hook returns a pre-made name (no allocation); `typeof` of a global
+  name uses `TypeofName`, which gives `"undefined"` for an undeclared
+  name but still throws for a binding in its TDZ. The toy context
+  interns strings as Rust strings and implements `+` concatenation,
+  Number::toString (shortest round-trip digits in the spec's layouts),
+  StringToNumber, code-unit string comparison, loose equality and
+  ToBoolean for strings; it caps strings at 2^20 code units so fuzzed
+  doubling loops stay small. `Value::is_string` is added for the
+  `ToString` fast path.
+- **Limits:** strings with lone surrogates (`'\uD800'`) are reported as
+  unsupported, because the constant pool holds UTF-8 text; it moves to
+  UTF-16 (or WTF-8) when the VM's string constants arrive with 1.7.
+  Tagged templates need objects (the strings array) and stay
+  unsupported.
+- **Rejected:** compiling templates to `Add` alone (wrong for objects
+  and symbols: `+` uses ToPrimitive with the default hint and accepts
+  symbols' errors differently from ToString).
+
+## D-045 Sloppy-mode calls as assignment targets: rewrite, re-parse, validate
+- **Status:** Accepted (autopilot, 2026-11-23). Closes the known gap in
+  D-032.
+- **Choice:** ECMA-262 gives a `CallExpression` the assignment target
+  type *web-compat* in sloppy code: `f() = e`, arithmetic compound
+  assignment, `++`/`--` and `for (f() in/of …)` parse, call `f`, then
+  throw a `ReferenceError` before anything else runs. oxc 0.158 rejects
+  them with a fatal "Cannot assign to this expression" and its AST
+  can't hold such a target. The front end (`call_target` module) works
+  around it: when a script's only parse error is that one, it inserts
+  `[0]` after the call the error points at (which must end in `)`),
+  re-parses in a scratch arena, and repeats; the final rewritten text is
+  parsed once in the caller's arena. After scope analysis, every site
+  must be a member expression whose object is a plain call (not
+  `super()`, not optional), be the whole target of `=`, a non-logical
+  compound assignment, an update or a `for`-`in`/`of` head, and be in
+  sloppy code; otherwise the program gets the original `SyntaxError`
+  at the call. `Parsed::call_targets` lists the sites by span end; the
+  compiler evaluates the call and emits the new terminator op
+  `ThrowInvalidAssignment` (`ErrorKind::InvalidAssignmentTarget`,
+  `ReferenceError`). `for`-`in`/`of` heads parse but stay unsupported in
+  the compiler like every `for`-`in`/`of`.
+- **Offsets:** AST spans are offsets in the rewritten text. Syntax
+  errors and the compiler's `Unsupported` offsets are mapped back to the
+  caller's source (`Parsed::original_offset`). Anything that slices
+  source text by span later (Function.prototype.toString) must slice the
+  original source through that mapping. Programs without sites are not
+  rewritten and pay nothing.
+- **Limit:** each site costs one re-parse of the whole text, so a script
+  with more than 256 sites is refused with the `SyntaxError` (a known
+  deviation; real code has a handful at most).
+- **Result:** the 7 Annex B `assignmenttargettype/callexpression*`
+  Test262 runs no longer fail at parse (they are "not run" until the
+  interpreter lands); 0 failures, 8,699 passes. Strict code, modules,
+  logical assignment and destructuring targets still reject call targets
+  (tests in `tests/call_targets.rs`).
+- **Rejected:** patching or forking oxc (crates come only from crates.io,
+  D-026, and the fork would need upkeep across pins); an AST of our own
+  (D-018); parsing the call separately and splicing it in (it would miss
+  the scope analysis); a same-length rewrite (none preserves the call).
+
+## D-046 Default parameter values: argument registers, TDZ only where reachable
+- **Status:** Accepted (autopilot, 2026-11-23).
+- **Choice:** a function with any parameter initializer initializes its
+  parameters left to right after its environment and own name are set
+  up: `if (arg === undefined) arg = <initializer>`, compiled as
+  `LoadUndefined; StrictEqual; JumpIfFalse` (no new op). oxc resolves
+  references in initializers past the body's `var`s (to the enclosing
+  scope), so the compiler needs no separate parameter scope. A parameter
+  that an initializer may reach before its turn (used, read or written,
+  in its own initializer or an earlier one, closures in them included)
+  gets its own binding (a fresh register, or its environment slot),
+  starts as the TDZ marker, and every use of it checks the marker, in
+  nested functions too (`Analysis::param_tdz`). Other parameters stay
+  in their argument registers, unchecked. `CompiledFunction::length` is
+  the count before the first default (ExpectedArgumentCount).
+- **Refused (Unsupported) for now:** a parameter that a closure in the
+  parameters uses and the body redeclares with `var` or a function
+  declaration (the spec gives the body a separate copy, FunctionDeclaration-
+  Instantiation step 28; one symbol can't hold both); an unresolved
+  `arguments` inside a non-arrow function (the arguments object is later
+  work; before, it silently compiled as a global name).
+- **Cost:** uses of a TDZ parameter in the body still check the marker;
+  only functions whose initializers reach forward pay it.
+- **Rejected:** a parameter scope plus a body copy for every function
+  with defaults (an extra environment or copies for the common case);
+  a dedicated `JumpIfNotUndefined` op (worth it only once benchmarks
+  show default-heavy code).
