@@ -887,3 +887,52 @@ planning document and gets logged here as each is implemented.
   generator is enough for `Math.random`, which needn't be secure); the
   host owning the job records (it would need heap references, outside
   the GC's view).
+
+## D-042 Scripts and globals by name
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** task 1.6e adds `compile_script`. A script's top-level
+  bindings, and every name no scope declares, are globals reached by
+  name: `LoadName`, `StoreName` (sloppy: an undeclared name becomes a
+  configurable global property) and `StoreNameStrict` (ReferenceError),
+  with the name in the constant pool (which now holds `Constant::Number`
+  and `Constant::String`). Script code starts with `DeclareGlobal name,
+  kind` for each top-level lexical name, then each var/function name
+  (GlobalDeclarationInstantiation, one name at a time), creates the
+  top-level functions, and initializes `let`/`const` with `InitGlobal`.
+  The runtime (`OpCtx::rt_load_name` and friends) owns the global
+  lexical environment and the global object: TDZ, `const`, and
+  redeclaration `SyntaxError`s (lexical vs anything, var vs lexical,
+  lexical vs a non-configurable global property) are its checks, so
+  functions compiled separately agree with scripts loaded later.
+  Top-level bindings are never captured into environments. `this`
+  compiles to `LoadThis` in strict non-arrow functions; elsewhere it is
+  unsupported until the global object and lexical `this` exist.
+  Unresolved `undefined`, `NaN` and `Infinity` still compile to
+  constants (they are non-writable, non-configurable, and a global
+  `let` of those names is a redeclaration error).
+- **Known deviation:** GlobalDeclarationInstantiation checks all names
+  before creating any; declaring one name per op can create some
+  bindings before a later clash throws. A single op over a list of
+  names fixes it once the constant pool has lists.
+- **Toy context:** global lexical bindings and global object properties,
+  interned strings for names, `this` per frame. Script tests run several
+  scripts in one context and compare the global `result` with Node.js
+  running them in a fresh `vm` context.
+- **Rejected:** resolving globals to slots at compile time (later
+  scripts and `eval` add globals; that is an inline-cache job); treating
+  top-level `let` as locals of the script function (they must be visible
+  to later scripts).
+
+## D-043 The benchmark check also fails on big drops
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** `objects/get_set` silently stopped measuring its work in
+  the 1.11 commit (the compiler inlined the body away from the symbol
+  Callgrind counts; it measured only the setup's drops: 2.36M -> 5,776
+  instructions), and `--write` took the drop as a speedup. The body now
+  sits in an `#[inline(never)]` function (2.36M again), and `benchcheck`
+  fails when a count falls by more than 50% (`DROPPED`), with a hint to
+  check the benchmark and, if the speedup is real, rewrite the baseline
+  on purpose with a decision entry. This strengthens the gate; the next
+  monthly review should add the rule to AUTOPILOT.md's gate notes.
+- **Rejected:** a symmetric 3% band (ordinary optimizations would need a
+  baseline rewrite each time).

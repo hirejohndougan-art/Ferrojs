@@ -41,7 +41,7 @@ mod ops;
 pub mod testing;
 mod verify;
 
-pub use ctx::{CallSite, Completion, ErrorKind, Feedback, Flow, OpCtx, Thrown};
+pub use ctx::{CallSite, Completion, ErrorKind, Feedback, Flow, GlobalKind, OpCtx, Thrown};
 pub use define::{Flags, OpInfo};
 pub use encode::{
     decode, instructions, label_offset, AsmError, Assembler, DecodeError, DecodeErrorKind,

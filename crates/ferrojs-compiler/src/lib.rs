@@ -18,7 +18,10 @@
 pub mod codegen;
 pub mod early;
 
-pub use codegen::{compile_function, compile_function_source, CompileError, CompiledFunction};
+pub use codegen::{
+    compile_function, compile_function_source, compile_script, compile_script_source, CompileError,
+    CompiledFunction, Constant,
+};
 
 /// The arena the AST is allocated in; re-exported so callers need no oxc
 /// dependency of their own.

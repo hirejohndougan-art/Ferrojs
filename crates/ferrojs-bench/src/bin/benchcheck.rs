@@ -85,11 +85,20 @@ fn run() -> Result<ExitCode, String> {
                 println!("{line}");
             }
             println!(
-                "{} benchmarks, {} slower than {threshold}%, {} missing",
+                "{} benchmarks, {} slower than {threshold}%, {} missing, {} dropped by more than {}%",
                 new.counts.len(),
                 c.regressions.len(),
-                c.missing.len()
+                c.missing.len(),
+                c.collapsed.len(),
+                ferrojs_bench::baseline::COLLAPSE_PCT
             );
+            if !c.collapsed.is_empty() {
+                println!(
+                    "  a big drop usually means a benchmark stopped measuring its work; if the \
+                     speedup is real, rewrite the baseline (rm conformance/bench-baseline.txt && \
+                     tools/bench.sh check --write) with a decision entry"
+                );
+            }
             c.passed()
         }
     };

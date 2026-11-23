@@ -13,8 +13,8 @@ use ferrojs_value::Value;
 use crate::number::{self, CompareOp, NumericOp, UnaryOp};
 #[allow(unused_imports)]
 use crate::{
-    Completion, Const, Count, EnvSlot, ErrorKind, Feedback, Flow, Func, Ic, Imm, Label, OpCtx, Reg,
-    Thrown,
+    Completion, Const, Count, EnvSlot, ErrorKind, Feedback, Flow, Func, GlobalKind, Ic, Imm, Label,
+    OpCtx, Reg, Thrown,
 };
 
 /// `int32 op int32` without overflow, else `number op number`, else `None`.
@@ -594,6 +594,71 @@ define_ops! {
         handler(cx) {
             let v = cx.reg(src);
             match cx.set_env(v) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// `dst = this`.
+    LoadThis(load_this) { dst: Reg }
+        flags()
+        handler(cx) {
+            let v = cx.this_value();
+            cx.set(dst, v);
+            Flow::Next
+        }
+
+    /// `dst = ` the global name `constants[name]`.
+    LoadName(load_name) { dst: Reg, name: Const }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let n = cx.constant(name);
+            let c = cx.rt_load_name(n);
+            cx.complete(dst, c)
+        }
+
+    /// The global name `constants[name]` ` = src` (sloppy code).
+    StoreName(store_name) { name: Const, src: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (n, v) = (cx.constant(name), cx.reg(src));
+            match cx.rt_store_name(n, v, false) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// The global name `constants[name]` ` = src` (strict code).
+    StoreNameStrict(store_name_strict) { name: Const, src: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (n, v) = (cx.constant(name), cx.reg(src));
+            match cx.rt_store_name(n, v, true) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// Declares the global `constants[name]` as a `GlobalKind` (`kind`).
+    DeclareGlobal(declare_global) { name: Const, kind: Imm }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let n = cx.constant(name);
+            let Some(k) = GlobalKind::from_imm(kind.0) else {
+                return cx.rt_throw_error(ErrorKind::GlobalRedeclaration);
+            };
+            match cx.rt_declare_global(n, k) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// Initializes the global lexical binding `constants[name]` to `src`.
+    InitGlobal(init_global) { name: Const, src: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (n, v) = (cx.constant(name), cx.reg(src));
+            match cx.rt_init_global(n, v) {
                 Ok(()) => Flow::Next,
                 Err(Thrown) => Flow::Throw,
             }

@@ -6,7 +6,7 @@ use ferrojs_bytecode::testing::{
     run, run_program, run_with_handlers, Outcome, ToyCtx, ToyFunction,
 };
 use ferrojs_bytecode::{disassemble, verify, verify_handlers, ErrorKind};
-use ferrojs_compiler::{compile_function_source, CompileError, CompiledFunction};
+use ferrojs_compiler::{compile_function_source, CompileError, CompiledFunction, Constant};
 use ferrojs_value::{Kind, Value};
 
 fn compile(src: &str) -> CompiledFunction {
@@ -32,14 +32,14 @@ fn check_tree(src: &str, f: &CompiledFunction) {
 }
 
 /// The function tree as a flat toy program; the root is index 0.
-fn flatten(f: &CompiledFunction, out: &mut Vec<ToyFunction>) -> usize {
+fn flatten(f: &CompiledFunction, cx: &mut ToyCtx, out: &mut Vec<ToyFunction>) -> usize {
     let index = out.len();
     out.push(ToyFunction::default());
-    let functions = f.functions.iter().map(|g| flatten(g, out)).collect();
+    let functions = f.functions.iter().map(|g| flatten(g, cx, out)).collect();
     out[index] = ToyFunction {
         code: f.code.clone(),
         handlers: f.handlers.clone(),
-        constants: f.constant_values(),
+        constants: f.constant_values(|s| cx.intern(s)),
         limits: f.limits(),
         params: f.params,
         functions,
@@ -53,8 +53,8 @@ fn call(f: &CompiledFunction, args: &[f64]) -> Outcome {
 
 fn call_toy(f: &CompiledFunction, args: &[f64]) -> (Outcome, ToyCtx) {
     let mut program = Vec::new();
-    flatten(f, &mut program);
     let mut cx = ToyCtx::default();
+    flatten(f, &mut cx, &mut program);
     let args: Vec<Value> = args.iter().map(|&a| Value::number(a)).collect();
     let out = run_program(&program, 0, &args, &mut cx, 10_000_000);
     (out, cx)
@@ -78,7 +78,10 @@ fn show_outcome((o, cx): (Outcome, ToyCtx)) -> String {
         Outcome::Returned(v) => show(v),
         // The toy has no error objects; it records which error was thrown.
         Outcome::Threw(v) => match cx.last_error {
-            Some(ErrorKind::UninitializedBinding) => "throw:ReferenceError".into(),
+            Some(ErrorKind::UninitializedBinding | ErrorKind::UnresolvableReference) => {
+                "throw:ReferenceError".into()
+            }
+            Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
             Some(ErrorKind::ConstAssignment | ErrorKind::NotCallable) => "throw:TypeError".into(),
             Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
             None => format!("throw:{}", show(v)),
@@ -317,7 +320,11 @@ fn hand_checked_results() {
     // reading a parameter needs no temporary of its own.
     assert_eq!(f.registers, 2);
     let f = compile("function f(x) { return 0.5 + x + 0.5 + 1e100; }");
-    assert_eq!(f.constants, vec![0.5, 1e100], "constants are shared");
+    assert_eq!(
+        f.constants,
+        vec![Constant::Number(0.5), Constant::Number(1e100)],
+        "constants are shared"
+    );
 }
 
 #[test]
@@ -353,12 +360,9 @@ fn unsupported(src: &str) -> String {
 fn everything_else_is_unsupported_not_miscompiled() {
     for src in [
         "function f() { return 'str'; }",
-        "function f() { return x; }",
-        "function f() { return g(); }",
         "function f() { if (1) { function g() {} } }",
         "function f() { return { a: 1 }.a; }",
         "function f() { return new f(); }",
-        "function f() { x = 1; }",
         "function f(a = 1) {}",
         "function f(...r) {}",
         "function f({ a }) {}",
@@ -373,7 +377,6 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function* f() {}",
         "async function f() {}",
         "function f() { return 1n; }",
-        "var outer = 1; function f() { return outer; }",
     ] {
         unsupported(src);
     }

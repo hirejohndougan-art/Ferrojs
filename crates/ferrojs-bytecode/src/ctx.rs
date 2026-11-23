@@ -87,6 +87,44 @@ pub enum ErrorKind {
     NotCallable,
     /// `RangeError`: too much recursion.
     StackOverflow,
+    /// `ReferenceError`: a name that isn't declared anywhere.
+    UnresolvableReference,
+    /// `SyntaxError`: a global declaration clashes with an existing one
+    /// (GlobalDeclarationInstantiation).
+    GlobalRedeclaration,
+}
+
+/// What a global declaration creates (GlobalDeclarationInstantiation).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum GlobalKind {
+    /// `var` and function declarations: a property of the global object.
+    Var,
+    /// `let`: a binding of the global lexical environment, in its TDZ
+    /// until initialized.
+    Let,
+    /// `const`: like `let`, immutable once initialized.
+    Const,
+}
+
+impl GlobalKind {
+    /// Decodes the `Imm` operand of `DeclareGlobal` (unknown values are
+    /// `None`; the handler throws for them).
+    pub fn from_imm(i: i32) -> Option<GlobalKind> {
+        match i {
+            0 => Some(GlobalKind::Var),
+            1 => Some(GlobalKind::Let),
+            2 => Some(GlobalKind::Const),
+            _ => None,
+        }
+    }
+
+    pub fn imm(self) -> i32 {
+        match self {
+            GlobalKind::Var => 0,
+            GlobalKind::Let => 1,
+            GlobalKind::Const => 2,
+        }
+    }
 }
 
 /// The result of a runtime function that may throw.
@@ -169,6 +207,22 @@ pub trait OpCtx {
 
     /// Creates and throws the error `e` describes; returns [`Flow::Throw`].
     fn rt_throw_error(&mut self, e: ErrorKind) -> Flow;
+
+    /// The frame's `this`.
+    fn this_value(&self) -> Value;
+    /// Reads the global name `name` (a string constant): a global lexical
+    /// binding, else a property of the global object; `ReferenceError` if
+    /// neither exists or the binding is in its TDZ.
+    fn rt_load_name(&mut self, name: Value) -> Completion;
+    /// Assigns the global name `name`. An undeclared name becomes a
+    /// global property in sloppy code and is a `ReferenceError` in strict
+    /// code; a TDZ binding is a `ReferenceError`; a `const` a `TypeError`.
+    fn rt_store_name(&mut self, name: Value, v: Value, strict: bool) -> Result<(), Thrown>;
+    /// Declares a global (GlobalDeclarationInstantiation for one name):
+    /// `SyntaxError` on a clash between lexical and other declarations.
+    fn rt_declare_global(&mut self, name: Value, kind: GlobalKind) -> Result<(), Thrown>;
+    /// Initializes a global lexical binding (ends its TDZ).
+    fn rt_init_global(&mut self, name: Value, v: Value) -> Result<(), Thrown>;
 
     /// `a + b` for operands the fast path didn't handle.
     fn rt_add(&mut self, a: Value, b: Value) -> Completion;

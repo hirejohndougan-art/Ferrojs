@@ -12,7 +12,7 @@ use ferrojs_value::{HeapRef, Kind, Value};
 use crate::number::{self, CompareOp, NumericOp, UnaryOp};
 use crate::{
     decode, execute, CallSite, Completion, Const, Count, EnvSlot, ErrorKind, Feedback, Flow, Func,
-    Handler, Ic, Limits, OpCtx, Reg, Thrown,
+    GlobalKind, Handler, Ic, Limits, OpCtx, Reg, Thrown,
 };
 
 /// Toy closures are object values with this bit set in the reference.
@@ -75,6 +75,16 @@ pub struct ToyCtx {
     closure: Option<Value>,
     /// The running function's nested-function table.
     functions: Vec<usize>,
+    /// The frame's `this` (`None` reads as `undefined`).
+    this: Option<Value>,
+    /// Interned strings: string values are `Value::string(HeapRef(i))`.
+    strings: Vec<String>,
+    /// The global lexical environment: value (the TDZ marker until
+    /// initialized) and whether it is `const`.
+    pub global_lexical: std::collections::HashMap<String, (Value, bool)>,
+    /// The global object's properties: value and whether configurable
+    /// (implicit sloppy globals are; declared `var`s aren't).
+    pub global_object: std::collections::HashMap<String, (Value, bool)>,
 }
 
 impl ToyCtx {
@@ -85,6 +95,41 @@ impl ToyCtx {
             constants: vec![Value::UNDEFINED; limits.constants as usize],
             feedback: vec![Feedback::NONE; limits.ics as usize],
             ..ToyCtx::default()
+        }
+    }
+
+    /// The string value for `text`, interned.
+    pub fn intern(&mut self, text: &str) -> Value {
+        let i = match self.strings.iter().position(|s| s == text) {
+            Some(i) => i,
+            None => {
+                self.strings.push(text.to_owned());
+                self.strings.len() - 1
+            }
+        };
+        Value::string(HeapRef(i as u32))
+    }
+
+    /// The text of a string value made by [`ToyCtx::intern`].
+    pub fn string_of(&self, v: Value) -> Option<&str> {
+        match v.kind() {
+            Kind::String(HeapRef(i)) => self.strings.get(i as usize).map(String::as_str),
+            _ => None,
+        }
+    }
+
+    /// A global's value (lexical first, then the global object).
+    pub fn global(&self, name: &str) -> Option<Value> {
+        self.global_lexical
+            .get(name)
+            .or_else(|| self.global_object.get(name))
+            .map(|&(v, _)| v)
+    }
+
+    fn name_of(&mut self, name: Value) -> Result<String, Thrown> {
+        match self.string_of(name) {
+            Some(s) => Ok(s.to_owned()),
+            None => self.fail(),
         }
     }
 
@@ -139,6 +184,13 @@ impl ToyCtx {
             // TDZ marker to anything; the toy treats it like a heap value.
             Kind::Object(_) | Kind::String(_) | Kind::Other(..) | Kind::Uninitialized => None,
         }
+    }
+
+    /// Records error `e` as the pending exception.
+    fn error(&mut self, e: ErrorKind) -> Thrown {
+        self.last_error = Some(e);
+        self.exception = Some(Value::UNDEFINED);
+        Thrown
     }
 
     fn fail<T>(&mut self) -> Result<T, Thrown> {
@@ -285,6 +337,80 @@ impl OpCtx for ToyCtx {
             _ => self.fail(),
         }
     }
+    fn this_value(&self) -> Value {
+        self.this.unwrap_or(Value::UNDEFINED)
+    }
+    fn rt_load_name(&mut self, name: Value) -> Completion {
+        let n = self.name_of(name)?;
+        if let Some(&(v, _)) = self.global_lexical.get(&n) {
+            if v.is_uninitialized() {
+                return Err(self.error(ErrorKind::UninitializedBinding));
+            }
+            return Ok(v);
+        }
+        match self.global_object.get(&n) {
+            Some(&(v, _)) => Ok(v),
+            None => Err(self.error(ErrorKind::UnresolvableReference)),
+        }
+    }
+    fn rt_store_name(&mut self, name: Value, v: Value, strict: bool) -> Result<(), Thrown> {
+        let n = self.name_of(name)?;
+        if let Some(&(old, constant)) = self.global_lexical.get(&n) {
+            if old.is_uninitialized() {
+                return Err(self.error(ErrorKind::UninitializedBinding));
+            }
+            if constant {
+                return Err(self.error(ErrorKind::ConstAssignment));
+            }
+            self.global_lexical.insert(n, (v, false));
+            return Ok(());
+        }
+        match self.global_object.get_mut(&n) {
+            Some(slot) => slot.0 = v,
+            None if strict => return Err(self.error(ErrorKind::UnresolvableReference)),
+            None => {
+                self.global_object.insert(n, (v, true));
+            }
+        }
+        Ok(())
+    }
+    fn rt_declare_global(&mut self, name: Value, kind: GlobalKind) -> Result<(), Thrown> {
+        let n = self.name_of(name)?;
+        let lexical = self.global_lexical.contains_key(&n);
+        match kind {
+            GlobalKind::Var => {
+                if lexical {
+                    return Err(self.error(ErrorKind::GlobalRedeclaration));
+                }
+                let slot = self
+                    .global_object
+                    .entry(n)
+                    .or_insert((Value::UNDEFINED, false));
+                slot.1 = false;
+            }
+            GlobalKind::Let | GlobalKind::Const => {
+                // HasRestrictedGlobalProperty: a declared var can't be
+                // shadowed; an implicit (configurable) global can.
+                let restricted = self.global_object.get(&n).is_some_and(|&(_, c)| !c);
+                if lexical || restricted {
+                    return Err(self.error(ErrorKind::GlobalRedeclaration));
+                }
+                self.global_lexical
+                    .insert(n, (Value::UNINITIALIZED, kind == GlobalKind::Const));
+            }
+        }
+        Ok(())
+    }
+    fn rt_init_global(&mut self, name: Value, v: Value) -> Result<(), Thrown> {
+        let n = self.name_of(name)?;
+        match self.global_lexical.get_mut(&n) {
+            Some(slot) => {
+                slot.0 = v;
+                Ok(())
+            }
+            None => self.fail(),
+        }
+    }
     fn rt_add(&mut self, a: Value, b: Value) -> Completion {
         self.numbers(a, b, |x, y| x + y)
     }
@@ -295,8 +421,7 @@ impl OpCtx for ToyCtx {
         self.numbers(a, b, |x, y| x * y)
     }
     fn rt_throw_error(&mut self, e: ErrorKind) -> Flow {
-        self.last_error = Some(e);
-        self.exception = Some(Value::UNDEFINED);
+        self.error(e);
         Flow::Throw
     }
     fn rt_less_than(&mut self, a: Value, b: Value) -> Completion {
@@ -425,6 +550,7 @@ struct Saved {
     feedback: Vec<Feedback>,
     env: Option<usize>,
     closure: Option<Value>,
+    this: Option<Value>,
 }
 
 /// Runs `program[entry]` as a function called with `args`, for at most
@@ -460,7 +586,7 @@ pub fn run_program(
     });
     let closure = Value::object(HeapRef(CLOSURE_BIT | (cx.closures.len() as u32 - 1)));
     let mut func = entry;
-    enter(cx, program, entry, closure, None, args);
+    enter(cx, program, entry, closure, Value::UNDEFINED, None, args);
     let mut pc = 0usize;
     for _ in 0..max_steps {
         let f = &program[func];
@@ -527,6 +653,7 @@ fn enter(
     program: &[ToyFunction],
     func: usize,
     closure: Value,
+    this: Value,
     env: Option<usize>,
     args: &[Value],
 ) {
@@ -540,6 +667,7 @@ fn enter(
     cx.functions = f.functions.clone();
     cx.env = env;
     cx.closure = Some(closure);
+    cx.this = Some(this);
 }
 
 fn restore(cx: &mut ToyCtx, program: &[ToyFunction], saved: Saved) -> usize {
@@ -550,6 +678,7 @@ fn restore(cx: &mut ToyCtx, program: &[ToyFunction], saved: Saved) -> usize {
     cx.functions = f.functions.clone();
     cx.env = saved.env;
     cx.closure = saved.closure;
+    cx.this = saved.this;
     saved.func
 }
 
@@ -576,6 +705,7 @@ fn call(
     if let Flow::Throw = cx.check_interrupt() {
         return Flow::Throw;
     }
+    let this = cx.reg(site.this);
     let args: Vec<Value> = (0..site.argc.0)
         .map(|i| cx.reg(Reg(site.args.0 + i)))
         .collect();
@@ -589,9 +719,10 @@ fn call(
             feedback: std::mem::take(&mut cx.feedback),
             env: cx.env,
             closure: cx.closure,
+            this: cx.this,
         });
     }
-    enter(cx, program, closure.func, callee, closure.env, &args);
+    enter(cx, program, closure.func, callee, this, closure.env, &args);
     *func = closure.func;
     *pc = 0;
     Flow::Next
