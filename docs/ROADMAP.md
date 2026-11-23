@@ -132,7 +132,7 @@ Order matters: each task builds on the ones above it.
   verifier), with tests. Every VM task needs it: registers hold raw
   values (ARCHITECTURE.md §2) and cells are only readable and writable
   through `Gc` handles. Core change: CI Miri required. needs: 1.3b
-- [ ] 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
+- [~] (claimed 2026-11-23 16:27 UTC; stacked on the 1.7a branch, merges after it) 1.7 Interpreter loop with interrupt checks (D-007) and the shared frame
   layout; proper tail calls designed in. Dispatch cost must not grow
   with the number of ops (D-036): benchmark it. Plan (from the 1.6d
   run): new `ferrojs-vm` crate; the frame stack is shared `Cell<u64>`
