@@ -303,3 +303,17 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 8699 (+0)
 - Next: 1.7a once CI runs (everything else open needs 1.7 or 1.6e,
   and 1.6e needs strings and globals from the VM side).
+
+## 2026-11-23 12:40 UTC — 1.6e Scripts and globals (1.6e split e–g)
+- Result: merged
+- Changed: `compile_script`; globals and undeclared names by name
+  (`LoadName`, `StoreName`, `StoreNameStrict`, `DeclareGlobal`,
+  `InitGlobal`), `LoadThis` in strict functions, string constants. The
+  toy context models the global lexical environment and global object.
+  31 multi-script cases match Node.js (including cross-script
+  redeclaration SyntaxErrors and TDZ). Gate fix: `objects/get_set` had
+  measured nothing since 1.11 (5,776 instead of 2.36M); fixed, and the
+  benchmark check now fails on drops over 50% (D-043).
+- Decisions: D-042, D-043
+- Test262: 8699 (+0)
+- Next: 1.6f strings (literals, typeof, concatenation, Number::toString).

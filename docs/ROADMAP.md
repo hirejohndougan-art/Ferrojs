@@ -113,7 +113,7 @@ Order matters: each task builds on the ones above it.
   the dispatch loop per ARCHITECTURE.md §3.3–3.4), captured variables in
   environments, per-iteration `let` bindings; the toy context grows
   frames, closures and environments to run them. needs: 1.6c
-- [~] (claimed 2026-11-23 11:45 UTC) 1.6e Bytecode compiler, part 1e: scripts
+- [x] 1.6e (2026-11-23) Bytecode compiler, part 1e: scripts
   and globals: `compile_script`, global var/function/let/const
   declarations, `LoadName`/`StoreName` for top-level and undeclared
   names (ReferenceError, sloppy implicit globals), global TDZ and const,
