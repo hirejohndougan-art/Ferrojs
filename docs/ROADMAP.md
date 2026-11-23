@@ -141,7 +141,7 @@ Order matters: each task builds on the ones above it.
   shape transition trees with the prototype, ordinary objects with
   inline and out-of-line slots, data-property get/set/define, model-
   checked under GC stress. needs: 1.3b
-- [~] (claimed 2026-11-23 09:45 UTC) 1.8b Objects, part b: delete,
+- [x] 1.8b (2026-11-23) Objects, part b: delete,
   attribute changes (ValidateAndApplyPropertyDescriptor for data
   properties), dictionary mode (ARCHITECTURE.md §7.2), non-extensible
   objects. needs: 1.8a

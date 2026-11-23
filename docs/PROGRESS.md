@@ -264,3 +264,18 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 8699 (+0)
 - Next: 1.8b (delete, dictionary mode, accessors) or 1.8c (elements);
   1.7a still waits for CI.
+
+## 2026-11-23 10:30 UTC — 1.8b Delete, attributes, dictionary mode
+- Result: merged
+- Changed: dictionary-mode shapes with an ordered entry table (slot
+  reuse, compaction); `define` per ValidateAndApplyPropertyDescriptor,
+  `delete`, `prevent_extensions`/`is_extensible`; 128-property limit for
+  shared shapes. Faster shared-shape lookup: `objects/get_set` 2.94M ->
+  2.36M instructions (-20%; baseline rewritten). Model test now covers
+  delete, attribute changes and non-extensible objects with 6 and 200
+  keys, two runs under GC stress. Independent review: one must-fix
+  (dictionary entry recorded before its storage existed; fixed), test
+  gaps addressed. Accessors and the lazy key table split to 1.8d.
+- Decisions: D-039
+- Test262: 8699 (+0)
+- Next: 1.8c elements (indexed properties). 1.7a still waits for CI.
