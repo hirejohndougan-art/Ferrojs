@@ -116,7 +116,7 @@ Order matters: each task builds on the ones above it.
 - [ ] 1.6e Bytecode compiler, part 1e: script top level and globals
   (`LoadName`/`StoreName`), strings in the constant pool, `this`. Also
   accept sloppy-mode call expressions as assignment targets (runtime
-  `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6d, 1.8
+  `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6d, 1.8a
 - [ ] 1.7a (risky; done on branch `auto/2026-11-23-core-handles`, reviewed,
   waiting for a CI Miri run: GitHub Actions has started no job since
   2026-11-21, likely out of minutes) Core handle API for the interpreter: a checked way to
@@ -136,8 +136,16 @@ Order matters: each task builds on the ones above it.
   templates stay in a Rust-side table indexed from the closure header
   (no raw pointers in cells, D-009); reuse the compiler's Node.js cases
   and run them under GC stress. needs: 1.3b, 1.6d, 1.7a
-- [~] (claimed 2026-11-23 08:45 UTC) 1.8 Objects and shapes (hidden classes), property get/set, prototype
-  chains. needs: 1.3b
+- [~] (claimed 2026-11-23 08:45 UTC) 1.8a Objects and shapes, part a: new
+  `ferrojs-vm` crate with the cell tracer, string cells and atoms,
+  shape transition trees with the prototype, ordinary objects with
+  inline and out-of-line slots, data-property get/set/define, model-
+  checked under GC stress. needs: 1.3b
+- [ ] 1.8b Objects, part b: delete, attribute changes and dictionary
+  mode (ARCHITECTURE.md §7.2), the lazy key table for large shapes,
+  non-extensible objects, accessor properties. needs: 1.8a
+- [ ] 1.8c Objects, part c: indexed properties in the elements store
+  (packed, holey, sparse) and Array length. needs: 1.8a
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7
 - [ ] 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;

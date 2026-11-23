@@ -12,6 +12,7 @@ ferrojs-bytecode = { path = "../ferrojs-bytecode" }
 ferrojs-compiler = { path = "../ferrojs-compiler" }
 ferrojs-core = { path = "../ferrojs-core" }
 ferrojs-value = { path = "../ferrojs-value" }
+ferrojs-vm = { path = "../ferrojs-vm" }
 serde_json = "1"
 
 # Valgrind benchmarks run on Linux only; elsewhere the bench is an empty stub
@@ -41,6 +42,10 @@ harness = false
 
 [[bench]]
 name = "parse"
+harness = false
+
+[[bench]]
+name = "objects"
 harness = false
 
 [lints]

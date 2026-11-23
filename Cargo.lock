@@ -180,6 +180,7 @@ dependencies = [
  "ferrojs-compiler",
  "ferrojs-core",
  "ferrojs-value",
+ "ferrojs-vm",
  "gungraun",
  "serde_json",
 ]
@@ -238,6 +239,14 @@ dependencies = [
 [[package]]
 name = "ferrojs-value"
 version = "0.0.1"
+
+[[package]]
+name = "ferrojs-vm"
+version = "0.0.1"
+dependencies = [
+ "ferrojs-core",
+ "ferrojs-value",
+]
 
 [[package]]
 name = "foldhash"
