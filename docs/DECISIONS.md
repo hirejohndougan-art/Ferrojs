@@ -785,3 +785,23 @@ planning document and gets logged here as each is implemented.
   function holding every captured binding (wrong for per-iteration and
   block-scoped closures); boxing captured variables individually (more
   allocations, and the architecture already plans environment cells).
+
+## D-037 Handles from raw offsets, always checked
+- **Status:** Accepted (autopilot, 2026-11-23)
+- **Choice:** `NoGc::handle::<T>(offset) -> Option<Gc<'a, T>>` turns a
+  raw cell offset (a heap reference the interpreter holds in a register
+  or a frame slot) into an unrooted handle. It returns `None` unless the
+  offset is the start of a live cell, and that check runs in every
+  build, not only with the heap verifier: a few loads per call, against
+  a wrong offset silently reading another cell. The handle borrows the
+  token like any other, so it can't be held across a collection; keeping
+  the raw offset itself valid across collections is the holder's job
+  (the VM makes its frame stack a root, 1.7). A freed offset is refused;
+  an offset whose slot was reused is not detectable here, by design.
+  Safe code only; compile-fail rule 7 in `RootingRules` covers it.
+- **Rejected:** an unchecked constructor (a VM bug would read a random
+  cell instead of panicking); checking only under the verifier (release
+  builds would read random cells); laundering offsets through a cell
+  field with `write_u32` + `read_ref` (bypasses the write barrier and the
+  type-safety design); keeping register values as `Root`s (a handle-stack
+  entry per register write).

@@ -322,6 +322,26 @@ impl<'a> NoGc<'a> {
     }
 
     /// Whether `cell` is a live cell of this context's heap.
+    /// The live cell that starts at `offset`, as an unrooted handle: for
+    /// references the engine holds as raw offsets outside cells, such as
+    /// heap references in interpreter registers (ARCHITECTURE.md §2,
+    /// D-037). `None` unless `offset` is the start of a live cell (null,
+    /// misaligned, out of range, inside a cell or freed all give `None`).
+    /// The check always runs, verifier or not. The caller vouches for the
+    /// cell type `T`, as with [`Gc::cast`].
+    ///
+    /// The handle obeys the usual rules: it borrows this token, so it can't
+    /// be held across anything that may collect. Keeping a raw offset
+    /// across a collection is the holder's job (the interpreter's frame
+    /// stack is traced for that reason); this check catches the offsets of
+    /// freed cells, not ones that were reused.
+    pub fn handle<T>(self, offset: u32) -> Option<Gc<'a, T>> {
+        if !self.cx.heap.is_live_cell(offset) {
+            return None;
+        }
+        NonZeroU32::new(offset).map(Gc::new)
+    }
+
     pub fn is_live<T>(self, cell: Gc<'_, T>) -> bool {
         self.cx.heap.is_live_cell(cell.offset())
     }
@@ -808,7 +828,32 @@ impl<T> fmt::Debug for Global<T> {
 /// let _ = cx.alloc::<()>(8).unwrap();
 /// ```
 ///
-/// 7. The context (and so every `NoGc` token, without which a handle can't
+/// 7. A handle made from a raw offset with [`NoGc::handle`] can't be held
+///    across a collection either:
+///
+/// ```compile_fail
+/// # use ferrojs_core::gc::*;
+/// # let heap = ferrojs_core::Heap::new(16 * ferrojs_core::cage::CHUNK_SIZE as u64).unwrap();
+/// # let mut cx = Cx::new(heap, Box::new(NoEdges), CxOptions { gc_stress: false });
+/// let raw = cx.alloc::<()>(8).unwrap().bind(cx.nogc()).offset();
+/// let h = cx.nogc().handle::<()>(raw).unwrap();
+/// cx.collect();
+/// let _ = cx.nogc().read_u64(h, 0);
+/// ```
+///
+/// ```
+/// # use ferrojs_core::gc::*;
+/// # let heap = ferrojs_core::Heap::new(16 * ferrojs_core::cage::CHUNK_SIZE as u64).unwrap();
+/// # let mut cx = Cx::new(heap, Box::new(NoEdges), CxOptions { gc_stress: false });
+/// let a = cx.alloc::<()>(8).unwrap().bind(cx.nogc());
+/// let g = cx.nogc().global(a);
+/// let raw = g.get(cx.nogc()).offset();
+/// cx.collect();
+/// let h = cx.nogc().handle::<()>(raw).unwrap();
+/// let _ = cx.nogc().read_u64(h, 0);
+/// ```
+///
+/// 8. The context (and so every `NoGc` token, without which a handle can't
 ///    be used) stays on one thread:
 ///
 /// ```compile_fail

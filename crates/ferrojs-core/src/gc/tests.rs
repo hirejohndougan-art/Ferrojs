@@ -497,3 +497,81 @@ fn an_outer_root_can_be_set_while_an_inner_scope_is_open() {
         assert_eq!(outer.allocated_bytes(), 16);
     });
 }
+
+#[test]
+fn handles_from_raw_offsets_only_reach_live_cell_starts() {
+    let mut cx = checked(8, false);
+    let small = cx.alloc::<()>(32).unwrap().bind(cx.nogc()).offset();
+    let large = cx.alloc::<()>(20_000).unwrap().bind(cx.nogc()).offset();
+    let nogc = cx.nogc();
+    // Live cell starts: a handle to exactly that cell.
+    for (offset, size) in [(small, 32), (large, 20_000)] {
+        let h = nogc.handle::<()>(offset).expect("a live cell");
+        assert_eq!(h.offset(), offset);
+        assert!(nogc.cell_size(h) >= size);
+        nogc.write_u64(h, 8, 0x1234);
+        assert_eq!(nogc.read_u64(h, 8), 0x1234);
+    }
+    // Everything else: null, misaligned, inside a cell (small and large),
+    // a chunk header, past the used part of a chunk, past the cage.
+    for offset in [
+        0,
+        small + 1,
+        small + 4,
+        small + 8,
+        large + 8,
+        large + 16_384,
+        small - small % CHUNK_SIZE,
+        small + 8 * 32,
+        (8 * C) as u32,
+        u32::MAX - 7,
+    ] {
+        assert!(nogc.handle::<()>(offset).is_none(), "{offset:#x}");
+    }
+}
+
+#[test]
+fn handles_to_collected_cells_are_refused() {
+    for poison in [false, true] {
+        let cage = Cage::new(8 * C).expect("reserve a heap");
+        let heap = Heap::from_cage(
+            cage,
+            HeapOptions {
+                poison,
+                verify: false,
+            },
+        );
+        let mut cx = Cx::new(heap, Box::new(TestTracer), CxOptions { gc_stress: false });
+        let kept = node(&mut cx, 1, 0).bind(cx.nogc());
+        let kept_global = cx.nogc().global(kept);
+        let dead = node(&mut cx, 2, 0).bind(cx.nogc()).offset();
+        let kept = kept_global.get(cx.nogc()).offset();
+        cx.collect();
+        let nogc = cx.nogc();
+        assert!(nogc.handle::<Node>(dead).is_none(), "poison {poison}");
+        let h = nogc.handle::<Node>(kept).expect("still live");
+        assert_eq!(id_of(nogc, h), 1);
+        // A new cell may reuse the slot; then the offset is live again.
+        let again = node(&mut cx, 3, 0).bind(cx.nogc()).offset();
+        assert_eq!(
+            cx.nogc().handle::<Node>(again).map(|h| h.offset()),
+            Some(again)
+        );
+    }
+}
+
+#[test]
+fn handles_from_raw_offsets_survive_in_stress_mode_when_rooted() {
+    let mut cx = checked(8, true);
+    cx.scope(|s| {
+        let a = node(s, 7, 1).bind(s.nogc());
+        let raw = s.root(a).get(s.nogc()).offset();
+        for i in 0..20 {
+            // Collects first in stress mode.
+            let b = node(s, 100 + i, 0).bind(s.nogc());
+            let a = s.nogc().handle::<Node>(raw).expect("rooted");
+            set_edge(s.nogc(), a, 0, Some(b));
+            assert_eq!(id_of(s.nogc(), a), 7);
+        }
+    });
+}

@@ -397,6 +397,12 @@ errors at compile time) while allowing collection inside built-ins that
 call back into JavaScript, which pure gc-arena (collection only between
 `mutate` calls) does not.
 
+Raw references held outside cells (heap references in interpreter
+registers, frame header slots) become handles through
+`NoGc::handle(offset)` (1.7a, D-037), which returns `None` unless the
+offset is the start of a live cell. The holder must keep such raw
+references visible to the collector (the frame stack is a root, §6.3).
+
 ### 6.3 Roots
 
 1. The frame stack: every Value slot of every frame (§3.2).
