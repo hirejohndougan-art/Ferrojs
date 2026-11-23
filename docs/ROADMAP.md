@@ -133,7 +133,7 @@ Order matters: each task builds on the ones above it.
   look like references); closures and environments are heap cells;
   templates stay in a Rust-side table indexed from the closure header
   (no raw pointers in cells, D-009); reuse the compiler's Node.js cases
-  and run them under GC stress. needs: 1.6d, 1.7a needs: 1.3b, 1.6d
+  and run them under GC stress. needs: 1.3b, 1.6d, 1.7a
 - [ ] 1.8 Objects and shapes (hidden classes), property get/set, prototype
   chains. needs: 1.3b
 - [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
