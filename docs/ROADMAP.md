@@ -122,7 +122,7 @@ Order matters: each task builds on the ones above it.
 - [x] 1.6f Bytecode compiler, part 1f: string values: string literals and
   templates in the constant pool, `typeof`, `+` concatenation and
   Number::toString in the toy. needs: 1.6e
-- [~] (claimed 2026-11-23 09:14 UTC) 1.6g Accept sloppy-mode call expressions as assignment targets
+- [x] 1.6g (2026-11-23) Accept sloppy-mode call expressions as assignment targets
   (runtime `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6e
 - [ ] 1.7a (risky; done on branch `auto/2026-11-23-core-handles`, reviewed,
   waiting for a CI Miri run: GitHub Actions has started no job since

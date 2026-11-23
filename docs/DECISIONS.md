@@ -962,3 +962,44 @@ planning document and gets logged here as each is implemented.
 - **Rejected:** compiling templates to `Add` alone (wrong for objects
   and symbols: `+` uses ToPrimitive with the default hint and accepts
   symbols' errors differently from ToString).
+
+## D-045 Sloppy-mode calls as assignment targets: rewrite, re-parse, validate
+- **Status:** Accepted (autopilot, 2026-11-23). Closes the known gap in
+  D-032.
+- **Choice:** ECMA-262 gives a `CallExpression` the assignment target
+  type *web-compat* in sloppy code: `f() = e`, arithmetic compound
+  assignment, `++`/`--` and `for (f() in/of …)` parse, call `f`, then
+  throw a `ReferenceError` before anything else runs. oxc 0.158 rejects
+  them with a fatal "Cannot assign to this expression" and its AST
+  can't hold such a target. The front end (`call_target` module) works
+  around it: when a script's only parse error is that one, it inserts
+  `[0]` after the call the error points at (which must end in `)`),
+  re-parses in a scratch arena, and repeats; the final rewritten text is
+  parsed once in the caller's arena. After scope analysis, every site
+  must be a member expression whose object is a plain call (not
+  `super()`, not optional), be the whole target of `=`, a non-logical
+  compound assignment, an update or a `for`-`in`/`of` head, and be in
+  sloppy code; otherwise the program gets the original `SyntaxError`
+  at the call. `Parsed::call_targets` lists the sites by span end; the
+  compiler evaluates the call and emits the new terminator op
+  `ThrowInvalidAssignment` (`ErrorKind::InvalidAssignmentTarget`,
+  `ReferenceError`). `for`-`in`/`of` heads parse but stay unsupported in
+  the compiler like every `for`-`in`/`of`.
+- **Offsets:** AST spans are offsets in the rewritten text. Syntax
+  errors and the compiler's `Unsupported` offsets are mapped back to the
+  caller's source (`Parsed::original_offset`). Anything that slices
+  source text by span later (Function.prototype.toString) must slice the
+  original source through that mapping. Programs without sites are not
+  rewritten and pay nothing.
+- **Limit:** each site costs one re-parse of the whole text, so a script
+  with more than 256 sites is refused with the `SyntaxError` (a known
+  deviation; real code has a handful at most).
+- **Result:** the 7 Annex B `assignmenttargettype/callexpression*`
+  Test262 runs no longer fail at parse (they are "not run" until the
+  interpreter lands); 0 failures, 8,699 passes. Strict code, modules,
+  logical assignment and destructuring targets still reject call targets
+  (tests in `tests/call_targets.rs`).
+- **Rejected:** patching or forking oxc (crates come only from crates.io,
+  D-026, and the fork would need upkeep across pins); an AST of our own
+  (D-018); parsing the call separately and splicing it in (it would miss
+  the scope analysis); a same-length rewrite (none preserves the call).

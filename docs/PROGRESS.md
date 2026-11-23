@@ -331,3 +331,18 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 8699 (+0)
 - Next: 1.6g (Annex B call-expression assignment targets), or 1.7a
   once CI runs again.
+
+## 2026-11-23 09:32 UTC — 1.6g Sloppy-mode calls as assignment targets
+- Result: merged
+- Changed: front end rewrites `f() = e`, `f() op= e`, `f()++`, `--f()`
+  and `for (f() in/of …)` in sloppy scripts so oxc accepts them, then
+  validates each site (strict, logical assignment, destructuring,
+  `super()`, optional and non-call targets stay SyntaxErrors); offsets
+  map back to the source. The compiler runs the call, then throws a
+  `ReferenceError` (`ThrowInvalidAssignment`). 21 run cases match
+  Node.js; validation rules checked by mutation. Not risky (no core,
+  unsafe or GC code); no review needed.
+- Decisions: D-045
+- Test262: 8699 (+0); failures 7 -> 0 (the 7 Annex B runs now parse and
+  are "not run" until the interpreter is hooked up)
+- Next: 1.7a once CI runs again (everything else open needs 1.7).
