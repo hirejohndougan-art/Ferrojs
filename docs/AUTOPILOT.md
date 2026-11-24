@@ -66,6 +66,26 @@ one of these files.
     diff for memory-safety, GC-rooting, soundness and spec bugs. Fix what it
     finds and re-run the gate. If it finds a problem you can't fix this run,
     don't merge.
+10a. **Which model does the work (D-048, John's request 2026-11-23).**
+    The run itself is the orchestrator. It always does, on its own model
+    (Opus): picking, claiming and sizing the task, the decision entries,
+    the gate, merging and recording, the monthly review, and every
+    independent review (step 10; start review subagents with model
+    `opus`). It also writes the code itself for **core work**: a task
+    marked `(risky)`, or one that touches `ferrojs-core`, `unsafe` code,
+    the GC or tracer, the interpreter's frame stack or dispatch loop, the
+    object and shape layouts, JIT code generation or deoptimization.
+    Everything else is **routine work** (built-ins, compiler features
+    with good Node.js and Test262 coverage, test and fuzz additions, docs,
+    the weekly report): hand the building to a subagent started with
+    model `sonnet`, with a brief that names the task, the files, the
+    relevant decisions, and the gate. When it is done, check its work
+    before merging: read the diff, confirm no test, baseline or gate
+    check was weakened or removed, and run the gate yourself. If the
+    worker's change touches anything on the core list after all, review
+    it as core work (step 10) or redo it. Never use the `fable` model, for
+    the run or for any subagent. Use `haiku` only for trivial lookups
+    such as reading CI status.
 11. **Merge.** Rebase on `origin/main`, re-run the gate if anything changed,
     then fast-forward `main` and push. Delete the branch.
 12. **Record.** In the same push or a follow-up commit:
