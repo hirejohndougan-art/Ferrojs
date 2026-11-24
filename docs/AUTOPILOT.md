@@ -66,26 +66,37 @@ one of these files.
     diff for memory-safety, GC-rooting, soundness and spec bugs. Fix what it
     finds and re-run the gate. If it finds a problem you can't fix this run,
     don't merge.
-10a. **Which model does the work (D-048, John's request 2026-11-23).**
-    The run itself is the orchestrator. It always does, on its own model
-    (Opus): picking, claiming and sizing the task, the decision entries,
-    the gate, merging and recording, the monthly review, and every
-    independent review (step 10; start review subagents with model
-    `opus`). It also writes the code itself for **core work**: a task
-    marked `(risky)`, or one that touches `ferrojs-core`, `unsafe` code,
-    the GC or tracer, the interpreter's frame stack or dispatch loop, the
-    object and shape layouts, JIT code generation or deoptimization.
-    Everything else is **routine work** (built-ins, compiler features
-    with good Node.js and Test262 coverage, test and fuzz additions, docs,
-    the weekly report): hand the building to a subagent started with
-    model `sonnet`, with a brief that names the task, the files, the
-    relevant decisions, and the gate. When it is done, check its work
-    before merging: read the diff, confirm no test, baseline or gate
-    check was weakened or removed, and run the gate yourself. If the
-    worker's change touches anything on the core list after all, review
-    it as core work (step 10) or redo it. Never use the `fable` model, for
-    the run or for any subagent. Use `haiku` only for trivial lookups
-    such as reading CI status.
+10a. **Which model does the work (D-049, John's request 2026-11-23;
+    supersedes D-048).** Runs use Sonnet 5.5 for as long as the work
+    allows, and do **routine work** only: built-ins, compiler features
+    with good Node.js and Test262 coverage, the command-line tool and
+    embedding API, test, fuzz and benchmark additions, docs, reports.
+    **Core work** waits for a stronger model: a task marked `(risky)`, or
+    one that touches `ferrojs-core`, `unsafe` code, the GC or tracer, the
+    interpreter's frame stack, dispatch loop or anything that allocates
+    cells while running code, the object and shape layouts, JIT code
+    generation or deoptimization, or the monthly review's re-planning.
+    - When picking a task (step 4), skip core tasks and take the first
+      routine one. If a routine task turns out to need core changes,
+      stop, push the branch, set the task back to `[ ]` with a note, and
+      treat it as core.
+    - If only core tasks are available (everything else done, claimed or
+      blocked), don't start one. Check the top of `docs/ROADMAP.md` for
+      the line `**Needs John: a stronger model**`. If it isn't there, add
+      it (date, the core task(s) waiting, and why each is core), push,
+      and send John a push notification: "FerroJS needs Opus for <task>:
+      <one-line reason>. Switch the FerroJS autopilot and Sunday marathon
+      scheduled tasks to Opus to continue." If the line is already there,
+      don't notify again. Then do a useful routine side task if there is
+      one (tests, docs, fuzz targets), or record a short progress entry
+      and stop.
+    - When a run on a stronger model (Opus) starts and finds that line,
+      it does the core work as usual and removes the line once no core
+      task is waiting.
+    - Independent reviews (step 10) still happen for any change on the
+      core list; a Sonnet run that finds it needs one has hit core work
+      and follows the rule above instead of merging.
+    - Never use the `fable` model, for a run or a subagent.
 11. **Merge.** Rebase on `origin/main`, re-run the gate if anything changed,
     then fast-forward `main` and push. Delete the branch.
 12. **Record.** In the same push or a follow-up commit:

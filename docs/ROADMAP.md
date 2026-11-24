@@ -7,6 +7,8 @@ run-sized tasks; the monthly review breaks down the next one.
 Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
 `(risky)` means an independent review is required before merging.
 `needs: X.Y` lists tasks that must be done first.
+Routine and core work, and which model may do which: `docs/AUTOPILOT.md`
+step 10a (D-049).
 
 ## Timeline targets (from the plan; rough)
 
