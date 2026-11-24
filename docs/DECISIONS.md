@@ -1071,3 +1071,8 @@ planning document and gets logged here as each is implemented.
   and to decide himself when to switch.
 - **Rejected:** a Sonnet run delegating core work to an Opus subagent on
   its own (John asked to be told, not to switch automatically).
+
+## D-050 (reserved) Strings and globals in the interpreter
+- **Status:** written on branch `auto/2026-11-24-interp-strings` (task
+  1.7c); the full entry lands when that branch merges after 1.7a's Miri
+  run. Don't reuse the number.
