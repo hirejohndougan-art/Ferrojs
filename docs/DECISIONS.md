@@ -1086,3 +1086,38 @@ planning document and gets logged here as each is implemented.
   Every `Vm` touches its whole stack (8 MB by default) when created.
 - **Merging:** the branch contains 1.7a, which changes `ferrojs-core`;
   it merges after a passing Miri run.
+
+## D-048 Opus for core work and reviews, Sonnet for routine work, never Fable
+- **Status:** Superseded by D-049 (same day). Was: Accepted (John, 2026-11-23; recorded by the autopilot). An
+  owner decision, so it changes AUTOPILOT.md outside a monthly review.
+- **Choice:** each run stays on Opus as the orchestrator: it picks and
+  sizes tasks, makes decisions, runs the gate, merges and records, does
+  the monthly review and all independent reviews, and writes core code
+  itself (risky tasks, `ferrojs-core`, `unsafe`, GC and tracer, the
+  interpreter's frame stack and dispatch, object and shape layouts, JIT
+  and deoptimization). Routine building (built-ins, well-tested compiler
+  features, tests, docs, the weekly report) goes to a Sonnet subagent,
+  and the orchestrator checks the diff for weakened tests or gate checks
+  and runs the gate itself before merging. The daily report task runs on
+  Sonnet. The Fable model is never used. Haiku only for trivial lookups.
+- **Why:** core bugs (rooting, memory layout) are silent and expensive;
+  routine work is checked quickly by Test262 and the Node.js comparisons,
+  so a cheaper model there saves usage without losing safety.
+- **Rejected:** one model for everything (either too costly or too risky
+  for core work); a cheaper orchestrator delegating core work to Opus
+  (the orchestrator decides what is core and checks the result, so it
+  needs the stronger model).
+
+## D-049 Sonnet 5.5 for as long as possible; ask John before core work
+- **Status:** Accepted (John, 2026-11-23; recorded by the autopilot).
+  Supersedes D-048.
+- **Choice:** the FerroJS autopilot, the Sunday marathon and the daily
+  update run on Sonnet 5.5. Runs do routine work only and skip core work
+  (the list in AUTOPILOT.md step 10a). When only core tasks are left,
+  the run marks `**Needs John: a stronger model**` at the top of the
+  roadmap and notifies John once; John then switches the scheduled
+  tasks to Opus. The Fable model is never used.
+- **Why:** John wants the cheaper model for as long as the work allows,
+  and to decide himself when to switch.
+- **Rejected:** a Sonnet run delegating core work to an Opus subagent on
+  its own (John asked to be told, not to switch automatically).

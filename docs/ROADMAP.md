@@ -7,6 +7,8 @@ run-sized tasks; the monthly review breaks down the next one.
 Status marks: `[ ]` to do · `[~]` in progress · `[x]` done · `[!]` stuck.
 `(risky)` means an independent review is required before merging.
 `needs: X.Y` lists tasks that must be done first.
+Routine and core work, and which model may do which: `docs/AUTOPILOT.md`
+step 10a (D-049).
 
 ## Timeline targets (from the plan; rough)
 
@@ -140,7 +142,8 @@ Order matters: each task builds on the ones above it.
     proper tail calls, returns, exception unwinding, interrupts, stack
     overflow; every compiled function case matches the toy context, also
     under GC stress. needs: 1.3b, 1.6d, 1.7a
-  - [ ] 1.7c Strings and globals in the interpreter: string values beyond
+  - [~] (claimed 2026-11-24 07:20 UTC; stacked on `auto/2026-11-23-interpreter`)
+    1.7c Strings and globals in the interpreter: string values beyond
     atoms (concatenation, Number::toString, comparisons), the global
     object and global lexical environment; the script cases (1.6e, 1.6f)
     match Node.js. needs: 1.7b, 1.8b
