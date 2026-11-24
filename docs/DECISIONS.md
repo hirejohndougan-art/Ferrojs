@@ -1032,6 +1032,11 @@ planning document and gets logged here as each is implemented.
   a dedicated `JumpIfNotUndefined` op (worth it only once benchmarks
   show default-heavy code).
 
+## D-047 (reserved) The interpreter: frame stack anchor, function and environment cells
+- **Status:** written on branch `auto/2026-11-23-interpreter` (task 1.7b);
+  the full entry replaces this line when that branch merges after 1.7a's
+  Miri run. Don't reuse the number.
+
 ## D-048 Opus for core work and reviews, Sonnet for routine work, never Fable
 - **Status:** Accepted (John, 2026-11-23; recorded by the autopilot). An
   owner decision, so it changes AUTOPILOT.md outside a monthly review.
