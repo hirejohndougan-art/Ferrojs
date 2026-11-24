@@ -1121,3 +1121,53 @@ planning document and gets logged here as each is implemented.
   and to decide himself when to switch.
 - **Rejected:** a Sonnet run delegating core work to an Opus subagent on
   its own (John asked to be told, not to switch automatically).
+
+## D-050 Strings and globals in the interpreter
+- **Status:** Accepted (autopilot, 2026-11-24)
+- **Choice:** (task 1.7c) String constants stay atoms; concatenation and
+  ToString make flat, non-interned string cells (Latin-1 or UTF-16, as in
+  `string.rs`), so strict and loose equality and the relational
+  operators compare strings by code units, with a reference check first.
+  No ropes yet (ARCHITECTURE.md §5.4: Phase 2); a result longer than
+  2^28 units throws (a `RangeError` once error objects exist). The global
+  object is an ordinary object with prototype `null` until the built-ins
+  (1.13) give it `Object.prototype`; `var` and function declarations are
+  writable, enumerable, non-configurable properties; implicit sloppy
+  globals are ordinary `[[Set]]` (configurable) properties; and a `var`
+  for a name that already exists leaves the property alone
+  (CreateGlobalVarBinding; the current spec keeps no `[[VarNames]]`
+  list, so a later `let` may shadow such an implicit global, as Node.js
+  allows).
+  The global lexical environment is an `Env` cell without a parent,
+  grown by doubling and copying, with names and `const` flags in a Rust
+  `HashMap` keyed by code units (keys survive a future moving GC; the
+  global load paths get inline caches later). Both live in `Global`s in
+  the `Vm`; `Vm::run_script` runs scripts in order against them.
+  Property writes root the value and key in a short nested scope.
+- **Testing:** the compiler's script cases (scripts and globals,
+  strings, default parameters; moved to a shared file) run on the
+  interpreter, plain and under GC stress, and must match Node.js. New
+  cases: run-time strings compared with constants, `switch` on a built
+  string, the implicit-global-then-`var`-then-`let` sequence (the toy
+  context's `var` wrongly made the property non-configurable; fixed),
+  environment growth across scripts with TDZ preserved. Mutations
+  (identity-only string equality, growth without copying) are caught.
+- **Known gap:** function declarations use `GlobalKind::Var`, so a
+  function declared over an existing configurable property keeps it
+  configurable (CreateGlobalFunctionBinding would make it
+  non-configurable); only observable through a later `let` of the same
+  name. Fix when the compiler gives functions their own kind.
+  Declarations are checked and created one name at a time, not all
+  checked first as GlobalDeclarationInstantiation requires: a script
+  that fails a later check leaves its earlier bindings behind (V8 does
+  the same, so the Node.js comparison can't catch it; Test262 may).
+  Global lookups read only the global object's own properties, which
+  is right while its prototype is `null`; 1.13 must switch LoadName,
+  StoreName and typeof to HasProperty/[[Get]] when it adds
+  `Object.prototype`, and must let symbols and BigInts be stored
+  (`rooted` refuses `Kind::Other` today).
+- **Rejected:** atoms for every run-time string (interning cost on each
+  concatenation, and the atom table is strong in Phase 1: it would never
+  free them); the global lexical bindings as properties of a second
+  object (object slots can't hold the TDZ marker); keying the lexical
+  table by atom offset (breaks when the collector moves cells).

@@ -15,13 +15,23 @@
 //! - **Environments** are `Env` cells: parent and slots. The current one
 //!   is the frame's environment slot, so it is rooted with the frame.
 //! - Every value the interpreter holds across an allocation lives in a
-//!   stack slot; nothing else needs rooting.
+//!   stack slot or is rooted in a short nested scope; nothing else needs
+//!   rooting.
+//! - **Strings** (task 1.7c, D-050): constants are atoms; concatenation and
+//!   ToString make flat, non-interned string cells, so strings compare by
+//!   contents (code units), not by reference.
+//! - **Globals** (task 1.7c, D-050): the global object is an ordinary
+//!   object (prototype `null` until the built-ins, 1.13); `var` and
+//!   function declarations are its non-configurable properties, implicit
+//!   sloppy globals its configurable ones. The global lexical environment
+//!   (`let`, `const`) is an `Env` cell, grown by copying, with the names
+//!   and `const` flags in a Rust table ([`Globals`]).
 //!
-//! Strings beyond constants, globals other than an empty global object,
-//! and error objects come with 1.7c and 1.13: until then a thrown error is
-//! `undefined` with its [`ErrorKind`] recorded, as in the toy context.
+//! Error objects come with 1.13: until then a thrown error is `undefined`
+//! with its [`ErrorKind`] recorded, as in the toy context.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::atomic::Ordering;
@@ -37,7 +47,8 @@ use ferrojs_core::gc::{Global, Scope};
 use ferrojs_core::{Gc, NoGc};
 use ferrojs_value::{HeapRef, Kind, Value};
 
-use crate::{string, value_ref, CellKind, Tables, Vm};
+use crate::shape::Attrs;
+use crate::{object, string, value_ref, CellKind, JsString, Object, RootedValue, Tables, Vm};
 
 /// Frame stack slots by default: 8 MB (ARCHITECTURE.md §3.1).
 pub const DEFAULT_STACK_SLOTS: u32 = 1 << 20;
@@ -50,6 +61,11 @@ const RESERVE: u32 = 64;
 pub const MAX_ENV_SLOTS: u32 = 1 << 16;
 /// `caller fp` of the entry frame.
 const NO_CALLER: u64 = u32::MAX as u64;
+/// The longest string concatenation or ToString may make, in UTF-16 code
+/// units; longer is a throw (a `RangeError` once error objects exist).
+pub const MAX_STRING_UNITS: usize = 1 << 28;
+/// Slots of the first global lexical environment cell.
+const FIRST_LEXICAL_SLOTS: u32 = 8;
 
 // Frame header slots (fp + n).
 const CALLEE: u32 = 0;
@@ -156,6 +172,7 @@ pub(crate) struct State {
     templates: Vec<Template>,
     /// Atoms for the `typeof` results, by [`TypeName`].
     type_names: Vec<Value>,
+    globals: Option<Globals>,
 }
 
 impl State {
@@ -165,8 +182,26 @@ impl State {
             anchor: None,
             templates: Vec::new(),
             type_names: Vec::new(),
+            globals: None,
         }
     }
+}
+
+/// The global environment (ECMA-262 §9.1.1.4): the global object for
+/// `var`s, functions and implicit globals, and the global lexical
+/// environment for `let` and `const`.
+pub(crate) struct Globals {
+    object: Global<Object>,
+    /// An `Env` cell (no parent) whose first `names.len()` slots are the
+    /// lexical bindings; the TDZ marker until initialized.
+    lexical: Global<EnvCell>,
+    names: HashMap<Vec<u16>, Binding>,
+}
+
+#[derive(Clone, Copy)]
+struct Binding {
+    slot: u32,
+    constant: bool,
 }
 
 /// Why a function couldn't be loaded.
@@ -277,6 +312,7 @@ impl Vm {
                 stack: &stack,
                 templates: &mut interp.templates,
                 type_names: &interp.type_names,
+                globals: interp.globals.as_mut().expect("made by prepare"),
                 interrupt: interrupt.as_ref(),
                 fp: 0,
                 tmpl: t,
@@ -288,6 +324,34 @@ impl Vm {
             stack.top.set(base_top);
             out
         })
+    }
+
+    /// Loads script `f` (from `compile_script`) and runs it. Scripts run
+    /// in order share the global object and the global lexical
+    /// environment, like several `<script>` elements.
+    pub fn run_script(&mut self, f: &CompiledFunction) -> Result<Outcome, LoadError> {
+        let t = self.load(f)?;
+        Ok(self.call_template(t, Value::UNDEFINED, &[]))
+    }
+
+    /// The value of global `name`: its lexical binding if it has one (the
+    /// TDZ marker if uninitialized), else the global object's own
+    /// property. A heap reference in it is valid until the next
+    /// allocation.
+    pub fn global(&self, name: &str) -> Option<Value> {
+        let g = self.interp.globals.as_ref()?;
+        let nogc = self.cx.nogc();
+        let units: Vec<u16> = name.encode_utf16().collect();
+        if let Some(b) = g.names.get(&units) {
+            return Some(lexical_get(nogc, g, b.slot));
+        }
+        let key = self.tables.atoms.get(&units)?.get(nogc);
+        object::get_own(nogc, g.object.get(nogc), key).map(|(v, _)| v)
+    }
+
+    /// The code units of string value `v`, if it is a live string.
+    pub fn string_units(&self, v: Value) -> Option<Vec<u16>> {
+        units_of(self.cx.nogc(), v)
     }
 
     /// Frames' worth of slots in use (for tests: back to the base after a
@@ -346,12 +410,30 @@ fn load_tree(
     Ok(index)
 }
 
-/// Makes the stack anchor and the `typeof` atoms on first use.
+/// Makes the stack anchor, the global environment and the `typeof`
+/// atoms on first use.
 fn prepare(s: &mut Scope<'_>, tables: &mut Tables, st: &mut State) -> Result<(), ()> {
     if st.anchor.is_none() {
         let a = s.alloc::<StackAnchor>(8).map_err(|_| ())?.bind(s.nogc());
         s.nogc().write_u64(a, 0, CellKind::Stack as u64);
         st.anchor = Some(s.nogc().global(a));
+    }
+    if st.globals.is_none() {
+        let o = object::new_object(s, tables, None, object::DEFAULT_INLINE)
+            .map_err(|_| ())?
+            .bind(s.nogc());
+        let object = s.nogc().global(o);
+        let e = s
+            .alloc::<EnvCell>(ENV_SLOTS + 8 * FIRST_LEXICAL_SLOTS)
+            .map_err(|_| ())?
+            .bind(s.nogc());
+        let nogc = s.nogc();
+        init_env(nogc, e, FIRST_LEXICAL_SLOTS, None);
+        st.globals = Some(Globals {
+            object,
+            lexical: nogc.global(e),
+            names: HashMap::new(),
+        });
     }
     if st.type_names.is_empty() {
         for name in TYPE_NAMES {
@@ -376,6 +458,42 @@ fn new_function(s: &mut Scope<'_>, t: u32, env: Option<&dyn Fn() -> u32>) -> Res
     let env = env.map_or(0, |e| e());
     nogc.write_ref(f, FUNCTION_ENV, nogc.handle::<EnvCell>(env));
     Ok(Value::object(HeapRef(f.offset())))
+}
+
+/// Fills a new environment cell of `count` slots with `undefined`.
+fn init_env(nogc: NoGc<'_>, e: Gc<'_, EnvCell>, count: u32, parent: Option<Gc<'_, EnvCell>>) {
+    nogc.write_u64(e, 0, CellKind::Env as u64 | (u64::from(count) << 32));
+    nogc.write_ref(e, ENV_PARENT, parent);
+    for i in 0..count {
+        nogc.write_u64(e, ENV_SLOTS + 8 * i, Value::UNDEFINED.to_bits());
+    }
+}
+
+/// Global lexical binding `slot`'s value.
+fn lexical_get(nogc: NoGc<'_>, g: &Globals, slot: u32) -> Value {
+    let bits = nogc.read_u64(g.lexical.get(nogc), ENV_SLOTS + 8 * slot);
+    Value::from_bits_checked(bits).unwrap_or(Value::UNINITIALIZED)
+}
+
+/// The code units of string value `v`, if it is a live string cell.
+fn units_of(nogc: NoGc<'_>, v: Value) -> Option<Vec<u16>> {
+    let Kind::String(HeapRef(r)) = v.kind() else {
+        return None;
+    };
+    let s = nogc.handle::<JsString>(r)?;
+    (nogc.read_u8(s, 0) == CellKind::String as u8).then(|| string::units(nogc, s))
+}
+
+/// `v` rooted in scope `n` (for storing it after allocations), or `None`
+/// for values a property can't hold (the TDZ marker, dead references).
+fn rooted<'n>(n: &Scope<'n>, v: Value) -> Option<RootedValue<'n>> {
+    let nogc = n.nogc();
+    match v.kind() {
+        Kind::String(HeapRef(r)) => Some(RootedValue::String(n.root(nogc.handle(r)?))),
+        Kind::Object(HeapRef(r)) => Some(RootedValue::Object(n.root(nogc.handle(r)?))),
+        Kind::Other(..) | Kind::Uninitialized => None,
+        _ => Some(RootedValue::Primitive(v)),
+    }
 }
 
 /// The cell `v` refers to if it is a live cell of `kind`.
@@ -412,6 +530,7 @@ struct Interp<'r, 's> {
     stack: &'r FrameStack,
     templates: &'r mut Vec<Template>,
     type_names: &'r [Value],
+    globals: &'r mut Globals,
     interrupt: &'r std::sync::atomic::AtomicBool,
     fp: u32,
     tmpl: u32,
@@ -476,16 +595,189 @@ impl Interp<'_, '_> {
     }
 
     fn numbers(&mut self, a: Value, b: Value, f: impl FnOnce(f64, f64) -> f64) -> Completion {
-        match (to_number(a), to_number(b)) {
+        match (self.num(a), self.num(b)) {
             (Some(x), Some(y)) => Ok(Value::number(f(x, y))),
             _ => self.fail(),
         }
     }
 
     fn predicate(&mut self, a: Value, b: Value, f: impl FnOnce(f64, f64) -> bool) -> Completion {
-        match (to_number(a), to_number(b)) {
+        match (self.num(a), self.num(b)) {
             (Some(x), Some(y)) => Ok(Value::from_bool(f(x, y))),
             _ => self.fail(),
+        }
+    }
+
+    /// The code units of string value `v`.
+    fn units(&self, v: Value) -> Option<Vec<u16>> {
+        units_of(self.s.nogc(), v)
+    }
+
+    /// The length of string value `v`, without copying it.
+    fn str_len(&self, v: Value) -> Option<u32> {
+        let Kind::String(HeapRef(r)) = v.kind() else {
+            return None;
+        };
+        let nogc = self.s.nogc();
+        let s = nogc.handle::<JsString>(r)?;
+        (nogc.read_u8(s, 0) == CellKind::String as u8).then(|| string::len(nogc, s))
+    }
+
+    /// Whether `a` and `b` are strings with the same contents.
+    fn same_string(&self, a: Value, b: Value) -> bool {
+        if a.is_string() && a == b {
+            return true;
+        }
+        match (self.str_len(a), self.str_len(b)) {
+            (Some(x), Some(y)) if x == y => {
+                matches!((self.units(a), self.units(b)), (Some(x), Some(y)) if x == y)
+            }
+            _ => false,
+        }
+    }
+
+    /// ToNumber for primitives other than symbols (strings by
+    /// StringToNumber); `None` for objects until ToPrimitive exists.
+    fn num(&self, v: Value) -> Option<f64> {
+        if v.is_string() {
+            // A lone surrogate becomes U+FFFD, which is just as invalid in
+            // a StringNumericLiteral: the result is NaN either way.
+            return self
+                .units(v)
+                .map(|u| number::string_to_number(&String::from_utf16_lossy(&u)));
+        }
+        to_number(v)
+    }
+
+    /// ToString for primitives other than symbols, as code units.
+    fn text(&self, v: Value) -> Option<Vec<u16>> {
+        let t = match v.kind() {
+            Kind::String(_) => return self.units(v),
+            Kind::Undefined => "undefined".to_owned(),
+            Kind::Null => "null".to_owned(),
+            Kind::Bool(b) => b.to_string(),
+            _ => number::to_js_string(v.as_number()?),
+        };
+        Some(t.encode_utf16().collect())
+    }
+
+    /// Code-unit order of two strings, if both are.
+    fn string_order(&self, a: Value, b: Value) -> Option<std::cmp::Ordering> {
+        if !(a.is_string() && b.is_string()) {
+            return None;
+        }
+        Some(self.units(a)?.cmp(&self.units(b)?))
+    }
+
+    /// A new (not interned) string cell holding `units`.
+    fn make_string(&mut self, units: &[u16]) -> Completion {
+        if units.len() > MAX_STRING_UNITS {
+            return self.fail();
+        }
+        match string::alloc_units(self.s, units) {
+            Ok(g) => Ok(Value::string(HeapRef(g.bind(self.s.nogc()).offset()))),
+            Err(_) => Err(self.out_of_memory()),
+        }
+    }
+
+    /// The atom offset and code units of a global name (a string
+    /// constant, so an atom); a throw for anything else.
+    fn name_key(&mut self, name: Value) -> Result<(u32, Vec<u16>), Thrown> {
+        let nogc = self.s.nogc();
+        if let Kind::String(HeapRef(r)) = name.kind() {
+            if let Some(k) = nogc.handle::<JsString>(r) {
+                if nogc.read_u8(k, 0) == CellKind::String as u8 && string::is_atom(nogc, k) {
+                    return Ok((r, string::units(nogc, k)));
+                }
+            }
+        }
+        self.fail()
+    }
+
+    /// The global lexical binding named `units`.
+    fn lexical(&self, units: &[u16]) -> Option<Binding> {
+        self.globals.names.get(units).copied()
+    }
+
+    fn lexical_value(&self, b: Binding) -> Value {
+        lexical_get(self.s.nogc(), self.globals, b.slot)
+    }
+
+    fn lexical_set(&self, slot: u32, v: Value) {
+        let nogc = self.s.nogc();
+        store(
+            nogc,
+            self.globals.lexical.get(nogc),
+            ENV_SLOTS + 8 * slot,
+            v,
+        );
+    }
+
+    /// Adds an uninitialized global lexical binding, growing the
+    /// environment cell (by copying) when it is full.
+    fn lexical_add(&mut self, units: Vec<u16>, constant: bool) -> Result<(), Thrown> {
+        let Ok(slot) = u32::try_from(self.globals.names.len()) else {
+            return self.fail();
+        };
+        let nogc = self.s.nogc();
+        let cap = (nogc.read_u64(self.globals.lexical.get(nogc), 0) >> 32) as u32;
+        if slot >= cap {
+            let Some(new_cap) = cap.checked_mul(2).filter(|&c| {
+                c.checked_mul(8)
+                    .and_then(|b| b.checked_add(ENV_SLOTS))
+                    .is_some()
+            }) else {
+                return self.fail();
+            };
+            // The old cell stays reachable through its global until the
+            // new one replaces it.
+            let e = match self.s.alloc::<EnvCell>(ENV_SLOTS + 8 * new_cap) {
+                Ok(e) => e.bind(self.s.nogc()),
+                Err(_) => return Err(self.out_of_memory()),
+            };
+            let nogc = self.s.nogc();
+            init_env(nogc, e, new_cap, None);
+            let old = self.globals.lexical.get(nogc);
+            for i in 0..cap {
+                let v = Value::from_bits_checked(nogc.read_u64(old, ENV_SLOTS + 8 * i))
+                    .unwrap_or(Value::UNINITIALIZED);
+                store(nogc, e, ENV_SLOTS + 8 * i, v);
+            }
+            self.globals.lexical.set(nogc, e);
+        }
+        self.lexical_set(slot, Value::UNINITIALIZED);
+        self.globals.names.insert(units, Binding { slot, constant });
+        Ok(())
+    }
+
+    /// The global object's own property `key` (an atom offset).
+    fn global_own(&self, key: u32) -> Option<(Value, Attrs)> {
+        let nogc = self.s.nogc();
+        object::get_own(nogc, self.globals.object.get(nogc), nogc.handle(key)?)
+    }
+
+    /// Sets (`attrs` `None`: OrdinarySet) or defines the global object's
+    /// property `key` (an atom offset) to `v`.
+    fn global_put(&mut self, key: u32, v: Value, attrs: Option<Attrs>) -> Result<(), Thrown> {
+        let object = &self.globals.object;
+        let done = self.s.scope(|n| {
+            let nogc = n.nogc();
+            let o = n.root(object.get(nogc));
+            let k = n.root(nogc.handle::<JsString>(key).expect("names are live atoms"));
+            let Some(v) = rooted(n, v) else {
+                return Ok(false);
+            };
+            match attrs {
+                None => object::set(n, o, k, v),
+                Some(a) => object::define(n, o, k, v, a),
+            }
+        });
+        match done {
+            Ok(true) => Ok(()),
+            // Refused (nothing on the global object is non-writable yet)
+            // or a value no property can hold.
+            Ok(false) => self.fail(),
+            Err(_) => Err(self.out_of_memory()),
         }
     }
 
@@ -848,25 +1140,99 @@ impl OpCtx for Interp<'_, '_> {
     fn this_value(&self) -> Value {
         Value::from_bits_checked(self.slot(THIS)).unwrap_or(Value::UNDEFINED)
     }
-    // The global object is empty until 1.7c.
-    fn rt_load_name(&mut self, _name: Value) -> Completion {
-        Err(self.error(ErrorKind::UnresolvableReference))
-    }
-    fn rt_store_name(&mut self, _name: Value, _v: Value, strict: bool) -> Result<(), Thrown> {
-        if strict {
-            Err(self.error(ErrorKind::UnresolvableReference))
-        } else {
-            self.fail()
+    fn rt_load_name(&mut self, name: Value) -> Completion {
+        let (key, units) = self.name_key(name)?;
+        if let Some(b) = self.lexical(&units) {
+            let v = self.lexical_value(b);
+            if v.is_uninitialized() {
+                return Err(self.error(ErrorKind::UninitializedBinding));
+            }
+            return Ok(v);
+        }
+        match self.global_own(key) {
+            Some((v, _)) => Ok(v),
+            None => Err(self.error(ErrorKind::UnresolvableReference)),
         }
     }
-    fn rt_declare_global(&mut self, _name: Value, _kind: GlobalKind) -> Result<(), Thrown> {
-        self.fail()
+    fn rt_store_name(&mut self, name: Value, v: Value, strict: bool) -> Result<(), Thrown> {
+        let (key, units) = self.name_key(name)?;
+        if let Some(b) = self.lexical(&units) {
+            if self.lexical_value(b).is_uninitialized() {
+                return Err(self.error(ErrorKind::UninitializedBinding));
+            }
+            if b.constant {
+                return Err(self.error(ErrorKind::ConstAssignment));
+            }
+            if v.is_uninitialized() {
+                return self.fail();
+            }
+            self.lexical_set(b.slot, v);
+            return Ok(());
+        }
+        if strict && self.global_own(key).is_none() {
+            return Err(self.error(ErrorKind::UnresolvableReference));
+        }
+        // Sloppy code creates a configurable property (an implicit
+        // global).
+        self.global_put(key, v, None)
     }
-    fn rt_init_global(&mut self, _name: Value, _v: Value) -> Result<(), Thrown> {
-        self.fail()
+    fn rt_declare_global(&mut self, name: Value, kind: GlobalKind) -> Result<(), Thrown> {
+        let (key, units) = self.name_key(name)?;
+        let lexical = self.lexical(&units).is_some();
+        match kind {
+            GlobalKind::Var => {
+                if lexical {
+                    return Err(self.error(ErrorKind::GlobalRedeclaration));
+                }
+                // CreateGlobalVarBinding: an existing property (an
+                // implicit global, say) stays as it is.
+                if self.global_own(key).is_none() {
+                    let attrs = Attrs(Attrs::WRITABLE.0 | Attrs::ENUMERABLE.0);
+                    self.global_put(key, Value::UNDEFINED, Some(attrs))?;
+                }
+                Ok(())
+            }
+            GlobalKind::Let | GlobalKind::Const => {
+                // HasRestrictedGlobalProperty: a non-configurable property
+                // (a declared var) can't be shadowed; an implicit global
+                // can.
+                let restricted = self
+                    .global_own(key)
+                    .is_some_and(|(_, a)| !a.contains(Attrs::CONFIGURABLE));
+                if lexical || restricted {
+                    return Err(self.error(ErrorKind::GlobalRedeclaration));
+                }
+                self.lexical_add(units, kind == GlobalKind::Const)
+            }
+        }
+    }
+    fn rt_init_global(&mut self, name: Value, v: Value) -> Result<(), Thrown> {
+        let (_, units) = self.name_key(name)?;
+        match self.lexical(&units) {
+            Some(b) if !v.is_uninitialized() => {
+                self.lexical_set(b.slot, v);
+                Ok(())
+            }
+            _ => self.fail(),
+        }
     }
 
     fn rt_add(&mut self, a: Value, b: Value) -> Completion {
+        if a.is_string() || b.is_string() {
+            // Check the length before copying anything (a number or other
+            // primitive's text is short).
+            let len = |v: Value| self.str_len(v).map_or(0, |l| l as usize);
+            if len(a) + len(b) > MAX_STRING_UNITS {
+                return self.fail();
+            }
+            return match (self.text(a), self.text(b)) {
+                (Some(mut x), Some(y)) => {
+                    x.extend_from_slice(&y);
+                    self.make_string(&x)
+                }
+                _ => self.fail(),
+            };
+        }
         self.numbers(a, b, |x, y| x + y)
     }
     fn rt_sub(&mut self, a: Value, b: Value) -> Completion {
@@ -876,20 +1242,31 @@ impl OpCtx for Interp<'_, '_> {
         self.numbers(a, b, |x, y| x * y)
     }
     fn rt_less_than(&mut self, a: Value, b: Value) -> Completion {
+        if let Some(o) = self.string_order(a, b) {
+            return Ok(Value::from_bool(o.is_lt()));
+        }
         self.predicate(a, b, |x, y| x < y)
     }
     fn rt_strict_equal(&mut self, a: Value, b: Value) -> bool {
-        // Atoms and cells compare by identity; numbers are handled inline.
-        a == b
+        // Numbers are handled inline. Strings compare by contents (only
+        // atoms are interned); everything else by identity.
+        a == b || self.same_string(a, b)
     }
     fn rt_numeric(&mut self, op: NumericOp, a: Value, b: Value) -> Completion {
         self.numbers(a, b, |x, y| number::numeric(op, x, y))
     }
     fn rt_compare(&mut self, op: CompareOp, a: Value, b: Value) -> Completion {
+        if let Some(o) = self.string_order(a, b) {
+            return Ok(Value::from_bool(match op {
+                CompareOp::Greater => o.is_gt(),
+                CompareOp::LessEq => o.is_le(),
+                CompareOp::GreaterEq => o.is_ge(),
+            }));
+        }
         self.predicate(a, b, |x, y| number::compare(op, x, y))
     }
     fn rt_unary(&mut self, op: UnaryOp, a: Value) -> Completion {
-        match to_number(a) {
+        match self.num(a) {
             Some(x) => Ok(Value::number(number::unary(op, x))),
             None => self.fail(),
         }
@@ -898,10 +1275,14 @@ impl OpCtx for Interp<'_, '_> {
         if a.is_nullish() || b.is_nullish() {
             return Ok(Value::from_bool(a.is_nullish() && b.is_nullish()));
         }
-        // Two cells, or two strings (only atoms exist so far, and atoms
-        // are interned), compare by identity.
+        // Two strings compare by contents, two cells by identity; an
+        // object against a primitive needs ToPrimitive (with the
+        // built-ins); any other mix compares as numbers.
+        if a.is_string() && b.is_string() {
+            return Ok(Value::from_bool(self.same_string(a, b)));
+        }
         let object = |v: Value| matches!(v.kind(), Kind::Object(_));
-        if (object(a) && object(b)) || (a.is_string() && b.is_string()) {
+        if object(a) && object(b) {
             return Ok(Value::from_bool(a == b));
         }
         self.predicate(a, b, |x, y| x == y)
@@ -934,11 +1315,24 @@ impl OpCtx for Interp<'_, '_> {
         };
         self.type_names[name as usize]
     }
-    fn rt_typeof_name(&mut self, _name: Value) -> Completion {
-        // Nothing is declared in the (empty) global object yet.
-        Ok(self.type_names[TypeName::Undefined as usize])
+    fn rt_typeof_name(&mut self, name: Value) -> Completion {
+        let (key, units) = self.name_key(name)?;
+        let v = match self.lexical(&units) {
+            Some(b) => {
+                let v = self.lexical_value(b);
+                if v.is_uninitialized() {
+                    return Err(self.error(ErrorKind::UninitializedBinding));
+                }
+                v
+            }
+            None => self.global_own(key).map_or(Value::UNDEFINED, |(v, _)| v),
+        };
+        Ok(self.rt_typeof(v))
     }
-    fn rt_to_string(&mut self, _v: Value) -> Completion {
-        self.fail()
+    fn rt_to_string(&mut self, v: Value) -> Completion {
+        match self.text(v) {
+            Some(units) => self.make_string(&units),
+            None => self.fail(),
+        }
     }
 }

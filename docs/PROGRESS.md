@@ -381,3 +381,24 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-047
 - Test262: 8699 (+0)
 - Next: 1.7c (strings and globals), stacked on this branch.
+
+## 2026-11-24 08:40 UTC — 1.7c Strings and globals in the interpreter
+- Result: done on branch `auto/2026-11-24-interp-strings` (stacked on
+  1.7b and 1.7a), not merged: 1.7a changes `ferrojs-core` and still
+  needs a Miri run. GitHub Actions still fails every job in ~3 s and
+  rustup can't reach static.rust-lang.org here.
+- Changed: run-time strings (concatenation, ToString, StringToNumber,
+  code-unit comparison and equality by contents); the global object and
+  global lexical environment; `Vm::run_script`, `Vm::global`. The script
+  cases moved to a shared file and run on the interpreter, plain and
+  under GC stress, against Node.js. Toy context fix: `var` over an
+  implicit global no longer makes it non-configurable. New benchmark
+  `interp/run.global_strings`. Independent review: no rooting or
+  memory-safety bugs; its fixes (length checks before copying, strict
+  global store cases) are in, and the spec gaps it found are recorded
+  in D-050 for 1.13.
+- Gate: everything passes except Miri (waits for CI).
+- Decisions: D-050
+- Test262: 8699 (+0)
+- Next: 1.7d (dispatch cost vs op count), stacked on this branch; or
+  1.7a's Miri run once CI works, then merge 1.7a → 1.7b → 1.7c.

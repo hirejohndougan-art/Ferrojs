@@ -444,11 +444,11 @@ impl OpCtx for ToyCtx {
                 if lexical {
                     return Err(self.error(ErrorKind::GlobalRedeclaration));
                 }
-                let slot = self
-                    .global_object
+                // CreateGlobalVarBinding: an existing property (an
+                // implicit global, say) stays configurable.
+                self.global_object
                     .entry(n)
                     .or_insert((Value::UNDEFINED, false));
-                slot.1 = false;
             }
             GlobalKind::Let | GlobalKind::Const => {
                 // HasRestrictedGlobalProperty: a declared var can't be
