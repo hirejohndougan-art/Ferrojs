@@ -510,3 +510,22 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Next: 1.8e (core: interpreter frames for getter/setter calls) on an
   Opus run; routine runs can take 1.10.
 
+## 2026-11-25 08:15 UTC — 1.8e Getter and setter calls (John asked to continue)
+- Result: merged
+- Changed: property reads and writes that meet an accessor leave the
+  call in the interpreter (`Detour::Call` → new `Flow::Accessor`); the
+  dispatch loop makes it like a call from the property instruction (a
+  getter's result to `dst`, a setter's dropped through a `DISCARD` return
+  slot; host functions too). Object literals compile `get`/`set` members
+  (new ops `DefineGetter`/`DefineSetter`). 22 Node-checked accessor
+  cases on the interpreter (plain and GC stress), host functions as
+  accessors, refusal tests for index keys. New benchmark
+  `interp/run.accessors`; others within 1%. Independent review: nothing
+  serious; fixed its findings (explicit `accessor_dst`, decision entry,
+  known gaps noted). Renumbered the second D-056 (model choice) to D-057.
+- Gate: all steps pass (Miri skipped: no nightly, `ferrojs-core`
+  unchanged).
+- Decisions: D-058 (D-057 renumbered)
+- Test262: 8699 (+0)
+- Next: 1.8f (lazy key table) or 1.10a, whichever is free.
+
