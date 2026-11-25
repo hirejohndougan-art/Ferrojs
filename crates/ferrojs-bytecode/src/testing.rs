@@ -644,32 +644,9 @@ impl OpCtx for ToyCtx {
         self.objects.push(Default::default());
         Ok(Value::object(HeapRef(OBJECT_BIT | i)))
     }
-    fn rt_get_property(&mut self, obj: Value, key: Value) -> Completion {
-        if obj.is_nullish() {
-            return Err(self.error(ErrorKind::NullishBase));
-        }
-        let k = self.key_text(key)?;
-        if let Some(o) = self.object_of(obj) {
-            return match self.objects[o].get(&k) {
-                Some(&v) => Ok(v),
-                // Inherited from Object.prototype once it exists (1.13).
-                None if is_proto_name(&k) => self.fail(),
-                None => Ok(Value::UNDEFINED),
-            };
-        }
-        if let Some(s) = self.string_of(obj).map(str::to_owned) {
-            if let Some(v) = self.string_property(&s, &k)? {
-                return Ok(v);
-            }
-            // An index past the end names nothing on String.prototype
-            // either; anything else needs the built-ins (1.13).
-            let units: Vec<u16> = k.encode_utf16().collect();
-            if number::array_index_of_units(&units).is_some() {
-                return Ok(Value::UNDEFINED);
-            }
-        }
-        // Numbers, booleans and functions need their prototypes (1.13).
-        self.fail()
+    fn rt_get_property(&mut self, obj: Value, key: Value) -> crate::Access {
+        // Toy objects hold data properties only: never a getter to call.
+        Ok(self.get_property(obj, key)?)
     }
     fn rt_set_property(
         &mut self,
@@ -677,34 +654,18 @@ impl OpCtx for ToyCtx {
         key: Value,
         v: Value,
         strict: bool,
+    ) -> Result<(), crate::Detour> {
+        Ok(self.set_property(obj, key, v, strict)?)
+    }
+    fn rt_define_accessor(
+        &mut self,
+        _obj: Value,
+        _key: Value,
+        _f: Value,
+        _setter: bool,
     ) -> Result<(), Thrown> {
-        if obj.is_nullish() {
-            return Err(self.error(ErrorKind::NullishBase));
-        }
-        let k = self.key_text(key)?;
-        if k == "__proto__" {
-            // The Object.prototype accessor sets the prototype (1.13).
-            return self.fail();
-        }
-        if let Some(o) = self.object_of(obj) {
-            if v.is_uninitialized() {
-                return self.fail();
-            }
-            self.objects[o].insert(k, v);
-            return Ok(());
-        }
-        match obj.kind() {
-            // A primitive base: the wrapper object is the receiver, which
-            // OrdinarySet refuses (no setters on the prototypes yet).
-            Kind::String(_) | Kind::Bool(_) | Kind::Int32(_) | Kind::Double(_) => {
-                if strict {
-                    Err(self.error(ErrorKind::PropertyRefused))
-                } else {
-                    Ok(())
-                }
-            }
-            _ => self.fail(),
-        }
+        // Accessors are the interpreter's (task 1.8e).
+        self.fail()
     }
     fn rt_define_property(&mut self, obj: Value, key: Value, v: Value) -> Result<(), Thrown> {
         let k = self.key_text(key)?;
@@ -800,6 +761,7 @@ pub fn run_with_handlers(
             flow = cx.rt_throw_error(ErrorKind::NotCallable);
         }
         match flow {
+            Flow::Accessor => unreachable!("toy objects have no accessors"),
             Flow::Next => pc += len,
             Flow::Jump(l) => pc = jump_target(pc, l.0),
             Flow::Return(v) => return Outcome::Returned(v),
@@ -900,6 +862,7 @@ pub fn run_program(
             }
         }
         match flow {
+            Flow::Accessor => unreachable!("toy objects have no accessors"),
             Flow::Next => pc += len,
             Flow::Jump(l) => pc = jump_target(pc, l.0),
             Flow::Return(v) => match frames.pop() {
@@ -1016,4 +979,70 @@ fn call(
     *func = closure.func;
     *pc = 0;
     Flow::Next
+}
+
+/// Property reads and writes behind the context's `rt_*` functions.
+impl ToyCtx {
+    fn get_property(&mut self, obj: Value, key: Value) -> Completion {
+        if obj.is_nullish() {
+            return Err(self.error(ErrorKind::NullishBase));
+        }
+        let k = self.key_text(key)?;
+        if let Some(o) = self.object_of(obj) {
+            return match self.objects[o].get(&k) {
+                Some(&v) => Ok(v),
+                // Inherited from Object.prototype once it exists (1.13).
+                None if is_proto_name(&k) => self.fail(),
+                None => Ok(Value::UNDEFINED),
+            };
+        }
+        if let Some(s) = self.string_of(obj).map(str::to_owned) {
+            if let Some(v) = self.string_property(&s, &k)? {
+                return Ok(v);
+            }
+            // An index past the end names nothing on String.prototype
+            // either; anything else needs the built-ins (1.13).
+            let units: Vec<u16> = k.encode_utf16().collect();
+            if number::array_index_of_units(&units).is_some() {
+                return Ok(Value::UNDEFINED);
+            }
+        }
+        // Numbers, booleans and functions need their prototypes (1.13).
+        self.fail()
+    }
+    fn set_property(
+        &mut self,
+        obj: Value,
+        key: Value,
+        v: Value,
+        strict: bool,
+    ) -> Result<(), Thrown> {
+        if obj.is_nullish() {
+            return Err(self.error(ErrorKind::NullishBase));
+        }
+        let k = self.key_text(key)?;
+        if k == "__proto__" {
+            // The Object.prototype accessor sets the prototype (1.13).
+            return self.fail();
+        }
+        if let Some(o) = self.object_of(obj) {
+            if v.is_uninitialized() {
+                return self.fail();
+            }
+            self.objects[o].insert(k, v);
+            return Ok(());
+        }
+        match obj.kind() {
+            // A primitive base: the wrapper object is the receiver, which
+            // OrdinarySet refuses (no setters on the prototypes yet).
+            Kind::String(_) | Kind::Bool(_) | Kind::Int32(_) | Kind::Double(_) => {
+                if strict {
+                    Err(self.error(ErrorKind::PropertyRefused))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => self.fail(),
+        }
+    }
 }

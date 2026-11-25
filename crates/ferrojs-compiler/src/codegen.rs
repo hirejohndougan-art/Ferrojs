@@ -2766,8 +2766,22 @@ impl Gen<'_> {
         }
     }
 
+    /// The property name of a non-computed literal key.
+    fn literal_key(&self, key: &PropertyKey<'_>) -> CResult<String> {
+        Ok(match key {
+            PropertyKey::StaticIdentifier(id) => id.name.as_str().to_owned(),
+            PropertyKey::StringLiteral(lit) => match lit.value.as_str() {
+                Some(text) => text.to_owned(),
+                None => return unsupported("strings with lone surrogates", lit.span),
+            },
+            PropertyKey::NumericLiteral(n) => ferrojs_bytecode::number::to_js_string(n.value),
+            other => return unsupported("this property key", other.span()),
+        })
+    }
+
     /// An object literal: a new object, then each member defined in
-    /// order (CreateDataPropertyOrThrow).
+    /// order (CreateDataPropertyOrThrow; DefinePropertyOrThrow with one
+    /// half of an accessor for `get` and `set`).
     fn object_literal(&mut self, o: &ObjectExpression<'_>, dst: Reg) -> CResult<()> {
         self.asm.new_object(dst);
         for p in &o.properties {
@@ -2778,7 +2792,30 @@ impl Gen<'_> {
                 }
             };
             if p.kind != PropertyKind::Init {
-                return unsupported("getters and setters", p.span);
+                // `get k() {}` / `set k(v) {}`: one half of an accessor,
+                // defined on its own (the other half stays as it is).
+                let k = self.temp()?;
+                if p.computed {
+                    let key = p
+                        .key
+                        .as_expression()
+                        .expect("a computed key is an expression");
+                    self.expr_to(key, k)?;
+                } else {
+                    let name = self.literal_key(&p.key)?;
+                    let c = self.string_const(&name)?;
+                    self.asm.load_const(k, c);
+                }
+                let f = self.temp()?;
+                self.expr_to(&p.value, f)?;
+                if p.kind == PropertyKind::Get {
+                    self.asm.define_getter(dst, k, f);
+                } else {
+                    self.asm.define_setter(dst, k, f);
+                }
+                self.free(f);
+                self.free(k);
+                continue;
             }
             if p.computed {
                 let k = self.temp()?;
@@ -2794,15 +2831,7 @@ impl Gen<'_> {
                 self.free(k);
                 continue;
             }
-            let name = match &p.key {
-                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_owned(),
-                PropertyKey::StringLiteral(lit) => match lit.value.as_str() {
-                    Some(text) => text.to_owned(),
-                    None => return unsupported("strings with lone surrogates", lit.span),
-                },
-                PropertyKey::NumericLiteral(n) => ferrojs_bytecode::number::to_js_string(n.value),
-                other => return unsupported("this property key", other.span()),
-            };
+            let name = self.literal_key(&p.key)?;
             if name == "__proto__" && !p.shorthand && !p.method {
                 // `__proto__: v` sets the prototype (B.3.1), not a property.
                 return unsupported("__proto__ in object literals", p.span);

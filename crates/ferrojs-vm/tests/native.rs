@@ -231,3 +231,73 @@ fn replacing_a_host_function_reuses_its_slot_and_objects_throw_a_type_error() {
         Outcome::Threw(_, Some(ferrojs_bytecode::ErrorKind::HostResult))
     ));
 }
+
+/// Makes `target.x` a configurable accessor with the globals `getter`
+/// and `setter` as its halves (JavaScript can't install a host function
+/// as an accessor yet). The globals must hold objects or functions.
+fn define_x(vm: &mut Vm, target: &str, getter: &str, setter: &str) {
+    use ferrojs_value::Kind;
+    use ferrojs_vm::{object, string, Descriptor, Object, RootedValue};
+    let refs: Vec<u32> = [target, getter, setter]
+        .iter()
+        .map(|n| match vm.global(n).unwrap().kind() {
+            Kind::Object(r) => r.0,
+            other => panic!("{n}: {other:?}"),
+        })
+        .collect();
+    vm.with(|s, t| {
+        let nogc = s.nogc();
+        let o = s.root(nogc.handle::<Object>(refs[0]).unwrap());
+        let g = s.root(nogc.handle::<Object>(refs[1]).unwrap());
+        let st = s.root(nogc.handle::<Object>(refs[2]).unwrap());
+        let k = string::atom(s, t, "x").unwrap().bind(s.nogc());
+        let k = s.root(k);
+        let d = Descriptor::accessor(
+            RootedValue::Object(g),
+            RootedValue::Object(st),
+            ferrojs_vm::shape::Attrs::CONFIGURABLE,
+        );
+        assert!(object::define_property(s, o, k, d).unwrap());
+    });
+}
+
+#[test]
+fn host_functions_as_getters_and_setters() {
+    for stress in [false, true] {
+        let (mut vm, log) = with_print(stress);
+        vm.define_native(
+            "answer",
+            Box::new(|this, args| {
+                assert_eq!(this, &HostValue::Object, "the receiver is the object");
+                assert!(args.is_empty());
+                Ok(HostValue::Number(42.0))
+            }),
+        )
+        .unwrap();
+        run(&mut vm, "var o = {};").unwrap();
+        define_x(&mut vm, "o", "answer", "print");
+        let got = run(
+            &mut vm,
+            "'use strict'; o.x = 'via setter'; var r = o.x + ',' + ('x' in o);",
+        );
+        assert_eq!(got, Ok(HostValue::String("42,true".into())));
+        assert_eq!(*log.borrow(), vec!["via setter".to_string()]);
+    }
+}
+
+#[test]
+fn a_bytecode_setter_installed_from_rust_sees_its_receiver() {
+    for stress in [false, true] {
+        let mut vm = vm(stress);
+        run(
+            &mut vm,
+            "'use strict'; var o = { tag: 'o' }; var seen = ''; \
+             var g = function () { return 'got ' + this.tag; }; \
+             var s = function (v) { seen = this.tag + '=' + v; };",
+        )
+        .unwrap();
+        define_x(&mut vm, "o", "g", "s");
+        let got = run(&mut vm, "'use strict'; o.x = 5; var r = o.x + ', ' + seen;");
+        assert_eq!(got, Ok(HostValue::String("got o, o=5".into())));
+    }
+}

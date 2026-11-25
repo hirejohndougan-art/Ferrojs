@@ -52,8 +52,9 @@ use std::sync::atomic::Ordering;
 
 use ferrojs_bytecode::number::{self, CompareOp, NumericOp, UnaryOp};
 use ferrojs_bytecode::{
-    decode, step, verify, verify_handlers, CallSite, Completion, Const, Count, EnvSlot, ErrorKind,
-    Feedback, Flow, Func, GlobalKind, Handler, Ic, Limits, OpCtx, Reg, Thrown, VerifyError,
+    accessor_dst, decode, step, verify, verify_handlers, Access, CallSite, Completion, Const,
+    Count, Detour, EnvSlot, ErrorKind, Feedback, Flow, Func, GlobalKind, Handler, Ic, Limits,
+    OpCtx, Reg, Thrown, VerifyError,
 };
 use ferrojs_compiler::{CompiledFunction, Constant};
 use ferrojs_core::gc::{Global, Scope};
@@ -63,8 +64,8 @@ use ferrojs_value::{HeapRef, Kind, Value};
 use crate::native::{DefineError, HostValue, NativeFn};
 use crate::shape::Attrs;
 use crate::{
-    elements, object, string, value_ref, CellKind, JsString, Object, PropertyValue, RootedValue,
-    SetResult, Tables, Vm,
+    elements, object, string, value_ref, CellKind, Descriptor, JsString, Object, PropertyValue,
+    RootedValue, SetResult, Tables, Vm,
 };
 
 /// Frame stack slots by default: 8 MB (ARCHITECTURE.md §3.1).
@@ -93,8 +94,13 @@ const CALLER_FP: u32 = 4;
 /// The caller's pc of the call instruction (the resume point is the
 /// instruction after it; unwinding looks up handlers at the call).
 const CALL_PC: u32 = 5;
+/// The caller's register for the result, or [`DISCARD`].
 const RETURN_INFO: u32 = 6;
 const ARGC: u32 = 7;
+/// `RETURN_INFO` of a call whose result is dropped (a setter's, task
+/// 1.8e). Above every register number; as value bits it is a number, so
+/// the tracer ignores it like the other header words.
+const DISCARD: u64 = 1 << 32;
 
 // Function cell: header (kind | template << 32), environment reference.
 /// Offset of a function cell's environment reference.
@@ -346,6 +352,7 @@ impl Vm {
                 last_error: None,
                 terminating: false,
                 oom: false,
+                pending: None,
             };
             let out = it.run(callee, this, args);
             stack.top.set(base_top);
@@ -686,6 +693,20 @@ struct Interp<'r, 's> {
     last_error: Option<ErrorKind>,
     terminating: bool,
     oom: bool,
+    /// The getter or setter call a property op left for the dispatch
+    /// loop ([`Flow::Accessor`]). Its values are references read from
+    /// live objects; the loop writes them into a frame before anything
+    /// can allocate.
+    pending: Option<PendingCall>,
+}
+
+/// An accessor call waiting for the dispatch loop.
+#[derive(Clone, Copy, Debug)]
+struct PendingCall {
+    callee: Value,
+    this: Value,
+    /// The setter's argument; `None` for a getter.
+    arg: Option<Value>,
 }
 
 impl Interp<'_, '_> {
@@ -752,18 +773,16 @@ impl Interp<'_, '_> {
         }
     }
 
-    /// Calls host function `i` from the call at `site`: its result, or
+    /// Calls host function `i` with `this` and `args`: its result, or
     /// the throw (its error value, already pending).
-    fn call_native(&mut self, i: usize, site: CallSite) -> Result<Value, Thrown> {
+    fn call_native(&mut self, i: usize, this: Value, args: &[Value]) -> Result<Value, Thrown> {
         if let Flow::Throw = self.check_interrupt() {
             return Err(Thrown);
         }
         // Copies: nothing below holds a heap reference while the host
         // function runs, and it can't allocate on the engine's heap.
-        let this = self.host_value(self.reg(site.this));
-        let args: Vec<HostValue> = (0..site.argc.0)
-            .map(|a| self.host_value(self.reg(Reg(site.args.0 + a))))
-            .collect();
+        let this = self.host_value(this);
+        let args: Vec<HostValue> = args.iter().map(|&a| self.host_value(a)).collect();
         let f = self
             .natives
             .get_mut(i)
@@ -993,7 +1012,7 @@ impl Interp<'_, '_> {
     /// Sets (`define` false: OrdinarySet) or defines (CreateDataProperty)
     /// property `key` of object `o` to `v`, interning a named key. Returns
     /// whether the object accepted it.
-    fn put(&mut self, o: Value, key: Key, v: Value, define: bool) -> Result<bool, Thrown> {
+    fn put(&mut self, o: Value, key: Key, v: Value, define: bool) -> Result<SetResult, Thrown> {
         let tables = &mut *self.tables;
         let done = self.s.scope(|n| {
             let nogc = n.nogc();
@@ -1003,7 +1022,7 @@ impl Interp<'_, '_> {
                 return Ok(None);
             };
             match key {
-                Key::Index(i) => elements::set(n, obj, i, v).map(Some),
+                Key::Index(i) => elements::set(n, obj, i, v).map(|ok| Some(SetResult::Done(ok))),
                 Key::Name(units) => {
                     if is_length(&units) && elements::is_array(n.nogc(), obj.get(n.nogc())) {
                         // ArraySetLength comes with the Array built-ins.
@@ -1012,20 +1031,17 @@ impl Interp<'_, '_> {
                     let k = string::atom_units(n, tables, &units)?.bind(n.nogc());
                     let k = n.root(k);
                     if define {
-                        object::define(n, obj, k, v, Attrs::DEFAULT).map(Some)
+                        object::define(n, obj, k, v, Attrs::DEFAULT)
+                            .map(|ok| Some(SetResult::Done(ok)))
                     } else {
-                        // Calling setters comes with task 1.8e.
-                        object::set(n, obj, k, v).map(|r| match r {
-                            SetResult::Done(ok) => Some(ok),
-                            SetResult::Setter(_) => None,
-                        })
+                        object::set(n, obj, k, v).map(Some)
                     }
                 }
             }
         });
         match done {
-            Ok(Some(ok)) => Ok(ok),
-            // A value no property can hold, an array length or a setter.
+            Ok(Some(r)) => Ok(r),
+            // A value no property can hold, or an array length.
             Ok(None) => self.fail(),
             Err(_) => Err(self.out_of_memory()),
         }
@@ -1189,6 +1205,24 @@ impl Interp<'_, '_> {
                         Err(Thrown) => Flow::Throw,
                     }
                 }
+                Flow::Accessor => {
+                    let (insn, _) = decode(&code, pc).expect("verified bytecode decodes");
+                    let dst = accessor_dst(&insn);
+                    match self.call_accessor(dst, pc) {
+                        Ok(Called::Frame) => {
+                            pc = 0;
+                            code = self.code();
+                            continue;
+                        }
+                        Ok(Called::Native(v)) => {
+                            if let Some(d) = dst {
+                                self.set(d, v);
+                            }
+                            Flow::Next
+                        }
+                        Err(Thrown) => Flow::Throw,
+                    }
+                }
                 flow => flow,
             };
             match flow {
@@ -1202,7 +1236,7 @@ impl Interp<'_, '_> {
                         return Outcome::Returned(v);
                     }
                     let call_pc = self.slot(CALL_PC) as usize;
-                    let dst = Reg(self.slot(RETURN_INFO) as u32);
+                    let info = self.slot(RETURN_INFO);
                     self.fp = caller as u32;
                     self.tmpl = self
                         .template_of(Value::from_bits_checked(self.slot(CALLEE)).expect("callee"))
@@ -1211,7 +1245,9 @@ impl Interp<'_, '_> {
                     code = self.code();
                     let (_, call_len) = decode(&code, call_pc).expect("verified call");
                     pc = call_pc + call_len;
-                    self.set(dst, v);
+                    if info & DISCARD == 0 {
+                        self.set(Reg(info as u32), v);
+                    }
                 }
                 Flow::Throw => match self.unwind(pc) {
                     Some(target) => {
@@ -1220,7 +1256,7 @@ impl Interp<'_, '_> {
                     }
                     None => return self.uncaught(),
                 },
-                Flow::Call => unreachable!("handled above"),
+                Flow::Call | Flow::Accessor => unreachable!("handled above"),
             }
         }
     }
@@ -1275,7 +1311,11 @@ impl Interp<'_, '_> {
         let Some(t) = self.template_of(callee) else {
             // Bytecode functions first: host calls are the rare case.
             if let Some(i) = self.native_of(callee) {
-                return self.call_native(i, site).map(Called::Native);
+                let this = self.reg(site.this);
+                let args: Vec<Value> = (0..site.argc.0)
+                    .map(|a| self.reg(Reg(site.args.0 + a)))
+                    .collect();
+                return self.call_native(i, this, &args).map(Called::Native);
             }
             return Err(self.error(ErrorKind::NotCallable));
         };
@@ -1326,6 +1366,46 @@ impl Interp<'_, '_> {
             + u64::from(extra)
             + u64::from(RESERVE);
         end <= u64::from(self.stack.capacity())
+    }
+
+    /// Makes the pending getter or setter call from the property op at
+    /// `pc`: like a call from that instruction, with the result going to
+    /// `dst` (a getter) or dropped (`None`, a setter).
+    fn call_accessor(&mut self, dst: Option<Reg>, pc: usize) -> Result<Called, Thrown> {
+        let p = self
+            .pending
+            .take()
+            .expect("Flow::Accessor leaves a pending call");
+        let args: &[Value] = match &p.arg {
+            Some(v) => std::slice::from_ref(v),
+            None => &[],
+        };
+        let Some(t) = self.template_of(p.callee) else {
+            if let Some(i) = self.native_of(p.callee) {
+                return self.call_native(i, p.this, args).map(Called::Native);
+            }
+            // Only functions are stored as getters and setters, so this
+            // can't happen yet; Object.defineProperty (1.13) checks too.
+            return Err(self.error(ErrorKind::NotCallable));
+        };
+        let top = self.frame_end();
+        if !self.fits(top, t, args.len() as u32) {
+            return Err(self.error(ErrorKind::StackOverflow));
+        }
+        if let Flow::Throw = self.check_interrupt() {
+            return Err(Thrown);
+        }
+        let info = dst.map_or(DISCARD, |d| u64::from(d.0));
+        self.push_frame(
+            top,
+            p.callee,
+            p.this,
+            args,
+            u64::from(self.fp),
+            pc as u64,
+            info,
+        )?;
+        Ok(Called::Frame)
     }
 
     /// Writes a frame at `fp` for function cell `callee` and makes it
@@ -1709,9 +1789,9 @@ impl OpCtx for Interp<'_, '_> {
             Err(_) => Err(self.out_of_memory()),
         }
     }
-    fn rt_get_property(&mut self, obj: Value, key: Value) -> Completion {
+    fn rt_get_property(&mut self, obj: Value, key: Value) -> Access {
         if obj.is_nullish() {
-            return Err(self.error(ErrorKind::NullishBase));
+            return Err(self.error(ErrorKind::NullishBase).into());
         }
         let key = self.key(key)?;
         let nogc = self.s.nogc();
@@ -1733,10 +1813,21 @@ impl OpCtx for Interp<'_, '_> {
                 });
                 match found {
                     Some(PropertyValue::Data(v)) => Ok(v),
-                    // Calling getters comes with task 1.8e.
-                    Some(PropertyValue::Accessor { .. }) => self.fail(),
+                    Some(PropertyValue::Accessor { get, .. }) if get.is_undefined() => {
+                        Ok(Value::UNDEFINED)
+                    }
+                    Some(PropertyValue::Accessor { get, .. }) => {
+                        // The receiver is the base, wherever the getter was
+                        // found.
+                        self.pending = Some(PendingCall {
+                            callee: get,
+                            this: obj,
+                            arg: None,
+                        });
+                        Err(Detour::Call)
+                    }
                     // Inherited from Object.prototype once it exists (1.13).
-                    None if number::is_object_prototype_name(units) => self.fail(),
+                    None if number::is_object_prototype_name(units) => Ok(self.fail()?),
                     None => Ok(Value::UNDEFINED),
                 }
             }
@@ -1749,11 +1840,11 @@ impl OpCtx for Interp<'_, '_> {
                     return Ok(Value::UNDEFINED);
                 }
                 let unit = string::units(nogc, s)[*i as usize];
-                self.make_string(&[unit])
+                Ok(self.make_string(&[unit])?)
             }
             // Other keys on strings, numbers and booleans need their
             // prototypes (1.13); so do functions.
-            _ => self.fail(),
+            _ => Ok(self.fail()?),
         }
     }
     fn rt_set_property(
@@ -1762,24 +1853,35 @@ impl OpCtx for Interp<'_, '_> {
         key: Value,
         v: Value,
         strict: bool,
-    ) -> Result<(), Thrown> {
+    ) -> Result<(), Detour> {
         if obj.is_nullish() {
-            return Err(self.error(ErrorKind::NullishBase));
+            return Err(self.error(ErrorKind::NullishBase).into());
         }
         let key = self.key(key)?;
         if matches!(&key, Key::Name(u) if u.iter().copied().eq("__proto__".encode_utf16())) {
             // The Object.prototype accessor sets the prototype (1.13).
-            return self.fail();
+            return Ok(self.fail()?);
         }
         let ok = match self.base(obj) {
-            Base::Object(_) => self.put(obj, key, v, false)?,
+            Base::Object(_) => match self.put(obj, key, v, false)? {
+                SetResult::Done(ok) => ok,
+                SetResult::Setter(f) => {
+                    // The assignment succeeds whatever the setter returns.
+                    self.pending = Some(PendingCall {
+                        callee: f,
+                        this: obj,
+                        arg: Some(v),
+                    });
+                    return Err(Detour::Call);
+                }
+            },
             // The wrapper object is the receiver: OrdinarySet refuses (no
             // setters on the prototypes yet).
             Base::String(..) | Base::Primitive => false,
-            Base::Nullish | Base::Other => return self.fail(),
+            Base::Nullish | Base::Other => return Ok(self.fail()?),
         };
         if !ok && strict {
-            return Err(self.error(ErrorKind::PropertyRefused));
+            return Err(self.error(ErrorKind::PropertyRefused).into());
         }
         Ok(())
     }
@@ -1788,11 +1890,53 @@ impl OpCtx for Interp<'_, '_> {
         if !matches!(self.base(obj), Base::Object(_)) {
             return self.fail();
         }
-        if self.put(obj, key, v, true)? {
+        if self.put(obj, key, v, true)? == SetResult::Done(true) {
             Ok(())
         } else {
             // Literals define on fresh extensible objects: can't refuse.
             self.fail()
+        }
+    }
+    fn rt_define_accessor(
+        &mut self,
+        obj: Value,
+        key: Value,
+        f: Value,
+        setter: bool,
+    ) -> Result<(), Thrown> {
+        let key = self.key(key)?;
+        let Base::Object(_) = self.base(obj) else {
+            return self.fail();
+        };
+        let Key::Name(units) = key else {
+            // The elements store has no accessors yet (D-040).
+            return self.fail();
+        };
+        let tables = &mut *self.tables;
+        let done = self.s.scope(|n| {
+            let nogc = n.nogc();
+            let o = cell_of::<Object>(nogc, obj, CellKind::Object).expect("checked above");
+            let o = n.root(o);
+            let Some(f) = rooted(n, f) else {
+                return Ok(false);
+            };
+            let k = string::atom_units(n, tables, &units)?.bind(n.nogc());
+            let k = n.root(k);
+            let half = Some(f);
+            let desc = Descriptor {
+                get: if setter { None } else { half },
+                set: if setter { half } else { None },
+                enumerable: Some(true),
+                configurable: Some(true),
+                ..Descriptor::default()
+            };
+            object::define_property(n, o, k, desc)
+        });
+        match done {
+            Ok(true) => Ok(()),
+            // Literals define on fresh extensible objects: can't refuse.
+            Ok(false) => self.fail(),
+            Err(_) => Err(self.out_of_memory()),
         }
     }
     fn rt_delete_property(&mut self, obj: Value, key: Value, strict: bool) -> Completion {

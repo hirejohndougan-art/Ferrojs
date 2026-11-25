@@ -31,7 +31,54 @@ pub enum Flow {
     /// Handlers never recurse into the callee themselves. It carries no
     /// data so `Flow` stays small on the hot path.
     Call,
+    /// A property read or write met an accessor (task 1.8e, D-057): the
+    /// runtime function left the getter or setter call in the context,
+    /// and the dispatch loop makes it as an ordinary call from this
+    /// instruction. A getter's result goes to the instruction's `dst`
+    /// ([`accessor_dst`]); a setter's is dropped. Either way execution
+    /// continues after the instruction, and a throw unwinds from it.
+    Accessor,
 }
+
+/// Where the result of an accessor call made for `insn` goes: the `dst`
+/// of a property read, nothing for a write.
+pub fn accessor_dst(insn: &crate::Instruction) -> Option<Reg> {
+    match *insn {
+        crate::Instruction::GetNamed(o) => Some(o.dst),
+        crate::Instruction::GetKeyed(o) => Some(o.dst),
+        _ => None,
+    }
+}
+
+/// Why a property read or write didn't finish in the runtime function.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Detour {
+    /// An exception is pending in the context.
+    Thrown,
+    /// A getter or setter call is pending in the context
+    /// ([`Flow::Accessor`]).
+    Call,
+}
+
+impl From<Thrown> for Detour {
+    fn from(_: Thrown) -> Detour {
+        Detour::Thrown
+    }
+}
+
+impl Detour {
+    /// The flow for a handler that met this.
+    #[inline]
+    pub fn flow(self) -> Flow {
+        match self {
+            Detour::Thrown => Flow::Throw,
+            Detour::Call => Flow::Accessor,
+        }
+    }
+}
+
+/// The result of a property read: the value, or a detour.
+pub type Access = Result<Value, Detour>;
 
 /// The operands of a `Call` or `TailCall`, for the dispatch loop.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -279,19 +326,33 @@ pub trait OpCtx {
     /// A new ordinary object (an object literal).
     fn rt_new_object(&mut self) -> Completion;
     /// `obj[key]` (GetValue of a property reference): a `TypeError` for an
-    /// `undefined` or `null` base.
-    fn rt_get_property(&mut self, obj: Value, key: Value) -> Completion;
+    /// `undefined` or `null` base. A getter is left in the context to be
+    /// called with `obj` as `this` ([`Detour::Call`]).
+    fn rt_get_property(&mut self, obj: Value, key: Value) -> Access;
     /// `obj[key] = v` (PutValue): a `TypeError` for an `undefined` or
-    /// `null` base; in strict code also when the assignment is refused.
+    /// `null` base; in strict code also when the assignment is refused. A
+    /// setter is left in the context to be called with `obj` as `this` and
+    /// `v` as its argument ([`Detour::Call`]).
     fn rt_set_property(
         &mut self,
         obj: Value,
         key: Value,
         v: Value,
         strict: bool,
-    ) -> Result<(), Thrown>;
+    ) -> Result<(), Detour>;
     /// CreateDataPropertyOrThrow on `obj` (object literal members).
     fn rt_define_property(&mut self, obj: Value, key: Value, v: Value) -> Result<(), Thrown>;
+    /// Defines the getter (`setter` false) or setter half of accessor
+    /// property `key` of `obj` as function `f`, enumerable and
+    /// configurable (an object literal's `get` or `set` member:
+    /// DefinePropertyOrThrow with only that half present).
+    fn rt_define_accessor(
+        &mut self,
+        obj: Value,
+        key: Value,
+        f: Value,
+        setter: bool,
+    ) -> Result<(), Thrown>;
     /// `delete obj[key]`: whether the property is gone; in strict code a
     /// refusal is a `TypeError`.
     fn rt_delete_property(&mut self, obj: Value, key: Value, strict: bool) -> Completion;

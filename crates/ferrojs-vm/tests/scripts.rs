@@ -294,3 +294,51 @@ fn inherited_object_prototype_names_fail_cleanly() {
         );
     }
 }
+
+/// Getters and setters (task 1.8e, D-057): the toy context has no
+/// accessors, so these run on the interpreter only.
+const ACCESSOR_CASES: &[&[&str]] = &[
+    &["'use strict'; var o = { _x: 2, get x() { return this._x * 10; } }; var result = o.x + o['x'];"],
+    &["'use strict'; var log = ''; var o = { set x(v) { log += 'set' + v; } }; o.x = 1; o['x'] = 2; var result = log + (o.x === undefined);"],
+    &["'use strict'; var o = { _v: 1, get v() { return this._v; }, set v(n) { this._v = n * 2; } }; o.v = 5; o.v += 1; o.v++; var result = o.v + ',' + o._v;"],
+    &["'use strict'; var o = { set x(v) { return 99; } }; var r = (o.x = 7); var result = r;"],
+    &["'use strict'; var o = { get x() { return 1; } }; try { o.x = 2; var result = 'no'; } catch (e) { var result = 'caught'; }"],
+    &["var o = { get x() { return 1; } }; o.x = 2; var result = o.x;"],
+    &["'use strict'; var o = { get x() { throw 'boom'; } }; var result; try { result = o.x; } catch (e) { result = 'caught ' + e; }"],
+    &["'use strict'; var o = { set x(v) { throw v + 1; } }; var result; try { o.x = 41; } catch (e) { result = e; }"],
+    &["'use strict'; var o = { get m() { var self = this; return function (a) { return self.k + a; }; }, k: 3 }; var result = o.m(4);"],
+    &["'use strict'; var o = { get x() { return 1; }, x: 2 }; var result = o.x;"],
+    &["'use strict'; var o = { x: 2, get x() { return 1; } }; var result = o.x;"],
+    &["'use strict'; var o = { get x() { return 'g'; }, set x(v) { this.y = v; } }; o.x = 'w'; var result = o.x + o.y;"],
+    &["'use strict'; var o = { set x(v) { this.y = v; }, get x() { return 'g'; } }; o.x = 'w'; var result = o.x + o.y;"],
+    &["'use strict'; var o = { set x(v) {} }; var result = o.x;"],
+    &["'use strict'; var k = 'dyn'; var o = { get [k + 1]() { return 'c'; } }; var result = o.dyn1 + ('dyn1' in o) + (delete o.dyn1) + ('dyn1' in o);"],
+    &["'use strict'; var o = { get 'a b'() { return 'ab'; }, get 1.5() { return 'f'; } }; var result = o['a b'] + o[1.5];"],
+    &["'use strict'; var n = 0; var o = { get x() { n++; return n < 50 ? this.x + 1 : 0; } }; var result = o.x;"],
+    &["'use strict'; var o = { get x() { return this.x; } }; var result; try { o.x; } catch (e) { result = 'overflow'; }"],
+    &["'use strict'; function f(a) { return a * 3; } var o = { get x() { return f(7); } }; var result = o.x;"],
+    &["'use strict'; var o = { a: { get b() { return { get c() { return 'deep'; } }; } } }; var result = o.a.b.c;"],
+    &["'use strict'; var o = { get x() { return 1; } }; var s = 0; for (var i = 0; i < 1000; i++) s += o.x; var result = s;"],
+    &["'use strict'; var o = { get x() { return 1; } }; var result = typeof o.x + ('x' in o);"],
+];
+
+#[test]
+fn accessors_match_node() {
+    match_node(ACCESSOR_CASES);
+}
+
+#[test]
+fn index_accessors_fail_cleanly() {
+    // The elements store has no accessors yet (D-040).
+    for src in [
+        "var o = { get 0() { return 1; } };",
+        "var o = { set [2](v) {} };",
+    ] {
+        let f = compile_script_source(src).unwrap();
+        assert_eq!(
+            vm(false).run_script(&f).unwrap(),
+            Outcome::Threw(Value::UNDEFINED, None),
+            "{src}"
+        );
+    }
+}

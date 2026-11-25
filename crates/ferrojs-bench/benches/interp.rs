@@ -78,12 +78,28 @@ fn properties() -> (Vm, u32) {
     )
 }
 
+/// A function: 1,000 iterations of a getter read and a setter write
+/// (task 1.8e): each an accessor call from a property op.
+#[cfg(target_os = "linux")]
+fn accessors() -> (Vm, u32) {
+    loaded(
+        &compile_function_source(
+            "function f(n) { 'use strict'; \
+             const o = { v: 0, get x() { return this.v; }, set x(a) { this.v = a; } }; \
+             for (let i = 0; i < n; i++) { o.x = o.x + 1; } \
+             return o.x; }",
+        )
+        .expect("compiles"),
+    )
+}
+
 // loop_with_calls: 1,000 iterations, each with a call and a return.
 #[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::loop_with_calls(setup = loop_with_calls)]
 #[bench::global_strings(setup = global_strings)]
 #[bench::properties(setup = properties)]
+#[bench::accessors(setup = accessors)]
 fn run(setup: (Vm, u32)) -> Outcome {
     work(black_box(setup))
 }

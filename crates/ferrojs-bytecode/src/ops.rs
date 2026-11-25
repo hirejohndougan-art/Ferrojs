@@ -728,8 +728,13 @@ define_ops! {
         handler(cx) {
             let _ = ic;
             let (o, k) = (cx.reg(obj), cx.constant(name));
-            let c = cx.rt_get_property(o, k);
-            cx.complete(dst, c)
+            match cx.rt_get_property(o, k) {
+                Ok(v) => {
+                    cx.set(dst, v);
+                    Flow::Next
+                }
+                Err(d) => d.flow(),
+            }
         }
 
     /// `dst = obj[key]`.
@@ -738,8 +743,13 @@ define_ops! {
         handler(cx) {
             let _ = ic;
             let (o, k) = (cx.reg(obj), cx.reg(key));
-            let c = cx.rt_get_property(o, k);
-            cx.complete(dst, c)
+            match cx.rt_get_property(o, k) {
+                Ok(v) => {
+                    cx.set(dst, v);
+                    Flow::Next
+                }
+                Err(d) => d.flow(),
+            }
         }
 
     /// `obj.name = src` (sloppy code); `name` is a string constant.
@@ -750,7 +760,7 @@ define_ops! {
             let (o, k, v) = (cx.reg(obj), cx.constant(name), cx.reg(src));
             match cx.rt_set_property(o, k, v, false) {
                 Ok(()) => Flow::Next,
-                Err(Thrown) => Flow::Throw,
+                Err(d) => d.flow(),
             }
         }
 
@@ -762,7 +772,7 @@ define_ops! {
             let (o, k, v) = (cx.reg(obj), cx.constant(name), cx.reg(src));
             match cx.rt_set_property(o, k, v, true) {
                 Ok(()) => Flow::Next,
-                Err(Thrown) => Flow::Throw,
+                Err(d) => d.flow(),
             }
         }
 
@@ -774,7 +784,7 @@ define_ops! {
             let (o, k, v) = (cx.reg(obj), cx.reg(key), cx.reg(src));
             match cx.rt_set_property(o, k, v, false) {
                 Ok(()) => Flow::Next,
-                Err(Thrown) => Flow::Throw,
+                Err(d) => d.flow(),
             }
         }
 
@@ -786,7 +796,7 @@ define_ops! {
             let (o, k, v) = (cx.reg(obj), cx.reg(key), cx.reg(src));
             match cx.rt_set_property(o, k, v, true) {
                 Ok(()) => Flow::Next,
-                Err(Thrown) => Flow::Throw,
+                Err(d) => d.flow(),
             }
         }
 
@@ -809,6 +819,30 @@ define_ops! {
         handler(cx) {
             let (o, k, v) = (cx.reg(obj), cx.reg(key), cx.reg(src));
             match cx.rt_define_property(o, k, v) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// Defines the getter of accessor property `obj[key]` as `func`,
+    /// enumerable and configurable (an object literal's `get` member).
+    DefineGetter(define_getter) { obj: Reg, key: Reg, func: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (o, k, f) = (cx.reg(obj), cx.reg(key), cx.reg(func));
+            match cx.rt_define_accessor(o, k, f, false) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// Defines the setter of accessor property `obj[key]` as `func`,
+    /// enumerable and configurable (an object literal's `set` member).
+    DefineSetter(define_setter) { obj: Reg, key: Reg, func: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (o, k, f) = (cx.reg(obj), cx.reg(key), cx.reg(func));
+            match cx.rt_define_accessor(o, k, f, true) {
                 Ok(()) => Flow::Next,
                 Err(Thrown) => Flow::Throw,
             }
