@@ -560,6 +560,35 @@ define_ops! {
             Flow::Call
         }
 
+    /// `dst = new callee(args .. args + argc)`: \[\[Construct\]\] with
+    /// `new.target` = `callee` (task 1.10b, D-061); the dispatch loop does
+    /// the call. `dst` is a temporary only this instruction writes: it
+    /// holds the new object while the constructor runs.
+    Construct(construct) { dst: Reg, callee: Reg, args: Reg, argc: Count }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let _ = (dst, callee, args, argc);
+            Flow::Call
+        }
+
+    /// `dst = new.target` of the running function.
+    LoadNewTarget(load_new_target) { dst: Reg }
+        flags()
+        handler(cx) {
+            let v = cx.new_target();
+            cx.set(dst, v);
+            Flow::Next
+        }
+
+    /// `dst = lhs instanceof rhs` (InstanceofOperator; task 1.10b).
+    InstanceOf(instance_of) { dst: Reg, lhs: Reg, rhs: Reg }
+        flags(may_throw)
+        handler(cx) {
+            let (l, r) = (cx.reg(lhs), cx.reg(rhs));
+            let c = cx.rt_instance_of(l, r);
+            cx.complete(dst, c)
+        }
+
     /// Enters a new environment with `slots` slots.
     PushEnv(push_env) { slots: Count }
         flags(may_throw, may_gc)
@@ -619,6 +648,16 @@ define_ops! {
             let v = cx.this_value();
             cx.set(dst, v);
             Flow::Next
+        }
+
+    /// `dst = this` in a sloppy function (OrdinaryCallBindThis): the
+    /// global object for `undefined` or `null`; primitives refuse cleanly
+    /// until their wrapper objects exist (1.13). Task 1.10b.
+    LoadThisSloppy(load_this_sloppy) { dst: Reg }
+        flags(may_throw)
+        handler(cx) {
+            let c = cx.rt_sloppy_this();
+            cx.complete(dst, c)
         }
 
     /// `dst = ` the global name `constants[name]`.

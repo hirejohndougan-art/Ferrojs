@@ -161,6 +161,7 @@ pub fn verify(code: &[u8], limits: &Limits) -> Result<(), VerifyError> {
         let call_args = match insn {
             Instruction::Call(o) => Some((o.args, o.argc)),
             Instruction::TailCall(o) => Some((o.args, o.argc)),
+            Instruction::Construct(o) => Some((o.args, o.argc)),
             _ => None,
         };
         if let Some((args, argc)) = call_args {

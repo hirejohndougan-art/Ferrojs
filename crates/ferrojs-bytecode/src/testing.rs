@@ -457,6 +457,21 @@ impl OpCtx for ToyCtx {
     fn this_value(&self) -> Value {
         self.this.unwrap_or(Value::UNDEFINED)
     }
+    fn new_target(&self) -> Value {
+        // Toy functions are never constructed.
+        Value::UNDEFINED
+    }
+    fn rt_sloppy_this(&mut self) -> Completion {
+        match self.this {
+            Some(v) if matches!(v.kind(), ferrojs_value::Kind::Object(_)) => Ok(v),
+            // No global object value in the toy: refuse cleanly.
+            _ => self.fail(),
+        }
+    }
+    fn rt_instance_of(&mut self, _: Value, _: Value) -> Completion {
+        // Toy functions have no `prototype`: refuse cleanly.
+        self.fail()
+    }
     fn rt_load_name(&mut self, name: Value) -> Completion {
         let n = self.name_of(name)?;
         if let Some(&(v, _)) = self.global_lexical.get(&n) {
@@ -948,6 +963,13 @@ fn call(
     site: CallSite,
     max_depth: usize,
 ) -> Flow {
+    if site.construct {
+        // Toy functions are not objects: `new` refuses cleanly.
+        return match cx.fail::<()>() {
+            Ok(()) => unreachable!(),
+            Err(Thrown) => Flow::Throw,
+        };
+    }
     let callee = cx.reg(site.callee);
     let Some(closure) = cx.closure_of(callee) else {
         return cx.rt_throw_error(ErrorKind::NotCallable);

@@ -198,7 +198,9 @@ fn run(src: &str) -> String {
                 | ErrorKind::NullishBase
                 | ErrorKind::NotAnObject
                 | ErrorKind::PropertyRefused
-                | ErrorKind::HostResult,
+                | ErrorKind::HostResult
+                | ErrorKind::NotAConstructor
+                | ErrorKind::BadInstanceOf,
             ) => "throw:TypeError".into(),
             Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
             Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),

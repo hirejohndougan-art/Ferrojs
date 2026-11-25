@@ -1494,3 +1494,44 @@ planning document and gets logged here as each is implemented.
   bounds the stale buckets).
 - **Still linear:** reusing a deleted entry's slot scans for the first
   free one (only when the free count is non-zero).
+
+## D-061 `new`, `new.target`, `instanceof` and sloppy `this`
+- **Status:** Accepted (autopilot, 2026-11-25)
+- **Choice:** (task 1.10b) three new instructions. `Construct dst,
+  callee, args, argc` goes through the dispatch loop's call path:
+  only closures whose template is a constructor (D-057) are accepted,
+  everything else is a `TypeError` (`NotAConstructor`).
+  OrdinaryCreateFromConstructor reads the closure's own `prototype` (a
+  non-configurable data property, so no getter can run) and falls back
+  to `Object.prototype`. The new object is written to `dst` before the
+  frame is pushed and is the `this` of the new frame; `new.target` is
+  the callee. The frame's return info carries a `CONSTRUCT` flag: on
+  return, a value that isn't an object leaves `dst` holding the new
+  object. Because tail calls keep the return info, a strict
+  constructor ending in `return g()` still yields the new object when
+  `g` returns a primitive. The compiler always gives `Construct` a
+  fresh temporary as `dst` and moves it afterwards, so a constructor
+  that throws never overwrites the target variable. `LoadNewTarget`
+  reads the frame's `new.target` slot. `InstanceOf` implements
+  InstanceofOperator with Function.prototype's default
+  OrdinaryHasInstance (there is no Symbol.hasInstance yet): a
+  non-callable right side or a non-object `prototype` is a `TypeError`
+  (`BadInstanceOf`); a getter for `prototype` (only possible once
+  built-in prototypes have one) fails cleanly. `LoadThisSloppy` is
+  OrdinaryCallBindThis for sloppy functions: `undefined` and `null`
+  become the global object; primitives fail cleanly until their
+  wrapper objects exist (1.13). The compiler now allows `this` in
+  sloppy functions; `this` and `new.target` in arrows and `this` at the
+  top level stay unsupported.
+- **Why:** Test262's harness (`sta.js`) defines `Test262Error` as a
+  sloppy constructor and throws `new Test262Error(...)`; `assert.throws`
+  checks the error's `constructor`. Putting the new object in the
+  caller's destination register keeps it reachable for the collector
+  with no extra frame slot, and survives tail calls, which replace the
+  constructor's own frame.
+- **Rejected:** a separate frame slot for the constructed object (the
+  frame layout is fixed, ARCHITECTURE.md §3.2, and a tail call would
+  overwrite it); refusing tail calls inside constructors (the compiler
+  can't know which functions will be constructed).
+- **Known gaps:** spread arguments in `new`; derived and class
+  constructors (1.12e); bound functions; `this` in arrows.

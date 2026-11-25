@@ -90,7 +90,9 @@ fn show_outcome((o, cx): (Outcome, ToyCtx)) -> String {
                 | ErrorKind::NullishBase
                 | ErrorKind::NotAnObject
                 | ErrorKind::PropertyRefused
-                | ErrorKind::HostResult,
+                | ErrorKind::HostResult
+                | ErrorKind::NotAConstructor
+                | ErrorKind::BadInstanceOf,
             ) => "throw:TypeError".into(),
             Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
             None => format!("throw:{}", show(v)),
@@ -238,7 +240,8 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function f() { return f`x`; }",
         "function f() { if (1) { function g() {} } }",
         "function f() { return { get '\\uD800'() { return 1; } }; }",
-        "function f() { return new f(); }",
+        "function f(a) { return new f(...a); }",
+        "function f() { return () => new.target; }",
         "function f(a, g = () => a) { var a = 2; }",
         "function f(a = 1, g = function () { return a; }) { function a() {} }",
         "function f() { return arguments; }",
@@ -249,7 +252,7 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function f({ a }) {}",
         "function f() { let [a] = [1]; }",
         "function f() { return [1]; }",
-        "function f() { return this; }",
+        "function f() { return () => this; }",
         "function f(o) { return o?.p; }",
         "function f() { try {} catch ({ e }) {} }",
         "function f() { try {} catch (e) { var e = 1; } }",

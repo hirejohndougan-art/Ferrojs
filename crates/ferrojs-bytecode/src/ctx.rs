@@ -96,6 +96,8 @@ pub struct CallSite {
     pub argc: Count,
     /// A proper tail call: the callee replaces the current frame.
     pub tail: bool,
+    /// `new`: \[\[Construct\]\] (`this` is unused).
+    pub construct: bool,
 }
 
 impl CallSite {
@@ -109,6 +111,7 @@ impl CallSite {
                 args: o.args,
                 argc: o.argc,
                 tail: false,
+                construct: false,
             }),
             crate::Instruction::TailCall(o) => Some(CallSite {
                 dst: Reg(0),
@@ -117,6 +120,16 @@ impl CallSite {
                 args: o.args,
                 argc: o.argc,
                 tail: true,
+                construct: false,
+            }),
+            crate::Instruction::Construct(o) => Some(CallSite {
+                dst: o.dst,
+                callee: o.callee,
+                this: o.callee,
+                args: o.args,
+                argc: o.argc,
+                tail: false,
+                construct: true,
             }),
             _ => None,
         }
@@ -158,6 +171,11 @@ pub enum ErrorKind {
     /// `TypeError`: a host function returned or threw an object or a
     /// function, which can't be made from the host side yet (D-054).
     HostResult,
+    /// `TypeError`: `new` on something that isn't a constructor.
+    NotAConstructor,
+    /// `TypeError`: the right side of `instanceof` isn't callable, or its
+    /// `prototype` isn't an object.
+    BadInstanceOf,
 }
 
 /// What a global declaration creates (GlobalDeclarationInstantiation).
@@ -276,6 +294,13 @@ pub trait OpCtx {
 
     /// The frame's `this`.
     fn this_value(&self) -> Value;
+    /// The running function's `new.target` (`undefined` unless it was
+    /// constructed).
+    fn new_target(&self) -> Value;
+    /// `this` in a sloppy function (see `LoadThisSloppy`).
+    fn rt_sloppy_this(&mut self) -> Completion;
+    /// `a instanceof b`.
+    fn rt_instance_of(&mut self, a: Value, b: Value) -> Completion;
     /// Reads the global name `name` (a string constant): a global lexical
     /// binding, else a property of the global object; `ReferenceError` if
     /// neither exists or the binding is in its TDZ.

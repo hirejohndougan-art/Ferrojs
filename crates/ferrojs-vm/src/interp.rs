@@ -107,6 +107,11 @@ const ARGC: u32 = 7;
 /// 1.8e). Above every register number; as value bits it is a number, so
 /// the tracer ignores it like the other header words.
 const DISCARD: u64 = 1 << 32;
+/// `RETURN_INFO` flag of a \[\[Construct\]\] (task 1.10b, D-061): a
+/// returned value that isn't an object is replaced by the new object,
+/// which the caller's destination register holds while the constructor
+/// runs (it survives tail calls, which keep `RETURN_INFO`).
+const CONSTRUCT: u64 = 1 << 33;
 
 // Functions are objects (D-057): see `object::CLOSURE` and `object::HOST`.
 /// Inline slots of a function object: `length`, `name`, `prototype`.
@@ -1425,6 +1430,9 @@ impl Interp<'_, '_> {
                     }
                     let call_pc = self.slot(CALL_PC) as usize;
                     let info = self.slot(RETURN_INFO);
+                    // A constructor's non-object result: the new object,
+                    // already in the destination register.
+                    let keep = info & CONSTRUCT != 0 && !matches!(v.kind(), Kind::Object(_));
                     self.fp = caller as u32;
                     self.tmpl = self
                         .template_of(Value::from_bits_checked(self.slot(CALLEE)).expect("callee"))
@@ -1433,7 +1441,7 @@ impl Interp<'_, '_> {
                     code = self.code();
                     let (_, call_len) = decode(&code, call_pc).expect("verified call");
                     pc = call_pc + call_len;
-                    if info & DISCARD == 0 {
+                    if info & DISCARD == 0 && !keep {
                         self.set(Reg(info as u32), v);
                     }
                 }
@@ -1495,6 +1503,9 @@ impl Interp<'_, '_> {
     /// Performs a call from the instruction at `pc`: on success the new
     /// frame is current and runs from pc 0.
     fn call(&mut self, site: CallSite, pc: usize) -> Result<Called, Thrown> {
+        if site.construct {
+            return self.construct(site, pc);
+        }
         let callee = self.reg(site.callee);
         let Some(t) = self.template_of(callee) else {
             // Bytecode functions first: host calls are the rare case.
@@ -1543,6 +1554,73 @@ impl Interp<'_, '_> {
             )?;
         }
         Ok(Called::Frame)
+    }
+
+    /// `new callee(args)` for an ordinary function (\[\[Construct\]\],
+    /// ECMA-262 §10.2.2): OrdinaryCreateFromConstructor, then a frame with
+    /// the new object as `this` and `new.target` = `callee`. The object
+    /// also goes to `site.dst` (a temporary only `Construct` writes) so it
+    /// stays reachable, and is the result unless the constructor returns
+    /// an object.
+    fn construct(&mut self, site: CallSite, pc: usize) -> Result<Called, Thrown> {
+        let callee = self.reg(site.callee);
+        let t = match self.template_of(callee) {
+            Some(t) if self.templates[t as usize].constructor => t,
+            // Arrows, methods, host functions and non-functions.
+            _ => return Err(self.error(ErrorKind::NotAConstructor)),
+        };
+        let top = self.frame_end();
+        if !self.fits(top, t, site.argc.0) {
+            return Err(self.error(ErrorKind::StackOverflow));
+        }
+        if let Flow::Throw = self.check_interrupt() {
+            return Err(Thrown);
+        }
+        let this = self.create_from_constructor(callee)?;
+        self.set(site.dst, this);
+        let args: Vec<Value> = (0..site.argc.0)
+            .map(|i| self.reg(Reg(site.args.0 + i)))
+            .collect();
+        let info = u64::from(site.dst.0) | CONSTRUCT;
+        self.push_frame(
+            top,
+            callee,
+            this,
+            &args,
+            u64::from(self.fp),
+            pc as u64,
+            info,
+        )?;
+        self.stack.put(self.fp + NEW_TARGET, callee.to_bits());
+        Ok(Called::Frame)
+    }
+
+    /// OrdinaryCreateFromConstructor(`f`, "%Object.prototype%"): a new
+    /// ordinary object whose prototype is `f.prototype` if that is an
+    /// object, else `Object.prototype`. A closure's `prototype` is a
+    /// non-configurable data property, so no getter can run here.
+    fn create_from_constructor(&mut self, f: Value) -> Completion {
+        let nogc = self.s.nogc();
+        let o = cell_of::<Object>(nogc, f, CellKind::Object).expect("a closure");
+        let key = self.intrinsics.prototype.get(nogc);
+        let proto = match object::get_own(nogc, o, key) {
+            Some((PropertyValue::Data(v), _)) => {
+                cell_of::<Object>(nogc, v, CellKind::Object).map(|p| p.offset())
+            }
+            _ => None,
+        };
+        let proto = proto.unwrap_or_else(|| self.intrinsics.object_prototype.get(nogc).offset());
+        let tables = &mut *self.tables;
+        let made = self.s.scope(|n| {
+            let p = n.nogc().handle::<Object>(proto).expect("a live prototype");
+            let p = n.root(p);
+            object::new_object(n, tables, Some(p), object::DEFAULT_INLINE)
+                .map(|o| o.bind(n.nogc()).offset())
+        });
+        match made {
+            Ok(o) => Ok(Value::object(HeapRef(o))),
+            Err(_) => Err(self.out_of_memory()),
+        }
     }
 
     /// Whether a frame for template `t` with `argc` arguments fits at `fp`.
@@ -1774,6 +1852,50 @@ impl OpCtx for Interp<'_, '_> {
     }
     fn this_value(&self) -> Value {
         Value::from_bits_checked(self.slot(THIS)).unwrap_or(Value::UNDEFINED)
+    }
+    fn new_target(&self) -> Value {
+        Value::from_bits_checked(self.slot(NEW_TARGET)).unwrap_or(Value::UNDEFINED)
+    }
+    fn rt_sloppy_this(&mut self) -> Completion {
+        let v = self.this_value();
+        match v.kind() {
+            Kind::Object(_) => Ok(v),
+            Kind::Undefined | Kind::Null => Ok(Value::object(HeapRef(
+                self.globals.object.get(self.s.nogc()).offset(),
+            ))),
+            // ToObject of a primitive needs the wrapper objects (1.13).
+            _ => self.fail(),
+        }
+    }
+    fn rt_instance_of(&mut self, v: Value, target: Value) -> Completion {
+        // InstanceofOperator: no Symbol.hasInstance yet, so every function
+        // uses Function.prototype's default, OrdinaryHasInstance (§7.3.21).
+        let nogc = self.s.nogc();
+        if function_word(nogc, target).is_none() {
+            return Err(self.error(ErrorKind::BadInstanceOf));
+        }
+        let Some(o) = cell_of::<Object>(nogc, v, CellKind::Object) else {
+            return Ok(Value::from_bool(false));
+        };
+        let f = cell_of::<Object>(nogc, target, CellKind::Object).expect("a function");
+        let key = self.intrinsics.prototype.get(nogc);
+        let p = match object::get(nogc, f, key) {
+            object::Got::Value(p) => p,
+            // A getter for `prototype` can only be inherited from a
+            // built-in prototype, none of which has one yet.
+            object::Got::Getter(_) => return self.fail(),
+        };
+        let Some(p) = cell_of::<Object>(nogc, p, CellKind::Object) else {
+            return Err(self.error(ErrorKind::BadInstanceOf));
+        };
+        let mut cur = object::prototype(nogc, o);
+        while let Some(c) = cur {
+            if c.offset() == p.offset() {
+                return Ok(Value::from_bool(true));
+            }
+            cur = object::prototype(nogc, c);
+        }
+        Ok(Value::from_bool(false))
     }
     fn rt_load_name(&mut self, name: Value) -> Completion {
         let (key, units) = self.name_key(name)?;

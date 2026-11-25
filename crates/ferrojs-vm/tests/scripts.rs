@@ -69,7 +69,9 @@ fn run_scripts(vm: &mut Vm, sources: &[&str]) -> String {
                         | ErrorKind::NullishBase
                         | ErrorKind::NotAnObject
                         | ErrorKind::PropertyRefused
-                        | ErrorKind::HostResult,
+                        | ErrorKind::HostResult
+                        | ErrorKind::NotAConstructor
+                        | ErrorKind::BadInstanceOf,
                     ) => "throw:TypeError".into(),
                     Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
                     Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
@@ -445,4 +447,48 @@ fn accessor_receivers_with_function_objects() {
         &["'use strict'; var seen; var o = { get f() { return function () {}; }, get g() { return this; }, set s(v) { seen = this; } }; o.s = 1; var result = (o.g === o) + ',' + (seen === o) + ',' + typeof o.f.prototype;"],
     );
     assert_eq!(got, "s:74,72,75,65,2c,74,72,75,65,2c,6f,62,6a,65,63,74");
+}
+
+/// `new`, `new.target`, `instanceof` and sloppy `this` (task 1.10b,
+/// D-061). Interpreter only: toy functions are not objects.
+const CONSTRUCT_CASES: &[&[&str]] = &[
+    &["function P(x, y) { this.x = x; this.y = y; } var p = new P(1, 2); var result = '' + p.x + p.y;"],
+    &["function P() {} var result = new P() instanceof P;"],
+    &["function P() {} var result = new P().constructor === P;"],
+    &["function P() {} var result = {} instanceof P;"],
+    &["function P() {} var result = 1 instanceof P;"],
+    &["function P() {} var result = P instanceof P;"],
+    &["function R() { return { z: 9 }; } var result = new R().z;"],
+    &["function R() { this.a = 1; return { z: 9 }; } var result = new R().a;"],
+    &["function N() { return 5; } var result = typeof new N();"],
+    &["function N() { this.k = 2; return null; } var result = new N().k;"],
+    &["function F() { return function () {}; } var result = typeof new F();"],
+    &["function T() { return new.target; } var result = new T() === T;"],
+    &["function T() { return new.target; } var result = T();"],
+    &["function S() { return this; } var g = S(); var result = g === S();"],
+    &["var x = 4; function S() { return this.x; } var result = S();"],
+    &["function S() { return this; } var o = { s: S }; var result = o.s() === o;"],
+    &["var a = () => 1; var result = 0; try { new a(); } catch (e) { result = 1; }"],
+    &["var o = { m() {} }; var result = 0; try { new o.m(); } catch (e) { result = 1; }"],
+    &["var result = 0; try { new 3(); } catch (e) { result = 1; }"],
+    &["var result = 0; try { ({}) instanceof 3; } catch (e) { result = 1; }"],
+    &["var a = () => 1; var result = 0; try { ({}) instanceof a; } catch (e) { result = 1; }"],
+    &["function Q() {} Q.prototype = 3; var result = 0; try { ({}) instanceof Q; } catch (e) { result = 1; }"],
+    &["function Q() {} Q.prototype = 3; var result = typeof new Q();"],
+    &["function Base() {} function Mid() {} Mid.prototype = new Base(); var m = new Mid(); var result = '' + (m instanceof Mid) + (m instanceof Base);"],
+    &["function Thrower() { this.a = 1; throw 7; } var keep = 1; try { keep = new Thrower(); } catch (e) {} var result = keep;"],
+    &["function TC() { 'use strict'; return helper(); } function helper() { return 3; } var result = typeof new TC();"],
+    &["function TC() { 'use strict'; return helper(); } function helper() { return { h: 1 }; } var result = new TC().h;"],
+    &["var cnt = 0; function C() { cnt++; this.n = cnt; } var c1 = new C, c2 = new C; var result = '' + c1.n + c2.n;"],
+    &["function C(a, b) { this.s = a + b; } var result = new C('x', 'y').s;"],
+    &["function C() { this.n = new.target === C; } var result = new C().n;"],
+    &["function Outer() { function Inner() { this.v = 1; } return new Inner(); } var result = new Outer().v;"],
+    &["function L() { this.next = null; } var head = new L(), cur = head; for (var i = 0; i < 50; i++) { cur.next = new L(); cur = cur.next; } var n = 0; for (cur = head; cur; cur = cur.next) n++; var result = n;"],
+    &["function R(n) { if (n > 0) { this.c = new R(n - 1); } } var r = new R(20), d = 0; while (r.c) { r = r.c; d++; } var result = d;"],
+    &["function P() {} P.prototype.greet = function () { return 'hi ' + this.who; }; var p = new P(); p.who = 'x'; var result = p.greet();"],
+];
+
+#[test]
+fn construct_matches_node() {
+    match_node(CONSTRUCT_CASES);
 }

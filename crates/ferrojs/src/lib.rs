@@ -282,6 +282,11 @@ fn describe(k: ErrorKind) -> (&'static str, &'static str) {
             "TypeError",
             "a host function returned an object or a function",
         ),
+        ErrorKind::NotAConstructor => ("TypeError", "not a constructor"),
+        ErrorKind::BadInstanceOf => (
+            "TypeError",
+            "the right side of 'instanceof' is not callable or has no object prototype",
+        ),
     }
 }
 

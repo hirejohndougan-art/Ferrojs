@@ -68,7 +68,9 @@ fn run_scripts(sources: &[&str]) -> String {
                         | ErrorKind::NullishBase
                         | ErrorKind::NotAnObject
                         | ErrorKind::PropertyRefused
-                        | ErrorKind::HostResult,
+                        | ErrorKind::HostResult
+                        | ErrorKind::NotAConstructor
+                        | ErrorKind::BadInstanceOf,
                     ) => "throw:TypeError".into(),
                     Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
                     Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
@@ -122,7 +124,7 @@ fn script_level_unsupported_things_are_refused() {
     for src in [
         "this;",
         "class C {}",
-        "function f() { return this; }",
+        "function f() { return () => this; }",
         "x => this",
     ] {
         assert!(
@@ -145,7 +147,7 @@ fn property_forms_not_supported_yet_are_refused() {
         "var o = {}; o?.f();",
         "var o = {}; delete o?.x;",
         "var x = 1; delete x;",
-        "var o = {}; var r = o instanceof o;",
+        "var r = this;",
         "var a = [1, 2];",
         "var o = { [1n]: 1 };",
     ] {

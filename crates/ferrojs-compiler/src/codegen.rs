@@ -469,7 +469,9 @@ fn compile_fn(
     // `this` is the frame's `this` in strict non-arrow functions. Sloppy
     // functions box it (needs the global object) and arrows take their
     // enclosing function's: later.
-    g.this_ok = !f.arrow && scoping.scope_flags(f.scope).is_strict_mode();
+    // Sloppy functions bind `this` with LoadThisSloppy (task 1.10b).
+    g.this_ok = !f.arrow;
+    g.strict_this = scoping.scope_flags(f.scope).is_strict_mode();
 
     // Parameters first, in order: r0..rP. A repeated name (sloppy mode)
     // binds the last parameter with that name.
@@ -710,6 +712,9 @@ struct Gen<'s> {
     own_name: Option<SymbolId>,
     /// `this` compiles to `LoadThis`.
     this_ok: bool,
+    /// Whether `this` is the raw value (strict) or bound by
+    /// OrdinaryCallBindThis (sloppy).
+    strict_this: bool,
     /// Inside a `try` block (or the `catch` of a `try … finally`): no
     /// tail calls.
     no_tail: u32,
@@ -747,6 +752,7 @@ impl<'s> Gen<'s> {
             hoisted: HashSet::new(),
             own_name: None,
             this_ok: false,
+            strict_this: true,
             no_tail: 0,
             uses_envs,
         }
@@ -2143,9 +2149,22 @@ impl<'s> Gen<'s> {
             }
             Expression::ThisExpression(t) => {
                 if !self.this_ok {
-                    return unsupported("`this` outside strict functions", t.span);
+                    return unsupported("`this` in arrows and at the top level", t.span);
                 }
-                self.asm.load_this(dst);
+                if self.strict_this {
+                    self.asm.load_this(dst);
+                } else {
+                    self.asm.load_this_sloppy(dst);
+                }
+                Ok(())
+            }
+            Expression::NewExpression(n) => self.new_expression(n, dst),
+            Expression::NewTarget(m) => {
+                if !self.this_ok {
+                    // Arrows see the enclosing function's `new.target`.
+                    return unsupported("`new.target` in arrows", m.span);
+                }
+                self.asm.load_new_target(dst);
                 Ok(())
             }
             Expression::CallExpression(c) => {
@@ -2217,6 +2236,37 @@ impl<'s> Gen<'s> {
             argc: Count(argc),
             temps: args,
         })
+    }
+
+    /// `new callee(args)`: the result goes to a fresh temporary first,
+    /// which holds the new object while the constructor runs (D-061), so
+    /// a throwing constructor leaves `dst` untouched.
+    fn new_expression(&mut self, n: &NewExpression<'_>, dst: Reg) -> CResult<()> {
+        let callee = self.temp()?;
+        self.expr_to(&n.callee, callee)?;
+        let mut args = Vec::with_capacity(n.arguments.len());
+        for a in &n.arguments {
+            let Some(e) = a.as_expression() else {
+                return unsupported("spread arguments", a.span());
+            };
+            let r = self.temp()?;
+            self.expr_to(e, r)?;
+            args.push(r);
+        }
+        let argc =
+            u32::try_from(args.len()).map_err(|_| CompileError::TooLarge("arguments".into()))?;
+        let result = self.temp()?;
+        let first = args.first().copied().unwrap_or(callee);
+        self.asm.construct(result, callee, first, Count(argc));
+        if result != dst {
+            self.asm.mov(dst, result);
+        }
+        self.free(result);
+        for &r in args.iter().rev() {
+            self.free(r);
+        }
+        self.free(callee);
+        Ok(())
     }
 
     fn free_call(&mut self, call: CallOperands) {
@@ -2341,9 +2391,6 @@ impl<'s> Gen<'s> {
     }
 
     fn binary(&mut self, b: &BinaryExpression<'_>, dst: Reg) -> CResult<()> {
-        if b.operator == BinaryOperator::Instanceof {
-            return unsupported("`instanceof` (needs the built-ins)", b.span);
-        }
         // The left operand is read after the right one is evaluated, so it
         // must not sit in a local the right side can assign.
         let lhs = if has_side_effects(&b.right) {
@@ -2393,11 +2440,10 @@ impl<'s> Gen<'s> {
                     B::LessEqualThan => self.asm.less_equal(dst, l, r, ic),
                     B::GreaterEqualThan => self.asm.greater_equal(dst, l, r, ic),
                     B::In => self.asm.has_property(dst, l, r, ic),
-                    B::StrictEquality
-                    | B::StrictInequality
-                    | B::Equality
-                    | B::Inequality
-                    | B::Instanceof => unreachable!("handled above"),
+                    B::StrictEquality | B::StrictInequality | B::Equality | B::Inequality => {
+                        unreachable!("handled above")
+                    }
+                    B::Instanceof => self.asm.instance_of(dst, l, r),
                 }
             }
         }
