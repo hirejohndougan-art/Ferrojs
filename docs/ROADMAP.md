@@ -172,7 +172,7 @@ Order matters: each task builds on the ones above it.
     interpreter's property ops (a frame for the call, D-036), and compile
     `get` / `set` in object literals. Global-name accessors wait for
     1.13's `Object.defineProperty` (none can be made before). needs: 1.8d, 1.7
-  - [ ] 1.8f The lazy key table for large shapes (hashed lookup for
+  - [~] (claimed 2026-11-25 09:14 UTC) 1.8f The lazy key table for large shapes (hashed lookup for
     shared and dictionary shapes, D-038/D-039 simplifications).
     needs: 1.8b
 - [x] 1.8c (2026-11-23) Objects, part c: indexed properties in the elements store
