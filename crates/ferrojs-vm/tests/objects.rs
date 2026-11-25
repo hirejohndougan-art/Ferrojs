@@ -7,7 +7,9 @@ use ferrojs_core::heap::HeapOptions;
 use ferrojs_value::{HeapRef, Kind, Value};
 use ferrojs_vm::object::{self, DEFAULT_INLINE};
 use ferrojs_vm::shape::{self, Attrs};
-use ferrojs_vm::{string, JsString, Object, RootedValue, Tables, Vm, VmOptions};
+use ferrojs_vm::{
+    string, Got, JsString, Object, PropertyValue, RootedValue, SetResult, Tables, Vm, VmOptions,
+};
 
 fn vm(stress: bool) -> Vm {
     Vm::new(VmOptions {
@@ -20,6 +22,39 @@ fn vm(stress: bool) -> Vm {
         ..VmOptions::default()
     })
     .unwrap()
+}
+
+// Data-property views of `get`, `get_own` and `set` for the tests that
+// never make accessors.
+fn data_get(
+    nogc: ferrojs_core::NoGc<'_>,
+    o: ferrojs_core::Gc<'_, Object>,
+    k: ferrojs_core::Gc<'_, JsString>,
+) -> Value {
+    match object::get(nogc, o, k) {
+        Got::Value(v) => v,
+        Got::Getter(_) => panic!("unexpected getter"),
+    }
+}
+
+fn data_get_own(
+    nogc: ferrojs_core::NoGc<'_>,
+    o: ferrojs_core::Gc<'_, Object>,
+    k: ferrojs_core::Gc<'_, JsString>,
+) -> Option<(Value, Attrs)> {
+    match object::get_own(nogc, o, k)? {
+        (PropertyValue::Data(v), a) => Some((v, a)),
+        (PropertyValue::Accessor { .. }, _) => panic!("unexpected accessor"),
+    }
+}
+
+fn data_set(
+    s: &mut Scope<'_>,
+    o: Root<'_, Object>,
+    k: Root<'_, JsString>,
+    v: RootedValue<'_>,
+) -> Result<bool, ferrojs_core::AllocError> {
+    object::set(s, o, k, v).map(SetResult::unwrap_done)
 }
 
 fn atom<'s>(s: &mut Scope<'s>, t: &mut Tables, text: &str) -> Root<'s, JsString> {
@@ -74,8 +109,8 @@ fn objects_built_the_same_way_share_shapes() {
                 .bind(s.nogc());
             let o = s.root(o);
             let v = RootedValue::Primitive(Value::from_i32(i));
-            assert!(object::set(s, o, x, v).unwrap());
-            assert!(object::set(s, o, y, v).unwrap());
+            assert!(data_set(s, o, x, v).unwrap());
+            assert!(data_set(s, o, y, v).unwrap());
             objs.push(o);
         }
         let shape_of =
@@ -88,10 +123,10 @@ fn objects_built_the_same_way_share_shapes() {
             .bind(s.nogc());
         let o = s.root(o);
         let v = RootedValue::Primitive(Value::NULL);
-        object::set(s, o, y, v).unwrap();
-        object::set(s, o, x, v).unwrap();
+        data_set(s, o, y, v).unwrap();
+        data_set(s, o, x, v).unwrap();
         assert_ne!(shape_of(s, o), shape_of(s, objs[0]));
-        object::set(s, objs[2], z, v).unwrap();
+        data_set(s, objs[2], z, v).unwrap();
         assert_ne!(shape_of(s, objs[2]), shape_of(s, objs[0]));
         // Insertion order is kept.
         let keys: Vec<String> = object::own_keys(s.nogc(), objs[2].get(s.nogc()))
@@ -101,7 +136,7 @@ fn objects_built_the_same_way_share_shapes() {
         assert_eq!(keys, ["x", "y", "z"]);
         // Updating a property keeps the shape.
         let before = shape_of(s, objs[0]);
-        object::set(s, objs[0], x, RootedValue::Primitive(Value::from_i32(9))).unwrap();
+        data_set(s, objs[0], x, RootedValue::Primitive(Value::from_i32(9))).unwrap();
         assert_eq!(shape_of(s, objs[0]), before);
     });
 }
@@ -118,13 +153,13 @@ fn many_properties_spill_into_out_of_line_slots() {
             let keys: Vec<_> = (0..60).map(|i| atom(s, t, &format!("p{i}"))).collect();
             for (i, &k) in keys.iter().enumerate() {
                 let v = RootedValue::Primitive(Value::from_i32(i as i32 * 3));
-                assert!(object::set(s, o, k, v).unwrap());
+                assert!(data_set(s, o, k, v).unwrap());
                 if i % 7 == 0 {
                     s.collect();
                 }
             }
             for (i, &k) in keys.iter().enumerate() {
-                let v = object::get(s.nogc(), o.get(s.nogc()), k.get(s.nogc()));
+                let v = data_get(s.nogc(), o.get(s.nogc()), k.get(s.nogc()));
                 assert_eq!(v, Value::from_i32(i as i32 * 3), "inline {inline}, p{i}");
             }
             assert_eq!(
@@ -148,9 +183,9 @@ fn non_writable_properties_refuse_assignment_own_and_inherited() {
         let one = RootedValue::Primitive(Value::from_i32(1));
         let two = RootedValue::Primitive(Value::from_i32(2));
         assert!(object::define(s, proto, k, one, ro).unwrap());
-        assert!(!object::set(s, proto, k, two).unwrap());
+        assert!(!data_set(s, proto, k, two).unwrap());
         assert_eq!(
-            object::get(s.nogc(), proto.get(s.nogc()), k.get(s.nogc())),
+            data_get(s.nogc(), proto.get(s.nogc()), k.get(s.nogc())),
             Value::from_i32(1)
         );
         let child = object::new_object(s, t, Some(proto), DEFAULT_INLINE)
@@ -158,25 +193,22 @@ fn non_writable_properties_refuse_assignment_own_and_inherited() {
             .bind(s.nogc());
         let child = s.root(child);
         assert_eq!(
-            object::get(s.nogc(), child.get(s.nogc()), k.get(s.nogc())),
+            data_get(s.nogc(), child.get(s.nogc()), k.get(s.nogc())),
             Value::from_i32(1)
         );
-        assert!(
-            !object::set(s, child, k, two).unwrap(),
-            "inherited read-only"
-        );
-        assert!(object::get_own(s.nogc(), child.get(s.nogc()), k.get(s.nogc())).is_none());
+        assert!(!data_set(s, child, k, two).unwrap(), "inherited read-only");
+        assert!(data_get_own(s.nogc(), child.get(s.nogc()), k.get(s.nogc())).is_none());
         // It is configurable, so it can become writable again (which moves
         // the prototype to dictionary mode).
         assert!(object::define(s, proto, k, two, Attrs::DEFAULT).unwrap());
         assert!(object::is_dictionary(s.nogc(), proto.get(s.nogc())));
         assert_eq!(
-            object::get(s.nogc(), child.get(s.nogc()), k.get(s.nogc())),
+            data_get(s.nogc(), child.get(s.nogc()), k.get(s.nogc())),
             Value::from_i32(2)
         );
-        assert!(object::set(s, child, k, one).unwrap(), "now writable");
+        assert!(data_set(s, child, k, one).unwrap(), "now writable");
         assert_eq!(
-            object::get_own(s.nogc(), child.get(s.nogc()), k.get(s.nogc())).map(|p| p.0),
+            data_get_own(s.nogc(), child.get(s.nogc()), k.get(s.nogc())).map(|p| p.0),
             Some(Value::from_i32(1))
         );
     });
@@ -341,7 +373,7 @@ fn random_model_run(seed: u64, steps: usize, stress: bool, nkeys: usize) {
                         let ok = object::define(s, objs[o], keys[k], rv, Attrs(a)).unwrap();
                         assert_eq!(ok, model_define(&mut model[o], k, v, a), "define");
                     } else {
-                        let ok = object::set(s, objs[o], keys[k], rv).unwrap();
+                        let ok = data_set(s, objs[o], keys[k], rv).unwrap();
                         assert_eq!(ok, model_set(&mut model, o, k, v), "set");
                     }
                 }
@@ -358,7 +390,7 @@ fn random_model_run(seed: u64, steps: usize, stress: bool, nkeys: usize) {
                 10..=13 => {
                     let (o, k) = (rng.below(objs.len()), rng.below(keys.len()));
                     let nogc = s.nogc();
-                    let got = object::get(nogc, objs[o].get(nogc), keys[k].get(nogc));
+                    let got = data_get(nogc, objs[o].get(nogc), keys[k].get(nogc));
                     let want = match model_get(&model, o, k) {
                         None => Value::UNDEFINED,
                         Some(MVal::Int(i)) => Value::from_i32(i),
@@ -391,7 +423,7 @@ fn random_model_run(seed: u64, steps: usize, stress: bool, nkeys: usize) {
             let want: Vec<usize> = m.props.iter().map(|p| p.0).collect();
             assert_eq!(own, want, "keys of object {o}");
             for &(k, _, a) in &m.props {
-                let (_, attrs) = object::get_own(nogc, obj, keys[k].get(nogc)).unwrap();
+                let (_, attrs) = data_get_own(nogc, obj, keys[k].get(nogc)).unwrap();
                 assert_eq!(attrs.0, a);
             }
             assert_eq!(object::is_extensible(nogc, obj), m.extensible);
@@ -453,7 +485,7 @@ fn frozen_properties_only_accept_their_own_value() {
         assert!(object::define(s, o, w, v(1), configurable).unwrap());
         assert!(object::define(s, o, w, v(2), configurable).unwrap());
         assert_eq!(
-            object::get(s.nogc(), o.get(s.nogc()), w.get(s.nogc())),
+            data_get(s.nogc(), o.get(s.nogc()), w.get(s.nogc())),
             Value::from_i32(2)
         );
     });
@@ -489,7 +521,7 @@ fn the_tracer_reports_every_reference() {
                 expected.push(st.get(s.nogc()).offset());
                 RootedValue::String(st)
             };
-            object::set(s, o, k, v).unwrap();
+            data_set(s, o, k, v).unwrap();
         }
         let nogc = s.nogc();
         let obj = o.get(nogc);
@@ -545,12 +577,12 @@ fn cells_reachable_only_through_edges_survive() {
                     let p = inner.root(p);
                     let mark = atom(inner, t, "mark");
                     let v = RootedValue::Primitive(Value::from_i32(100 + i as i32));
-                    object::set(inner, p, mark, v).unwrap();
+                    data_set(inner, p, mark, v).unwrap();
                     let c = object::new_object(inner, t, Some(p), 0)
                         .unwrap()
                         .bind(inner.nogc());
                     let c = inner.root(c);
-                    object::set(inner, o, k, RootedValue::Object(c)).unwrap();
+                    data_set(inner, o, k, RootedValue::Object(c)).unwrap();
                 });
                 s.collect();
             }
@@ -562,7 +594,7 @@ fn cells_reachable_only_through_edges_survive() {
             let nogc = s.nogc();
             let obj = o.get(nogc);
             for (i, &k) in keys.iter().enumerate() {
-                let v = object::get(nogc, obj, k.get(nogc));
+                let v = data_get(nogc, obj, k.get(nogc));
                 let Kind::Object(r) = v.kind() else {
                     panic!("k{i} lost its object")
                 };
@@ -613,7 +645,7 @@ fn a_failed_add_leaves_no_property_behind() {
         // slots growth, after the table already has room.
         let keys: Vec<_> = (0..20).map(|i| atom(s, t, &format!("f{i}"))).collect();
         for &k in &keys {
-            object::set(s, o, k, RootedValue::Primitive(Value::from_i32(1))).unwrap();
+            data_set(s, o, k, RootedValue::Primitive(Value::from_i32(1))).unwrap();
         }
         object::delete(s, o, keys[0]).unwrap();
         assert!(object::is_dictionary(s.nogc(), o.get(s.nogc())));
@@ -629,16 +661,16 @@ fn a_failed_add_leaves_no_property_behind() {
         }
         let mut added = 0;
         for (i, &k) in late.iter().enumerate() {
-            match object::set(s, o, k, RootedValue::Primitive(Value::from_i32(i as i32))) {
+            match data_set(s, o, k, RootedValue::Primitive(Value::from_i32(i as i32))) {
                 Ok(_) => added += 1,
                 Err(_) => {
                     // The key must not be visible, and every key there must
                     // read back.
                     let nogc = s.nogc();
                     let obj = o.get(nogc);
-                    assert!(object::get_own(nogc, obj, k.get(nogc)).is_none());
+                    assert!(data_get_own(nogc, obj, k.get(nogc)).is_none());
                     for key in object::own_keys(nogc, obj) {
-                        let _ = object::get(nogc, obj, key);
+                        let _ = data_get(nogc, obj, key);
                     }
                     return;
                 }
@@ -662,9 +694,9 @@ fn deleting_the_last_property_steps_back_to_the_shared_shape() {
             .unwrap()
             .bind(s.nogc());
         let o2 = s.root(o2);
-        object::set(s, o1, a, v).unwrap();
-        object::set(s, o2, a, v).unwrap();
-        object::set(s, o2, b, v).unwrap();
+        data_set(s, o1, a, v).unwrap();
+        data_set(s, o2, a, v).unwrap();
+        data_set(s, o2, b, v).unwrap();
         assert!(object::delete(s, o2, b).unwrap());
         let nogc = s.nogc();
         assert!(!object::is_dictionary(nogc, o2.get(nogc)));
@@ -672,17 +704,14 @@ fn deleting_the_last_property_steps_back_to_the_shared_shape() {
             object::shape(nogc, o1.get(nogc)).offset(),
             object::shape(nogc, o2.get(nogc)).offset()
         );
-        assert_eq!(
-            object::get(nogc, o2.get(nogc), b.get(nogc)),
-            Value::UNDEFINED
-        );
+        assert_eq!(data_get(nogc, o2.get(nogc), b.get(nogc)), Value::UNDEFINED);
         // Deleting anything else goes to dictionary mode.
-        object::set(s, o2, b, v).unwrap();
+        data_set(s, o2, b, v).unwrap();
         assert!(object::delete(s, o2, a).unwrap());
         let nogc = s.nogc();
         assert!(object::is_dictionary(nogc, o2.get(nogc)));
         assert_eq!(
-            object::get(nogc, o2.get(nogc), b.get(nogc)),
+            data_get(nogc, o2.get(nogc), b.get(nogc)),
             Value::from_i32(1)
         );
     });
@@ -700,7 +729,7 @@ fn objects_past_the_shared_limit_go_to_dictionary_mode() {
         let keys: Vec<_> = (0..n).map(|i| atom(s, t, &format!("q{i}"))).collect();
         for (i, &k) in keys.iter().enumerate() {
             let v = RootedValue::Primitive(Value::from_i32(i as i32));
-            assert!(object::set(s, o, k, v).unwrap());
+            assert!(data_set(s, o, k, v).unwrap());
             let dict = object::is_dictionary(s.nogc(), o.get(s.nogc()));
             assert_eq!(dict, i as u32 >= object::MAX_SHARED_PROPERTIES, "after {i}");
         }
@@ -711,7 +740,7 @@ fn objects_past_the_shared_limit_go_to_dictionary_mode() {
             assert!(object::delete(s, o, k).unwrap());
         }
         for &k in keys.iter().step_by(2) {
-            assert!(object::set(s, o, k, RootedValue::Primitive(Value::NULL)).unwrap());
+            assert!(data_set(s, o, k, RootedValue::Primitive(Value::NULL)).unwrap());
         }
         s.collect();
         let nogc = s.nogc();
@@ -722,7 +751,7 @@ fn objects_past_the_shared_limit_go_to_dictionary_mode() {
             } else {
                 Value::from_i32(i as i32)
             };
-            assert_eq!(object::get(nogc, obj, k.get(nogc)), want);
+            assert_eq!(data_get(nogc, obj, k.get(nogc)), want);
         }
         let order: Vec<u32> = object::own_keys(nogc, obj)
             .iter()

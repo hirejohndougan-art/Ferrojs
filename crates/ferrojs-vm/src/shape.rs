@@ -43,7 +43,9 @@ const SIZE: u32 = 32;
 /// The reference fields, for the tracer.
 pub(crate) const REF_FIELDS: [u32; 5] = [PARENT, PROTO, KEY, CHILD, SIBLING];
 
-/// Property attributes (ECMA-262 §6.1.7.1, data properties only so far).
+/// Property attributes (ECMA-262 §6.1.7.1). An accessor property has
+/// [`Attrs::ACCESSOR`] and never [`Attrs::WRITABLE`]; its slot holds an
+/// accessor pair cell (task 1.8d, D-055).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Attrs(pub u8);
 
@@ -51,11 +53,18 @@ impl Attrs {
     pub const WRITABLE: Attrs = Attrs(1);
     pub const ENUMERABLE: Attrs = Attrs(2);
     pub const CONFIGURABLE: Attrs = Attrs(4);
+    /// An accessor property: the slot holds its getter and setter pair.
+    pub const ACCESSOR: Attrs = Attrs(8);
     /// What assignment creates: writable, enumerable, configurable.
     pub const DEFAULT: Attrs = Attrs(7);
 
     pub const fn contains(self, other: Attrs) -> bool {
         self.0 & other.0 == other.0
+    }
+
+    /// These attributes with `other`'s bits added.
+    pub const fn with(self, other: Attrs) -> Attrs {
+        Attrs(self.0 | other.0)
     }
 }
 

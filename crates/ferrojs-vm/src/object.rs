@@ -1,5 +1,5 @@
-//! Ordinary objects with named data properties (ARCHITECTURE.md §7.1,
-//! D-038).
+//! Ordinary objects with named data and accessor properties
+//! (ARCHITECTURE.md §7.1, D-038, D-055).
 //!
 //! Layout:
 //!
@@ -14,8 +14,16 @@
 //! inline, the rest live in the out-of-line `Slots` cell (header: kind |
 //! capacity << 32, then the values), which grows by doubling. Property
 //! keys are atoms. Deletion, attribute changes, non-extensible objects
-//! and dictionary mode came with task 1.8b (D-039); accessors come with
-//! 1.8d, indexed properties with 1.8c.
+//! and dictionary mode came with task 1.8b (D-039), indexed properties
+//! with 1.8c.
+//!
+//! An accessor property (task 1.8d, D-055) has [`Attrs::ACCESSOR`] and
+//! its slot holds an object-tagged reference to an accessor pair cell
+//! (kind 11, 24 bytes: header, getter value, setter value; each a
+//! function or `undefined`). Every pair belongs to one property of one
+//! object, so changing one half updates it in place. This module never
+//! calls code: [`get`] and [`set`] say which getter or setter the caller
+//! has to call ([`Got::Getter`], [`SetResult::Setter`]).
 
 use ferrojs_core::gc::{Root, Scope};
 use ferrojs_core::{AllocError, Gc, NoGc, Unbound};
@@ -29,6 +37,114 @@ pub struct Object;
 
 /// Type marker for out-of-line slot cells.
 pub struct Slots;
+
+/// Type marker for accessor pair cells.
+pub struct AccessorPair;
+
+pub(crate) const ACCESSOR_GET: u32 = 8;
+pub(crate) const ACCESSOR_SET: u32 = 16;
+pub(crate) const ACCESSOR_SIZE: u32 = 24;
+
+/// An own property's contents.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PropertyValue {
+    Data(Value),
+    /// Getter and setter, each a function or `undefined`.
+    Accessor {
+        get: Value,
+        set: Value,
+    },
+}
+
+/// What \[\[Get\]\] found.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Got {
+    /// The value (`undefined` when absent or when the accessor has no
+    /// getter).
+    Value(Value),
+    /// An accessor's getter: the result is calling it with the receiver
+    /// as `this` and no arguments.
+    Getter(Value),
+}
+
+/// What \[\[Set\]\] did.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SetResult {
+    /// Stored (`true`) or refused (`false`; strict code throws a
+    /// `TypeError`).
+    Done(bool),
+    /// An accessor's setter: the assignment is calling it with the
+    /// receiver as `this` and the value as its argument (it succeeds
+    /// whatever the setter returns).
+    Setter(Value),
+}
+
+impl SetResult {
+    /// The outcome of a set that can't meet a setter (on an object the
+    /// caller knows has no accessors).
+    #[track_caller]
+    pub fn unwrap_done(self) -> bool {
+        match self {
+            SetResult::Done(ok) => ok,
+            SetResult::Setter(_) => panic!("set reached a setter"),
+        }
+    }
+}
+
+/// A property descriptor (ECMA-262 §6.2.6) with each field present or
+/// not. It can't be both a data and an accessor descriptor; `get` and
+/// `set` must be functions or `undefined` (ToPropertyDescriptor checks
+/// both before calling [`define_property`]).
+#[derive(Clone, Copy, Default)]
+pub struct Descriptor<'s> {
+    pub value: Option<RootedValue<'s>>,
+    pub writable: Option<bool>,
+    pub get: Option<RootedValue<'s>>,
+    pub set: Option<RootedValue<'s>>,
+    pub enumerable: Option<bool>,
+    pub configurable: Option<bool>,
+}
+
+impl<'s> Descriptor<'s> {
+    /// A complete data descriptor.
+    pub fn data(value: RootedValue<'s>, attrs: Attrs) -> Descriptor<'s> {
+        debug_assert!(!attrs.contains(Attrs::ACCESSOR));
+        Descriptor {
+            value: Some(value),
+            writable: Some(attrs.contains(Attrs::WRITABLE)),
+            enumerable: Some(attrs.contains(Attrs::ENUMERABLE)),
+            configurable: Some(attrs.contains(Attrs::CONFIGURABLE)),
+            ..Descriptor::default()
+        }
+    }
+
+    /// A complete accessor descriptor (`enumerable` and `configurable`
+    /// from `attrs`).
+    pub fn accessor(get: RootedValue<'s>, set: RootedValue<'s>, attrs: Attrs) -> Descriptor<'s> {
+        Descriptor {
+            get: Some(get),
+            set: Some(set),
+            enumerable: Some(attrs.contains(Attrs::ENUMERABLE)),
+            configurable: Some(attrs.contains(Attrs::CONFIGURABLE)),
+            ..Descriptor::default()
+        }
+    }
+
+    pub fn is_accessor(&self) -> bool {
+        self.get.is_some() || self.set.is_some()
+    }
+
+    pub fn is_data(&self) -> bool {
+        self.value.is_some() || self.writable.is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.is_accessor()
+            && !self.is_data()
+            && self.enumerable.is_none()
+            && self.configurable.is_none()
+    }
+}
 
 pub(crate) const ELEMENTS: u32 = 8;
 pub(crate) const SLOTS: u32 = 12;
@@ -113,25 +229,65 @@ fn write_slot(
     }
 }
 
-/// An own property: its value and attributes.
-pub fn get_own(nogc: NoGc<'_>, o: Gc<'_, Object>, key: Gc<'_, JsString>) -> Option<(Value, Attrs)> {
-    debug_assert!(crate::string::is_atom(nogc, key), "property keys are atoms");
-    let p = shape::lookup(nogc, shape(nogc, o), key)?;
-    Some((read_slot(nogc, o, p.slot), p.attrs))
+/// The accessor pair an accessor property's slot refers to.
+fn pair_of<'a>(nogc: NoGc<'a>, slot_value: Value) -> Gc<'a, AccessorPair> {
+    let r = crate::value_ref(slot_value.to_bits()).expect("accessor slots hold a pair");
+    let pair: Gc<'_, AccessorPair> = nogc.handle(r).expect("accessor pairs are live");
+    debug_assert_eq!(
+        nogc.read_u64(pair, 0) as u8,
+        CellKind::Accessor as u8,
+        "not an accessor pair"
+    );
+    pair
 }
 
-/// \[\[Get\]\] for data properties: own, then up the prototype chain;
-/// `undefined` if absent. `key` must be an atom.
-pub fn get(nogc: NoGc<'_>, o: Gc<'_, Object>, key: Gc<'_, JsString>) -> Value {
+fn pair_half(nogc: NoGc<'_>, pair: Gc<'_, AccessorPair>, field: u32) -> Value {
+    Value::from_bits_checked(nogc.read_u64(pair, field)).expect("pairs hold valid values")
+}
+
+fn read_property(nogc: NoGc<'_>, o: Gc<'_, Object>, p: Property) -> PropertyValue {
+    let v = read_slot(nogc, o, p.slot);
+    if !p.attrs.contains(Attrs::ACCESSOR) {
+        return PropertyValue::Data(v);
+    }
+    let pair = pair_of(nogc, v);
+    PropertyValue::Accessor {
+        get: pair_half(nogc, pair, ACCESSOR_GET),
+        set: pair_half(nogc, pair, ACCESSOR_SET),
+    }
+}
+
+/// An own property: its contents and attributes.
+pub fn get_own(
+    nogc: NoGc<'_>,
+    o: Gc<'_, Object>,
+    key: Gc<'_, JsString>,
+) -> Option<(PropertyValue, Attrs)> {
+    debug_assert!(crate::string::is_atom(nogc, key), "property keys are atoms");
+    let p = shape::lookup(nogc, shape(nogc, o), key)?;
+    Some((read_property(nogc, o, p), p.attrs))
+}
+
+/// \[\[Get\]\] with the object as receiver (OrdinaryGet): own, then up
+/// the prototype chain; `undefined` if absent. An accessor's getter is
+/// for the caller to call. `key` must be an atom.
+pub fn get(nogc: NoGc<'_>, o: Gc<'_, Object>, key: Gc<'_, JsString>) -> Got {
     debug_assert!(crate::string::is_atom(nogc, key), "property keys are atoms");
     let mut cur = Some(o.cast::<Object>());
     while let Some(obj) = cur {
-        if let Some((v, _)) = get_own(nogc, obj, key) {
-            return v;
+        match get_own(nogc, obj, key) {
+            Some((PropertyValue::Data(v), _)) => return Got::Value(v),
+            Some((PropertyValue::Accessor { get, .. }, _)) => {
+                return if get.is_undefined() {
+                    Got::Value(Value::UNDEFINED)
+                } else {
+                    Got::Getter(get)
+                };
+            }
+            None => cur = prototype(nogc, obj),
         }
-        cur = prototype(nogc, obj);
     }
-    Value::UNDEFINED
+    Got::Value(Value::UNDEFINED)
 }
 
 /// The own property keys in insertion order.
@@ -139,54 +295,67 @@ pub fn own_keys<'a>(nogc: NoGc<'a>, o: Gc<'_, Object>) -> Vec<Gc<'a, JsString>> 
     shape::keys(nogc, shape(nogc, o))
 }
 
-/// \[\[Set\]\] with the object as receiver, for data properties
-/// (OrdinarySet): an own writable property is updated; a non-writable one
-/// (own or inherited) refuses; otherwise the property is added with the
-/// default attributes. Returns whether it succeeded (strict code throws a
-/// `TypeError` on `false`). `key` must be an atom.
+/// The outcome of assigning to an accessor property: call its setter,
+/// or refuse if it has none.
+fn setter_of(set: Value) -> SetResult {
+    if set.is_undefined() {
+        SetResult::Done(false)
+    } else {
+        SetResult::Setter(set)
+    }
+}
+
+/// \[\[Set\]\] with the object as receiver (OrdinarySet): an own
+/// writable data property is updated; a non-writable data property (own
+/// or inherited) refuses; an accessor (own or inherited) hands back its
+/// setter, or refuses without one; otherwise the property is added with
+/// the default attributes. `key` must be an atom.
 pub fn set(
     s: &mut Scope<'_>,
     o: Root<'_, Object>,
     key: Root<'_, JsString>,
     value: RootedValue<'_>,
-) -> Result<bool, AllocError> {
+) -> Result<SetResult, AllocError> {
     let nogc = s.nogc();
     let (obj, k) = (o.get(nogc), key.get(nogc));
     debug_assert!(crate::string::is_atom(nogc, k), "property keys are atoms");
     if let Some(p) = shape::lookup(nogc, shape(nogc, obj), k) {
+        if p.attrs.contains(Attrs::ACCESSOR) {
+            let pair = pair_of(nogc, read_slot(nogc, obj, p.slot));
+            return Ok(setter_of(pair_half(nogc, pair, ACCESSOR_SET)));
+        }
         if !p.attrs.contains(Attrs::WRITABLE) {
-            return Ok(false);
+            return Ok(SetResult::Done(false));
         }
         let (bits, referent) = value.resolve(nogc);
         write_slot(nogc, obj, p.slot, bits, referent);
-        return Ok(true);
+        return Ok(SetResult::Done(true));
     }
-    // An inherited non-writable property blocks the assignment.
+    // An inherited accessor or non-writable property decides the
+    // assignment; an inherited writable one doesn't.
     let mut proto = prototype(nogc, obj);
     while let Some(p) = proto {
-        if let Some((_, attrs)) = get_own(nogc, p, k) {
-            if !attrs.contains(Attrs::WRITABLE) {
-                return Ok(false);
+        match get_own(nogc, p, k) {
+            Some((PropertyValue::Accessor { set, .. }, _)) => return Ok(setter_of(set)),
+            Some((PropertyValue::Data(_), attrs)) => {
+                if !attrs.contains(Attrs::WRITABLE) {
+                    return Ok(SetResult::Done(false));
+                }
+                break;
             }
-            break;
+            None => proto = prototype(nogc, p),
         }
-        proto = prototype(nogc, p);
     }
     if !is_extensible(s.nogc(), o.get(s.nogc())) {
-        return Ok(false);
+        return Ok(SetResult::Done(false));
     }
     add(s, o, key, value, Attrs::DEFAULT)?;
-    Ok(true)
+    Ok(SetResult::Done(true))
 }
 
-/// Defines an own data property with `attrs` and `value`
-/// (\[\[DefineOwnProperty\]\] with a complete data descriptor, following
-/// ValidateAndApplyPropertyDescriptor). A new property needs an
-/// extensible object. An existing non-configurable property can't become
-/// configurable or change enumerability, and if it is also non-writable it
-/// can't become writable or change value (SameValue). Other attribute
-/// changes move the object to dictionary mode. Returns whether it
-/// succeeded. `key` must be an atom.
+/// Defines an own data property with `attrs` (no
+/// [`Attrs::ACCESSOR`]) and `value`: [`define_property`] with a complete
+/// data descriptor. Returns whether it succeeded. `key` must be an atom.
 pub fn define(
     s: &mut Scope<'_>,
     o: Root<'_, Object>,
@@ -194,41 +363,194 @@ pub fn define(
     value: RootedValue<'_>,
     attrs: Attrs,
 ) -> Result<bool, AllocError> {
+    define_property(s, o, key, Descriptor::data(value, attrs))
+}
+
+/// A new accessor pair holding `get` and `set` (`undefined` if absent).
+fn new_pair<'s, 'r>(
+    s: &mut Scope<'s>,
+    get: Option<RootedValue<'r>>,
+    set: Option<RootedValue<'r>>,
+) -> Result<Root<'s, Object>, AllocError> {
+    let cell = s.alloc::<AccessorPair>(ACCESSOR_SIZE)?;
+    let nogc = s.nogc();
+    let pair = cell.bind(nogc);
+    nogc.write_u64(pair, 0, CellKind::Accessor as u64);
+    for (field, half) in [(ACCESSOR_GET, get), (ACCESSOR_SET, set)] {
+        let (bits, referent) = half
+            .unwrap_or(RootedValue::Primitive(Value::UNDEFINED))
+            .resolve(nogc);
+        nogc.write_value_bits(pair, field, bits, referent);
+    }
+    // The slot refers to the pair with an object tag (the tracer follows
+    // it like any reference); only accessor paths ever read it.
+    Ok(s.root(pair.cast::<Object>()))
+}
+
+/// The value `v` names, for SameValue.
+fn value_of(nogc: NoGc<'_>, v: RootedValue<'_>) -> Value {
+    Value::from_bits_checked(v.resolve(nogc).0).expect("valid value")
+}
+
+/// \[\[DefineOwnProperty\]\] of an ordinary object
+/// (ValidateAndApplyPropertyDescriptor, ECMA-262 §10.1.6.3). A new
+/// property needs an extensible object; absent fields default to
+/// `undefined` and `false`. On an existing non-configurable property the
+/// descriptor can't make it configurable, change its enumerability or
+/// turn it between data and accessor; for an accessor it can't change
+/// the getter or setter (SameValue), and for a non-writable data
+/// property it can't make it writable or change its value. Otherwise
+/// present fields replace the current ones (a change of kind keeps
+/// enumerable and configurable and resets the rest); an attribute change
+/// moves the object to dictionary mode. Returns whether it succeeded.
+/// `key` must be an atom.
+///
+/// # Panics
+///
+/// If `desc` is both a data and an accessor descriptor.
+pub fn define_property(
+    s: &mut Scope<'_>,
+    o: Root<'_, Object>,
+    key: Root<'_, JsString>,
+    desc: Descriptor<'_>,
+) -> Result<bool, AllocError> {
+    assert!(
+        !(desc.is_accessor() && desc.is_data()),
+        "a descriptor is either data or accessor"
+    );
     let nogc = s.nogc();
     let (obj, k) = (o.get(nogc), key.get(nogc));
     debug_assert!(crate::string::is_atom(nogc, k), "property keys are atoms");
     let sh = shape(nogc, obj);
-    let Some(Property { slot, attrs: a }) = shape::lookup(nogc, sh, k) else {
+    let flag = |b: Option<bool>, a: Attrs| if b == Some(true) { a } else { Attrs(0) };
+    let Some(current) = shape::lookup(nogc, sh, k) else {
         if !shape::is_extensible(nogc, sh) {
             return Ok(false);
         }
-        add(s, o, key, value, attrs)?;
+        let attrs = flag(desc.enumerable, Attrs::ENUMERABLE)
+            .with(flag(desc.configurable, Attrs::CONFIGURABLE));
+        if desc.is_accessor() {
+            let pair = new_pair(s, desc.get, desc.set)?;
+            add(
+                s,
+                o,
+                key,
+                RootedValue::Object(pair),
+                attrs.with(Attrs::ACCESSOR),
+            )?;
+        } else {
+            let value = desc
+                .value
+                .unwrap_or(RootedValue::Primitive(Value::UNDEFINED));
+            add(
+                s,
+                o,
+                key,
+                value,
+                attrs.with(flag(desc.writable, Attrs::WRITABLE)),
+            )?;
+        }
         return Ok(true);
     };
-    if !a.contains(Attrs::CONFIGURABLE) {
-        if attrs.contains(Attrs::CONFIGURABLE)
-            || a.contains(Attrs::ENUMERABLE) != attrs.contains(Attrs::ENUMERABLE)
+    if desc.is_empty() {
+        return Ok(true);
+    }
+    let cur = current.attrs;
+    let cur_accessor = cur.contains(Attrs::ACCESSOR);
+    let old = read_property(nogc, obj, current);
+    if !cur.contains(Attrs::CONFIGURABLE) {
+        if desc.configurable == Some(true)
+            || desc
+                .enumerable
+                .is_some_and(|e| e != cur.contains(Attrs::ENUMERABLE))
         {
             return Ok(false);
         }
-        if !a.contains(Attrs::WRITABLE) {
-            let old = read_slot(nogc, obj, slot);
-            let new = Value::from_bits_checked(value.resolve(nogc).0).expect("valid value");
-            return Ok(!attrs.contains(Attrs::WRITABLE) && same_value(nogc, old, new));
+        let generic = !desc.is_accessor() && !desc.is_data();
+        if !generic && desc.is_accessor() != cur_accessor {
+            return Ok(false);
+        }
+        let differs = |new: Option<RootedValue<'_>>, old: Value| {
+            new.is_some_and(|v| !same_value(nogc, value_of(nogc, v), old))
+        };
+        match old {
+            PropertyValue::Accessor { get, set } => {
+                if differs(desc.get, get) || differs(desc.set, set) {
+                    return Ok(false);
+                }
+            }
+            PropertyValue::Data(v) => {
+                if !cur.contains(Attrs::WRITABLE)
+                    && (desc.writable == Some(true) || differs(desc.value, v))
+                {
+                    return Ok(false);
+                }
+            }
         }
     }
-    if a != attrs {
+    let kept = |b: Option<bool>, a: Attrs| match b {
+        Some(b) => flag(Some(b), a),
+        None => Attrs(cur.0 & a.0),
+    };
+    let common =
+        kept(desc.enumerable, Attrs::ENUMERABLE).with(kept(desc.configurable, Attrs::CONFIGURABLE));
+    // What goes in the slot: a new pair (data to accessor), a value, or
+    // the halves of the current pair to replace.
+    enum Content<'p, 'r> {
+        Pair(Root<'p, Object>),
+        Value(RootedValue<'r>),
+        Patch,
+    }
+    let (attrs, content) = if desc.is_accessor() && !cur_accessor {
+        let pair = new_pair(s, desc.get, desc.set)?;
+        (common.with(Attrs::ACCESSOR), Some(Content::Pair(pair)))
+    } else if desc.is_data() && cur_accessor {
+        let value = desc
+            .value
+            .unwrap_or(RootedValue::Primitive(Value::UNDEFINED));
+        let writable = flag(desc.writable, Attrs::WRITABLE);
+        (common.with(writable), Some(Content::Value(value)))
+    } else if cur_accessor {
+        let patch = desc.get.is_some() || desc.set.is_some();
+        (
+            common.with(Attrs::ACCESSOR),
+            patch.then_some(Content::Patch),
+        )
+    } else {
+        let writable = kept(desc.writable, Attrs::WRITABLE);
+        (common.with(writable), desc.value.map(Content::Value))
+    };
+    if attrs != cur {
         let sh = to_own_dictionary(s, o)?;
         let nogc = s.nogc();
         shape::dict_set_attrs(nogc, sh.get(nogc), key.get(nogc), attrs);
     }
     let nogc = s.nogc();
-    let (bits, referent) = value.resolve(nogc);
-    write_slot(nogc, o.get(nogc), slot, bits, referent);
+    let obj = o.get(nogc);
+    match content {
+        None => {}
+        Some(Content::Pair(pair)) => {
+            let (bits, referent) = RootedValue::Object(pair).resolve(nogc);
+            write_slot(nogc, obj, current.slot, bits, referent);
+        }
+        Some(Content::Value(v)) => {
+            let (bits, referent) = v.resolve(nogc);
+            write_slot(nogc, obj, current.slot, bits, referent);
+        }
+        Some(Content::Patch) => {
+            let pair = pair_of(nogc, read_slot(nogc, obj, current.slot));
+            for (field, half) in [(ACCESSOR_GET, desc.get), (ACCESSOR_SET, desc.set)] {
+                if let Some(v) = half {
+                    let (bits, referent) = v.resolve(nogc);
+                    nogc.write_value_bits(pair, field, bits, referent);
+                }
+            }
+        }
+    }
     Ok(true)
 }
 
-/// \[\[Delete\]\] for own data properties: removes `key` unless it is
+/// \[\[Delete\]\] for own properties: removes `key` unless it is
 /// non-configurable. Deleting the property added last steps back to the
 /// parent shape; any other moves the object to dictionary mode. Returns
 /// whether the property is gone.

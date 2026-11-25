@@ -15,7 +15,7 @@ use ferrojs_value::Value;
 #[cfg(target_os = "linux")]
 use ferrojs_vm::object::{self, DEFAULT_INLINE};
 #[cfg(target_os = "linux")]
-use ferrojs_vm::{string, JsString, Object, RootedValue, Vm, VmOptions};
+use ferrojs_vm::{string, Got, JsString, Object, RootedValue, Vm, VmOptions};
 #[cfg(target_os = "linux")]
 use gungraun::prelude::*;
 
@@ -88,7 +88,10 @@ fn work((mut vm, child, keys): Setup) -> u64 {
         for i in 0..1000 {
             let nogc = s.nogc();
             let k = keys[i % 16].get(nogc);
-            acc = acc.wrapping_add(object::get(nogc, black_box(child.get(nogc)), k).to_bits());
+            let v = match object::get(nogc, black_box(child.get(nogc)), k) {
+                Got::Value(v) | Got::Getter(v) => v,
+            };
+            acc = acc.wrapping_add(v.to_bits());
         }
         for i in 0..1000 {
             let v = RootedValue::Primitive(Value::from_i32(i));

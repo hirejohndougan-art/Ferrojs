@@ -29,7 +29,7 @@
 //!     object::set(s, o, k, RootedValue::Primitive(Value::from_i32(42))).unwrap();
 //!     object::get(s.nogc(), o.get(s.nogc()), k.get(s.nogc()))
 //! });
-//! assert_eq!(got, Value::from_i32(42));
+//! assert_eq!(got, object::Got::Value(Value::from_i32(42)));
 //! ```
 
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ pub mod shape;
 pub mod string;
 
 pub use native::{HostValue, NativeFn};
-pub use object::Object;
+pub use object::{Descriptor, Got, Object, PropertyValue, SetResult};
 pub use shape::Shape;
 pub use string::JsString;
 
@@ -79,6 +79,9 @@ pub enum CellKind {
     /// A host function (task 1.9, D-054): an index into the [`Vm`]'s
     /// table of Rust closures. No references.
     Native = 10,
+    /// An accessor property's getter and setter (task 1.8d, D-055): two
+    /// values, each a function or `undefined`.
+    Accessor = 11,
 }
 
 impl CellKind {
@@ -94,6 +97,7 @@ impl CellKind {
             8 => Some(CellKind::Env),
             9 => Some(CellKind::Stack),
             10 => Some(CellKind::Native),
+            11 => Some(CellKind::Accessor),
             _ => None,
         }
     }
@@ -197,6 +201,11 @@ impl Trace for Tracer {
             }
             CellKind::Stack => self.stack.trace(edges),
             CellKind::Native => {}
+            CellKind::Accessor => {
+                assert!(object::ACCESSOR_SIZE <= size, "bad accessor pair");
+                value_at(object::ACCESSOR_GET, edges);
+                value_at(object::ACCESSOR_SET, edges);
+            }
             CellKind::Slots => {
                 let cap = (header >> 32) as u32;
                 assert!(8 + 8 * cap <= size, "slots larger than their cell");

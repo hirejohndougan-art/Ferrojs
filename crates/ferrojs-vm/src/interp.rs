@@ -63,7 +63,8 @@ use ferrojs_value::{HeapRef, Kind, Value};
 use crate::native::{DefineError, HostValue, NativeFn};
 use crate::shape::Attrs;
 use crate::{
-    elements, object, string, value_ref, CellKind, JsString, Object, RootedValue, Tables, Vm,
+    elements, object, string, value_ref, CellKind, JsString, Object, PropertyValue, RootedValue,
+    SetResult, Tables, Vm,
 };
 
 /// Frame stack slots by default: 8 MB (ARCHITECTURE.md §3.1).
@@ -362,8 +363,8 @@ impl Vm {
 
     /// The value of global `name`: its lexical binding if it has one (the
     /// TDZ marker if uninitialized), else the global object's own
-    /// property. A heap reference in it is valid until the next
-    /// allocation.
+    /// property (`None` for an accessor property). A heap reference in it
+    /// is valid until the next allocation.
     pub fn global(&self, name: &str) -> Option<Value> {
         let g = self.interp.globals.as_ref()?;
         let nogc = self.cx.nogc();
@@ -372,7 +373,10 @@ impl Vm {
             return Some(lexical_get(nogc, g, b.slot));
         }
         let key = self.tables.atoms.get(&units)?.get(nogc);
-        object::get_own(nogc, g.object.get(nogc), key).map(|(v, _)| v)
+        match object::get_own(nogc, g.object.get(nogc), key)? {
+            (PropertyValue::Data(v), _) => Some(v),
+            (PropertyValue::Accessor { .. }, _) => None,
+        }
     }
 
     /// The code units of string value `v`, if it is a live string.
@@ -401,8 +405,10 @@ impl Vm {
             interp.globals.as_ref().and_then(|g| {
                 let units: Vec<u16> = name.encode_utf16().collect();
                 let key = tables.atoms.get(&units)?.get(nogc);
-                let (v, _) = object::get_own(nogc, g.object.get(nogc), key)?;
-                native_index(nogc, v)
+                match object::get_own(nogc, g.object.get(nogc), key)? {
+                    (PropertyValue::Data(v), _) => native_index(nogc, v),
+                    (PropertyValue::Accessor { .. }, _) => None,
+                }
             })
         };
         let index = existing.unwrap_or(interp.natives.len());
@@ -1008,14 +1014,18 @@ impl Interp<'_, '_> {
                     if define {
                         object::define(n, obj, k, v, Attrs::DEFAULT).map(Some)
                     } else {
-                        object::set(n, obj, k, v).map(Some)
+                        // Calling setters comes with task 1.8e.
+                        object::set(n, obj, k, v).map(|r| match r {
+                            SetResult::Done(ok) => Some(ok),
+                            SetResult::Setter(_) => None,
+                        })
                     }
                 }
             }
         });
         match done {
             Ok(Some(ok)) => Ok(ok),
-            // A value no property can hold, or an array length.
+            // A value no property can hold, an array length or a setter.
             Ok(None) => self.fail(),
             Err(_) => Err(self.out_of_memory()),
         }
@@ -1078,7 +1088,7 @@ impl Interp<'_, '_> {
     }
 
     /// The global object's own property `key` (an atom offset).
-    fn global_own(&self, key: u32) -> Option<(Value, Attrs)> {
+    fn global_own(&self, key: u32) -> Option<(PropertyValue, Attrs)> {
         let nogc = self.s.nogc();
         object::get_own(nogc, self.globals.object.get(nogc), nogc.handle(key)?)
     }
@@ -1095,7 +1105,9 @@ impl Interp<'_, '_> {
                 return Ok(false);
             };
             match attrs {
-                None => object::set(n, o, k, v),
+                // A setter (none on the global object yet) is refused
+                // until task 1.8e calls it.
+                None => object::set(n, o, k, v).map(|r| r == SetResult::Done(true)),
                 Some(a) => object::define(n, o, k, v, a),
             }
         });
@@ -1497,7 +1509,9 @@ impl OpCtx for Interp<'_, '_> {
             return Ok(v);
         }
         match self.global_own(key) {
-            Some((v, _)) => Ok(v),
+            Some((PropertyValue::Data(v), _)) => Ok(v),
+            // Calling getters comes with task 1.8e.
+            Some((PropertyValue::Accessor { .. }, _)) => self.fail(),
             None => Err(self.error(ErrorKind::UnresolvableReference)),
         }
     }
@@ -1674,7 +1688,11 @@ impl OpCtx for Interp<'_, '_> {
                 }
                 v
             }
-            None => self.global_own(key).map_or(Value::UNDEFINED, |(v, _)| v),
+            None => match self.global_own(key) {
+                None => Value::UNDEFINED,
+                Some((PropertyValue::Data(v), _)) => v,
+                Some((PropertyValue::Accessor { .. }, _)) => return self.fail(),
+            },
         };
         Ok(self.rt_typeof(v))
     }
@@ -1714,7 +1732,9 @@ impl OpCtx for Interp<'_, '_> {
                     None
                 });
                 match found {
-                    Some(v) => Ok(v),
+                    Some(PropertyValue::Data(v)) => Ok(v),
+                    // Calling getters comes with task 1.8e.
+                    Some(PropertyValue::Accessor { .. }) => self.fail(),
                     // Inherited from Object.prototype once it exists (1.13).
                     None if number::is_object_prototype_name(units) => self.fail(),
                     None => Ok(Value::UNDEFINED),
