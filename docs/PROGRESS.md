@@ -567,3 +567,24 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-060
 - Test262: 8699 (+0)
 - Next: 1.10b (`new` and `instanceof`).
+
+## 2026-11-25 16:45 UTC — 1.10b `new`, `new.target`, `instanceof`, sloppy `this`
+- Result: merged
+- Changed: new instructions `Construct`, `LoadNewTarget`, `InstanceOf`
+  and `LoadThisSloppy`. `new` runs ordinary constructors through the
+  call path (new object as `this`, `new.target` = callee, a
+  CONSTRUCT return flag that keeps the new object unless the
+  constructor returns one, also across tail calls). `instanceof` is
+  OrdinaryHasInstance. Sloppy functions may now use `this` (undefined
+  and null become the global object). The real Test262 harness's
+  passing path now runs (`assert`, `assert.sameValue`, `new
+  Test262Error`); failure messages still need `String()` (1.10c).
+  38 new Node-checked cases, plain and under GC stress. Independent
+  review: nothing serious; applied its fixes. One CI test job failed
+  once in `ferrojs-core`'s heap stress test (untouched crate, passed on
+  the re-run and on every other run): watch for it.
+- Gate: all steps pass (CI run 45651767766; Miri: `ferrojs-core`
+  unchanged).
+- Decisions: D-061
+- Test262: 8699 (+0)
+- Next: 1.10c (error objects and a minimal `String()`).
