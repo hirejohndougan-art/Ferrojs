@@ -1367,7 +1367,7 @@ planning document and gets logged here as each is implemented.
 - **Rejected:** starting the JIT at 95% and closing the gap alongside
   Phases 3–4 (the original plan).
 
-## D-056 Opus 5.5 for every run and subagent
+## D-057 Opus 5.5 for every run and subagent
 - **Status:** Accepted (John's request, 2026-11-25). Supersedes D-049
   (and D-048).
 - **Choice:** every FerroJS scheduled task (autopilot, Sunday marathon,
@@ -1376,3 +1376,37 @@ planning document and gets logged here as each is implemented.
   roadmap task in order. Independent reviews still happen as step 10 of
   `docs/AUTOPILOT.md` says. Never `fable`.
 - **Rejected:** keeping Sonnet for routine work (John's call).
+
+## D-058 Getters and setters run as calls from the property instruction
+- **Status:** Accepted (autopilot, 2026-11-25). Task 1.8e.
+- **Choice:** `rt_get_property` and `rt_set_property` return
+  `Access` / `Result<(), Detour>`: a value, a throw, or `Detour::Call`,
+  meaning the context holds a getter or setter call (callee, receiver,
+  the setter's argument). The handler turns that into the new
+  `Flow::Accessor`, and the dispatch loop makes the call exactly like a
+  `Call` from the property instruction: a frame whose `CALL_PC` is that
+  instruction (unwinding and resuming work unchanged), whose
+  `RETURN_INFO` is the read's `dst` (`accessor_dst`) or the `DISCARD` bit
+  (1 << 32, a number as value bits) for a setter, so `Flow::Return` drops
+  the result; host functions run without a frame as for calls. The
+  receiver is always the base value. Stack overflow, interrupts and proper
+  tail calls inside accessors follow the call rules (D-036). Object
+  literals compile `get`/`set` members to `DefineGetter` / `DefineSetter`
+  (keyed: the name goes through a register), each defining one half,
+  enumerable and configurable. The toy context has no accessors (its
+  define fails cleanly; accessor cases run on the interpreter only).
+- **Why:** no Rust recursion into the interpreter (deep getter recursion
+  stays a `RangeError`, not a native stack overflow), and later tiers can
+  share the protocol (a JIT exits to the same call path).
+- **Rejected:** re-entering `run` from the runtime function (native
+  recursion, D-036); a data-carrying `Flow` variant (makes every handler's
+  result bigger on the hot path); having the handler pass `dst` to the
+  runtime function (the loop already decodes the instruction for calls).
+- **Known gaps:** global-name reads and writes (`LoadName`, `StoreName`,
+  `typeof name`) still fail cleanly on a global accessor (none can be made
+  from JavaScript until 1.13's `Object.defineProperty`); index keys can't
+  be accessors (D-040); a computed accessor key runs ToPropertyKey after
+  the function is created (unobservable until objects have ToPrimitive,
+  1.13, which should add a ToPropertyKey op); getters and setters compile
+  as plain function expressions, not methods (matters with `new`,
+  `prototype` and `super`, 1.12e/1.13).

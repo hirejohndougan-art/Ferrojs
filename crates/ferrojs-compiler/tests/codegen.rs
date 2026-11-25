@@ -237,7 +237,7 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function f() { return `a\\uDC00${1}`; }",
         "function f() { return f`x`; }",
         "function f() { if (1) { function g() {} } }",
-        "function f() { return { get a() { return 1; } }.a; }",
+        "function f() { return { get '\\uD800'() { return 1; } }; }",
         "function f() { return new f(); }",
         "function f(a, g = () => a) { var a = 2; }",
         "function f(a = 1, g = function () { return a; }) { function a() {} }",

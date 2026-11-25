@@ -66,7 +66,7 @@ one of these files.
     diff for memory-safety, GC-rooting, soundness and spec bugs. Fix what it
     finds and re-run the gate. If it finds a problem you can't fix this run,
     don't merge.
-10a. **Which model does the work (D-056, John's request 2026-11-25;
+10a. **Which model does the work (D-057, John's request 2026-11-25;
     supersedes D-049 and D-048).** Every run and every subagent uses
     Opus 5.5. Runs take the next task in roadmap order, core or routine;
     the independent review (step 10) still applies to everything on its

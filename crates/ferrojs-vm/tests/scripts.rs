@@ -295,7 +295,7 @@ fn inherited_object_prototype_names_fail_cleanly() {
     }
 }
 
-/// Getters and setters (task 1.8e, D-057): the toy context has no
+/// Getters and setters (task 1.8e, D-058): the toy context has no
 /// accessors, so these run on the interpreter only.
 const ACCESSOR_CASES: &[&[&str]] = &[
     &["'use strict'; var o = { _x: 2, get x() { return this._x * 10; } }; var result = o.x + o['x'];"],
