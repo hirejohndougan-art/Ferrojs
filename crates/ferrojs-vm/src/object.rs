@@ -371,7 +371,7 @@ fn new_pair<'s, 'r>(
     s: &mut Scope<'s>,
     get: Option<RootedValue<'r>>,
     set: Option<RootedValue<'r>>,
-) -> Result<Root<'s, Object>, AllocError> {
+) -> Result<Root<'s, AccessorPair>, AllocError> {
     let cell = s.alloc::<AccessorPair>(ACCESSOR_SIZE)?;
     let nogc = s.nogc();
     let pair = cell.bind(nogc);
@@ -382,9 +382,15 @@ fn new_pair<'s, 'r>(
             .resolve(nogc);
         nogc.write_value_bits(pair, field, bits, referent);
     }
-    // The slot refers to the pair with an object tag (the tracer follows
-    // it like any reference); only accessor paths ever read it.
-    Ok(s.root(pair.cast::<Object>()))
+    Ok(s.root(pair))
+}
+
+/// The slot value for `pair`: an object-tagged reference (the tracer
+/// follows it like any other). Only accessor paths ever read it, and this
+/// root is only ever stored, never used as an object.
+fn pair_slot<'s>(s: &mut Scope<'s>, pair: Root<'_, AccessorPair>) -> RootedValue<'s> {
+    let nogc = s.nogc();
+    RootedValue::Object(s.root(pair.get(nogc).cast::<Object>()))
 }
 
 /// The value `v` names, for SameValue.
@@ -431,13 +437,8 @@ pub fn define_property(
             .with(flag(desc.configurable, Attrs::CONFIGURABLE));
         if desc.is_accessor() {
             let pair = new_pair(s, desc.get, desc.set)?;
-            add(
-                s,
-                o,
-                key,
-                RootedValue::Object(pair),
-                attrs.with(Attrs::ACCESSOR),
-            )?;
+            let slot = pair_slot(s, pair);
+            add(s, o, key, slot, attrs.with(Attrs::ACCESSOR))?;
         } else {
             let value = desc
                 .value
@@ -497,7 +498,7 @@ pub fn define_property(
     // What goes in the slot: a new pair (data to accessor), a value, or
     // the halves of the current pair to replace.
     enum Content<'p, 'r> {
-        Pair(Root<'p, Object>),
+        Pair(Root<'p, AccessorPair>),
         Value(RootedValue<'r>),
         Patch,
     }
@@ -530,8 +531,9 @@ pub fn define_property(
     match content {
         None => {}
         Some(Content::Pair(pair)) => {
-            let (bits, referent) = RootedValue::Object(pair).resolve(nogc);
-            write_slot(nogc, obj, current.slot, bits, referent);
+            let pair = pair.get(nogc);
+            let bits = Value::object(ferrojs_value::HeapRef(pair.offset())).to_bits();
+            write_slot(nogc, obj, current.slot, bits, Some(pair.cast()));
         }
         Some(Content::Value(v)) => {
             let (bits, referent) = v.resolve(nogc);

@@ -1313,3 +1313,38 @@ planning document and gets logged here as each is implemented.
   `HostValue`'s `String(v)` prints every object as `[object Object]`
   and every function as a placeholder until 1.13. Re-defining a host
   function reuses its table slot.
+
+## D-055 Accessor properties: a pair cell per property; the object model never calls code
+- **Status:** Accepted (autopilot, 2026-11-25). Task 1.8d.
+- **Choice:** an accessor property has the new attribute bit
+  `Attrs::ACCESSOR` (8; never with `WRITABLE`) and its slot holds an
+  object-tagged reference to an accessor pair cell (`CellKind::Accessor`
+  = 11, 24 bytes: header, getter value, setter value, each a function or
+  `undefined`; traced as two values). A pair belongs to exactly one
+  property of one object, so changing only the getter or setter updates
+  it in place; turning a data property into an accessor allocates a new
+  pair. `object::get_own` returns a `PropertyValue` (`Data` or
+  `Accessor { get, set }`); `object::get` (OrdinaryGet) returns
+  `Got::Value` or `Got::Getter(f)`; `object::set` (OrdinarySet, own and
+  inherited accessors found before the writable check) returns
+  `SetResult::Done(bool)` or `SetResult::Setter(f)`. The caller calls the
+  function with the receiver: the object model stays free of the
+  interpreter, and the interpreter can push a frame for a getter instead of
+  re-entering itself (D-036). `object::define_property` takes a
+  `Descriptor` with every field optional and implements
+  ValidateAndApplyPropertyDescriptor (ECMA-262 §10.1.6.3) in full;
+  `object::define` is that with a complete data descriptor. Attribute or
+  kind changes move the object to dictionary mode, as in D-039. The
+  interpreter fails cleanly (the unsupported throw) wherever it meets an
+  accessor until task 1.8e calls getters and setters.
+- **Rejected:** two slots per accessor (getter and setter side by side:
+  breaks "a property's slot is its shape's count minus one" and the
+  dictionary table's one-slot entries); shared immutable pairs (every
+  `defineProperty` of one half would allocate; sharing can come with
+  class methods later if it pays); calling getters from inside
+  `object::get` with a callback (re-entrant interpreter, and rooting
+  across arbitrary code inside the object model); a distinct value tag for
+  pair references (`OtherKind` is for language values; the tag is never
+  seen outside accessor paths, which check the attribute first).
+- **Known gaps:** accessors on indexed properties (the elements store
+  has no attributes yet, D-040); the lazy key table moved to task 1.8f.

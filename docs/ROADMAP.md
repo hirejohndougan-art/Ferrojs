@@ -162,8 +162,18 @@ Order matters: each task builds on the ones above it.
   attribute changes (ValidateAndApplyPropertyDescriptor for data
   properties), dictionary mode (ARCHITECTURE.md §7.2), non-extensible
   objects. needs: 1.8a
-- [~] (claimed 2026-11-25 07:15 UTC) 1.8d Objects, part d: accessor properties (getters and setters
-  called from get/set), the lazy key table for large shapes. needs: 1.8b, 1.7
+- 1.8d Objects, part d (split 2026-11-25: accessors in the object model,
+  calling them, and the key table are three run-sized changes):
+  - [x] 1.8d (2026-11-25, D-055) Accessor properties in the object model:
+    accessor pair cells, `get`/`set` handing back the getter or setter,
+    `define_property` with partial descriptors
+    (ValidateAndApplyPropertyDescriptor). needs: 1.8b
+  - [ ] 1.8e Call getters and setters from the interpreter's property and
+    global-name paths (a frame for the call, D-036), and compile `get` /
+    `set` in object literals. needs: 1.8d, 1.7
+  - [ ] 1.8f The lazy key table for large shapes (hashed lookup for
+    shared and dictionary shapes, D-038/D-039 simplifications).
+    needs: 1.8b
 - [x] 1.8c (2026-11-23) Objects, part c: indexed properties in the elements store
   (packed, holey, sparse) and Array length. needs: 1.8a
 - [x] (2026-11-25, D-054; merged 2026-11-25) 1.9 Minimal embedding API and a `ferrojs` command-line binary that
@@ -182,7 +192,7 @@ Order matters: each task builds on the ones above it.
   - [ ] 1.12d The arguments object (mapped and unmapped), sloppy `this`.
     needs: 1.7, 1.8c
   - [ ] 1.12e Classes: constructors, methods, fields, `super`.
-    needs: 1.7, 1.8d
+    needs: 1.7, 1.8e
   - [ ] 1.12f Generators as state machines. needs: 1.7, 1.12c
   - [ ] 1.12g Async functions and await. needs: 1.12f, 1.14
 - [ ] 1.13 Basic built-ins: Object, Function, Error types, Array, String,

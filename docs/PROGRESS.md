@@ -486,3 +486,27 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: none
 - Test262: 8699 (+0)
 - Next: 1.10 (the Test262 runner on the real engine, first real baseline).
+
+## 2026-11-25 07:15 UTC — 1.8d Accessor properties in the object model (1.8d split d/e/f)
+- Result: merged
+- Changed: split 1.8d into 1.8d (accessors in the object model), 1.8e
+  (calling getters and setters from the interpreter, `get`/`set` in
+  literals) and 1.8f (lazy key table); 1.12e now needs 1.8e. New
+  `Attrs::ACCESSOR` and accessor pair cells (kind 11); `get_own` →
+  `PropertyValue`, `get` → `Got`, `set` → `SetResult` (getter or setter
+  handed back to the caller); `define_property` with partial descriptors
+  (full ValidateAndApplyPropertyDescriptor). The interpreter fails
+  cleanly on accessors until 1.8e. New tests in `tests/accessors.rs`
+  (hand cases, GC liveness, a spec-text model run randomly, plain and
+  under GC stress). Independent review: no rooting, barrier or tracer
+  bugs; fixed its findings (seed overflow in debug builds, pair roots
+  typed as `AccessorPair`, NaN and -0 in the model for SameValue).
+  Benchmarks within 3% (`objects/get_set` +1.7%, `interp/run.properties`
+  +0.9% from the accessor checks); baseline updated.
+- Gate: all steps pass (Miri skipped: no nightly here, `ferrojs-core`
+  unchanged).
+- Decisions: D-055
+- Test262: 8699 (+0)
+- Next: 1.8e (core: interpreter frames for getter/setter calls) on an
+  Opus run; routine runs can take 1.10.
+

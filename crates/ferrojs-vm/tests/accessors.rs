@@ -374,12 +374,16 @@ fn mixed_descriptors_are_a_caller_bug() {
 
 // ---- the model ----
 
-/// A value: an integer, or one of the test's objects by index (standing
-/// in for functions: the object model doesn't call them).
+/// A value: an integer, NaN, -0, or one of the test's objects by index
+/// (standing in for functions: the object model doesn't call them).
+/// Derived equality is SameValue for these: NaN equals NaN, -0 differs
+/// from 0.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum MVal {
     Undef,
     Int(i32),
+    Nan,
+    NegZero,
     Obj(usize),
 }
 
@@ -604,12 +608,15 @@ fn random_run(seed: u64, steps: usize, stress: bool) {
         let to_value = |nogc: NoGc<'_>, objs: &[Root<'_, Object>], v: MVal| match v {
             MVal::Undef => Value::UNDEFINED,
             MVal::Int(i) => Value::from_i32(i),
+            MVal::Nan => Value::number(f64::NAN),
+            MVal::NegZero => Value::number(-0.0),
             MVal::Obj(i) => val(nogc, objs[i]),
         };
         for _ in 0..steps {
-            let pick_val = |rng: &mut Rng, n: usize| match rng.below(4) {
+            let pick_val = |rng: &mut Rng, n: usize| match rng.below(6) {
                 0 => MVal::Undef,
                 1 | 2 if n > 0 => MVal::Obj(rng.below(n)),
+                3 => [MVal::Nan, MVal::NegZero][rng.below(2)],
                 _ => MVal::Int(rng.below(3) as i32),
             };
             match rng.below(16) {
@@ -652,6 +659,8 @@ fn random_run(seed: u64, steps: usize, stress: bool) {
                         v.map(|v| match v {
                             MVal::Undef => undef(),
                             MVal::Int(i) => RootedValue::Primitive(Value::from_i32(i)),
+                            MVal::Nan => RootedValue::Primitive(Value::number(f64::NAN)),
+                            MVal::NegZero => RootedValue::Primitive(Value::number(-0.0)),
                             MVal::Obj(i) => RootedValue::Object(objs[i]),
                         })
                     };
@@ -672,6 +681,8 @@ fn random_run(seed: u64, steps: usize, stress: bool) {
                     let rv = match v {
                         MVal::Undef => undef(),
                         MVal::Int(i) => RootedValue::Primitive(Value::from_i32(i)),
+                        MVal::Nan => RootedValue::Primitive(Value::number(f64::NAN)),
+                        MVal::NegZero => RootedValue::Primitive(Value::number(-0.0)),
                         MVal::Obj(i) => RootedValue::Object(objs[i]),
                     };
                     let got = object::set(s, objs[o], keys[k], rv).unwrap();
@@ -744,14 +755,14 @@ fn random_run(seed: u64, steps: usize, stress: bool) {
 #[test]
 fn random_descriptors_match_the_model() {
     for seed in 1..=40u64 {
-        random_run(seed * 0x9e37_79b9_7f4a_7c15, 400, false);
+        random_run(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15), 400, false);
     }
 }
 
 #[test]
 fn random_descriptors_match_the_model_under_gc_stress() {
     for seed in 1..=6u64 {
-        random_run(seed * 0x2545_f491_4f6c_dd1d, 250, true);
+        random_run(seed.wrapping_mul(0x2545_f491_4f6c_dd1d), 250, true);
     }
 }
 
