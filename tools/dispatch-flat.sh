@@ -21,7 +21,9 @@ cargo test --locked -q -p ferrojs-bytecode --features padding-ops --test padding
 # shows cargo's output and stops.
 measure() {
   local out
-  if ! out="$(cargo bench --locked -q -p ferrojs-bench --bench interp "$@" 2>&1)"; then
+  # Plain text: CI sets CARGO_TERM_COLOR=always (dtolnay/rust-toolchain),
+  # and gungraun's colour codes would hide the lines awk looks for.
+  if ! out="$(CARGO_TERM_COLOR=never cargo bench --locked -q -p ferrojs-bench --bench interp "$@" 2>&1)"; then
     echo "$out"
     echo "dispatch-flat: the benchmark run failed ($*)"
     exit 1
