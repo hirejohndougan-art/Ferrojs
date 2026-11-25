@@ -95,6 +95,8 @@ jobs:
           v="$(sed -n '/^name = "gungraun"$/{n;s/^version = "\(.*\)"$/\1/p}' Cargo.lock)"
           cargo install gungraun-runner --version "$v" --locked
       - run: tools/bench.sh check
+      # Dispatch cost must not grow with the number of ops (D-052).
+      - run: tools/dispatch-flat.sh
 
   miri:
     # ferrojs-core's tests under Miri with strict provenance (D-016).

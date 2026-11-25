@@ -53,7 +53,7 @@ pub use operand::{
     Width,
 };
 pub(crate) use ops::decode_operands;
-pub use ops::{execute, handlers, operands, Instruction, Opcode};
+pub use ops::{execute, handlers, operands, step, steps, Instruction, Opcode, StepTable};
 pub use verify::{
     disassemble, verify, verify_handlers, Handler, Limits, VerifyError, VerifyErrorKind,
 };

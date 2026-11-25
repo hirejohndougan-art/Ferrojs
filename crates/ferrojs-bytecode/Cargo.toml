@@ -10,5 +10,10 @@ publish = false
 [dependencies]
 ferrojs-value = { path = "../ferrojs-value" }
 
+[features]
+# Adds 150 unused ops, to measure that dispatch cost doesn't grow with the
+# number of ops (D-052). Never enabled in normal builds.
+padding-ops = []
+
 [lints]
 workspace = true

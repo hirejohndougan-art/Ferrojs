@@ -52,5 +52,9 @@ harness = false
 name = "interp"
 harness = false
 
+[features]
+# See ferrojs-bytecode: measure dispatch with 150 extra ops (D-052).
+padding-ops = ["ferrojs-bytecode/padding-ops"]
+
 [lints]
 workspace = true

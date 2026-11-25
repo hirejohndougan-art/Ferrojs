@@ -3,8 +3,8 @@
 
 use ferrojs_bytecode::testing::{run, Outcome, ToyCtx};
 use ferrojs_bytecode::{
-    decode, disassemble, instructions, operands, verify, AsmError, Assembler, Const, Count,
-    DecodeErrorKind, EnvSlot, Feedback, Flags, Ic, Imm, Instruction, Label, Limits, Opcode,
+    decode, disassemble, execute, instructions, operands, step, verify, AsmError, Assembler, Const,
+    Count, DecodeErrorKind, EnvSlot, Feedback, Flags, Ic, Imm, Instruction, Label, Limits, Opcode,
     OperandKind, Reg, VerifyErrorKind, PREFIX_EXTRA_WIDE, PREFIX_WIDE,
 };
 use ferrojs_value::Value;
@@ -755,6 +755,96 @@ fn random_bytes_never_break_verified_execution() {
         }
     }
     assert!(verified > 500, "only {verified} random programs verified");
+}
+
+/// A dispatcher: runs the instruction at `pc`, returning its flow and length.
+type Dispatch<'a> = &'a dyn Fn(&mut ToyCtx, &[u8], usize) -> (ferrojs_bytecode::Flow, usize);
+
+/// Runs verified `code` on a fresh toy context one instruction at a time
+/// with `dispatch`, following `Next` and `Jump`; the trace of every flow
+/// and length, then the final registers, exception and error kind.
+fn trace(code: &[u8], l: &Limits, dispatch: Dispatch<'_>) -> String {
+    let mut cx = ToyCtx::new(l);
+    cx.set_env_chain(vec![vec![Value::UNDEFINED; 2]]);
+    cx.interrupt_after = Some(50);
+    let mut out = String::new();
+    let mut pc = 0usize;
+    for _ in 0..200 {
+        let (flow, len) = dispatch(&mut cx, code, pc);
+        out += &format!("{pc}:{flow:?}/{len} ");
+        match flow {
+            ferrojs_bytecode::Flow::Next => pc += len,
+            ferrojs_bytecode::Flow::Jump(j) => pc = (pc as i64 + i64::from(j.0)) as usize,
+            _ => break,
+        }
+    }
+    let regs: Vec<u64> = cx.regs.iter().map(|v| v.to_bits()).collect();
+    out + &format!(
+        "| {regs:x?} {:?} {:?} {:?}",
+        cx.exception.map(|v| v.to_bits()),
+        cx.last_error,
+        cx.feedback
+    )
+}
+
+#[test]
+fn table_dispatch_matches_decode_and_execute() {
+    // `step` (one call through the per-op step table, D-052) against the
+    // reference `decode` + `execute`, on random verified programs mixing
+    // narrow, wide and extra-wide instructions.
+    let mut rng = Rng(0xD15_BA7C4);
+    let ops = Opcode::ALL.len() as u64;
+    let l = limits(4, 2, 2);
+    let reference = |cx: &mut ToyCtx, code: &[u8], pc: usize| {
+        let (insn, len) = decode(code, pc).expect("verified");
+        (execute(cx, insn), len)
+    };
+    let (mut checked, mut prefixed) = (0, 0);
+    let mut seen = vec![false; Opcode::ALL.len()];
+    for _ in 0..40_000 {
+        let mut code = Vec::new();
+        for _ in 0..1 + rng.below(8) {
+            let op = Opcode::ALL[rng.below(ops) as usize];
+            let width = [1usize, 1, 1, 2, 4][rng.below(5) as usize];
+            match width {
+                2 => code.push(PREFIX_WIDE),
+                4 => code.push(PREFIX_EXTRA_WIDE),
+                _ => {}
+            }
+            code.push(op as u8);
+            for kind in op.info().operands {
+                for _ in 0..kind.units() {
+                    let v = match kind {
+                        OperandKind::Label => rng.below(13) as i32 - 6,
+                        _ => rng.below(5) as i32,
+                    };
+                    code.extend_from_slice(&v.to_le_bytes()[..width]);
+                }
+            }
+        }
+        code.extend_from_slice(&[Opcode::Return as u8, 0]);
+        if verify(&code, &l).is_err() {
+            continue;
+        }
+        for (pc, insn) in instructions(&code).map(|i| i.unwrap()) {
+            seen[insn.opcode() as usize] = true;
+            prefixed += usize::from(code[pc] >= PREFIX_WIDE);
+        }
+        let want = trace(&code, &l, &reference);
+        let got = trace(&code, &l, &|cx, code, pc| step(cx, code, pc));
+        assert_eq!(got, want, "{}", disassemble(&code).unwrap());
+        checked += 1;
+    }
+    assert!(checked > 2_000, "only {checked} programs verified");
+    assert!(prefixed > 1_000, "only {prefixed} prefixed instructions");
+    // `CreateClosure` needs a nested-function table, which these programs
+    // don't have (it never verifies here); the interpreter's closure tests
+    // run it through `step`.
+    let missing: Vec<_> = Opcode::ALL
+        .iter()
+        .filter(|op| !seen[**op as usize] && **op != Opcode::CreateClosure)
+        .collect();
+    assert!(missing.is_empty(), "never ran: {missing:?}");
 }
 
 #[test]

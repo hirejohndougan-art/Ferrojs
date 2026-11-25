@@ -1183,3 +1183,50 @@ planning document and gets logged here as each is implemented.
   hourly, and John picked every two hours all day.
 - **Rejected:** hourly runs (more overlap between runs, which the claim
   rule handles but which wastes usage); 9 runs between 1 AM and 5 PM.
+
+## D-052 Dispatch through a table of per-op step functions
+- **Status:** Accepted (autopilot, 2026-11-25)
+- **Choice:** (task 1.7d) `define_ops!` generates one step function per
+  op (`steps::<op>`: read the op's narrow operands from the code, run its
+  handler, return the flow and the instruction length) and a table of
+  them by opcode byte (`StepTable<C>::STEPS`). `step(cx, code, pc)` makes
+  one indexed call through the table; a prefix byte (wide or extra-wide
+  operands) takes a cold path through `decode` + `execute`. The
+  interpreter loop holds the running function's code as `Rc<[u8]>`
+  (templates store it that way) and swaps it on calls, returns and
+  unwinding; `Flow::Call` decodes the call instruction again for its
+  `CallSite`. The toy context keeps `decode` + `execute`, so the reference
+  path stays independent of the fast one.
+- **Measured** (Callgrind instructions; a new `padding-ops` feature adds
+  150 ops that are never run):
+
+  | benchmark | decode+execute | +150 ops | one fused match | +150 ops | step table | +150 ops |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | `interp/run.loop_with_calls` | 4,971,811 | +9.6% | 4,325,453 | +0.28% | 3,200,097 | +0.06% |
+  | `interp/run.global_strings` | 5,059,159 | +2.0% | 4,871,144 | +0.11% | 4,606,668 | +0.04% |
+
+  The table is the fastest by far and flat: with every op's code in its
+  own function, adding ops doesn't change how the others compile, and
+  the call costs less than the spills of one huge inlined `match`.
+- **Gate:** `tools/dispatch-flat.sh` runs the interpreter benchmarks
+  with and without `padding-ops` and fails if any count moves by more
+  than 1%. `table_dispatch_matches_decode_and_execute` runs 2,000+ random
+  verified programs (narrow, wide and extra-wide) through both paths and
+  compares every flow, length, register, exception and feedback slot;
+  mutations (operands read one byte off, a wrong length on the prefixed
+  path) are caught. The script first runs a test that the padded build
+  really has 150 more ops, so it can't pass by measuring the same binary
+  twice. Independent review: no correctness, frame-switching or rooting
+  problems; its two script fixes are in. Left for later: padding ops are
+  trivial (a design that grows with operand-struct size would be
+  under-reported), and returns still decode the call instruction once to
+  find its length.
+- **Later:** instruction counts aren't cycles: the table makes every op
+  an indirect call, which real CPUs predict per call site. Revisit with
+  wall-clock benchmarks against QuickJS (1.15); guaranteed tail calls
+  (`become`) would turn the calls into threaded jumps once stable.
+- **Rejected:** one fused `match` on the opcode byte that decodes and
+  runs inline (13% faster than before but still a giant function); the
+  old `decode` into an `Instruction` enum followed by `execute` (two
+  dispatches per instruction, and the cost grows with the op count, as
+  D-036 found).
