@@ -189,7 +189,7 @@ Order matters: each task builds on the ones above it.
     `Object.prototype` and `Function.prototype` intrinsics; `prototype`,
     `name` and `length` on functions. Core: object layout. needs: 1.7,
     1.8d, 1.9
-  - [ ] 1.10b (risky) `new` and `instanceof` for ordinary functions:
+  - [~] (claimed 2026-11-25 15:41 UTC) 1.10b (risky) `new` and `instanceof` for ordinary functions:
     \[\[Construct\]\] (OrdinaryCreateFromConstructor, `this` in the new
     frame, returning an object), `new.target`, OrdinaryHasInstance.
     needs: 1.10a
