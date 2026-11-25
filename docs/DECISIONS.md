@@ -1366,3 +1366,13 @@ planning document and gets logged here as each is implemented.
   is always the complete implementation, AUTOPILOT.md rules).
 - **Rejected:** starting the JIT at 95% and closing the gap alongside
   Phases 3–4 (the original plan).
+
+## D-056 Opus 5.5 for every run and subagent
+- **Status:** Accepted (John's request, 2026-11-25). Supersedes D-049
+  (and D-048).
+- **Choice:** every FerroJS scheduled task (autopilot, Sunday marathon,
+  daily update) and every subagent runs on Opus 5.5. Runs no longer
+  skip core tasks or ask John for a stronger model; they take the next
+  roadmap task in order. Independent reviews still happen as step 10 of
+  `docs/AUTOPILOT.md` says. Never `fable`.
+- **Rejected:** keeping Sonnet for routine work (John's call).
