@@ -182,7 +182,7 @@ Order matters: each task builds on the ones above it.
   harness, `assert.js` and `sta.js`, needs functions that carry
   properties, `new`, `instanceof` and error objects, none of which
   existed; the old entry only listed 1.9):
-  - [~] (claimed 2026-11-25 07:46 UTC) 1.10a (risky) Functions as
+  - [x] 1.10a (2026-11-25, risky, D-057) Functions as
     ordinary objects: closure and host function cells get the object
     header (shape, elements, slots), so `f.x = 1` works; the
     `Object.prototype` and `Function.prototype` intrinsics; `prototype`,
