@@ -1171,3 +1171,15 @@ planning document and gets logged here as each is implemented.
   free them); the global lexical bindings as properties of a second
   object (object slots can't hold the TDZ marker); keying the lexical
   table by atom offset (breaks when the collector moves cells).
+
+## D-051 A run every two hours, around the clock
+- **Status:** Accepted (John, 2026-11-24; recorded by the autopilot). An
+  owner decision, so it changes AUTOPILOT.md outside a monthly review.
+- **Choice:** the FerroJS autopilot scheduled task runs every two hours,
+  all day, at 12 minutes past each odd hour Central (12 runs a day).
+  Each run still does one task. The Sunday marathon and the daily
+  update keep their times.
+- **Why:** John asked to triple the pace; scheduled tasks can run at most
+  hourly, and John picked every two hours all day.
+- **Rejected:** hourly runs (more overlap between runs, which the claim
+  rule handles but which wastes usage); 9 runs between 1 AM and 5 PM.

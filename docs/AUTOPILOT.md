@@ -180,8 +180,9 @@ tools/deny.sh
 
 ## Pacing
 
-John chose three runs a night, at 1, 3 and 5 AM Central (2026-11-20);
-a long run can still overlap the next one. Usage is protected by
+John chose a run every two hours, around the clock, at 12 minutes past
+each odd hour Central (12 runs a day; 2026-11-24, D-051, replacing three
+runs a night); a long run can still overlap the next one. Usage is protected by
 keeping each run to **one task** and stopping when it's done.
 
 **Sunday marathon (D-029).** John also chose one long run a week,
