@@ -78,7 +78,9 @@ fp + 2   new.target    Value   undefined for [[Call]]
 fp + 3   environment   Value   current lexical Environment cell (or undefined)
 fp + 4   caller fp     raw     u32 slot index, u32::MAX for the entry frame
 fp + 5   return pc     raw     bytecode offset in the caller to resume at
-fp + 6   return info   raw     caller's destination register (u32) | flags (u32)
+fp + 6   return info   raw     caller's destination register (u32) | flags (u32):
+                               DISCARD (bit 32, result dropped), CONSTRUCT (bit 33,
+                               a non-object result leaves the new object, D-061)
 fp + 7   argc          raw     number of arguments actually passed
 fp + 8   r0 ...                registers; r0..r(P-1) are the P declared parameters
 fp + 8 + R                     extra arguments beyond P (argc - P of them, if any)

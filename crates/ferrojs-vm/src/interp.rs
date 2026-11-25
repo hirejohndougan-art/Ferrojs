@@ -1576,11 +1576,13 @@ impl Interp<'_, '_> {
         if let Flow::Throw = self.check_interrupt() {
             return Err(Thrown);
         }
-        let this = self.create_from_constructor(callee)?;
-        self.set(site.dst, this);
+        // The arguments before `dst` is written: bytecode the compiler
+        // didn't make may put `dst` among them (review of 1.10b).
         let args: Vec<Value> = (0..site.argc.0)
             .map(|i| self.reg(Reg(site.args.0 + i)))
             .collect();
+        let this = self.create_from_constructor(callee)?;
+        self.set(site.dst, this);
         let info = u64::from(site.dst.0) | CONSTRUCT;
         self.push_frame(
             top,

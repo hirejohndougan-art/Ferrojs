@@ -466,10 +466,9 @@ fn compile_fn(
     }
     let mut g = Gen::new(an, f.scope);
     g.own_name = f.own_name;
-    // `this` is the frame's `this` in strict non-arrow functions. Sloppy
-    // functions box it (needs the global object) and arrows take their
+    // `this` is the frame's `this` in strict non-arrow functions; sloppy
+    // ones bind it with LoadThisSloppy (task 1.10b). Arrows take their
     // enclosing function's: later.
-    // Sloppy functions bind `this` with LoadThisSloppy (task 1.10b).
     g.this_ok = !f.arrow;
     g.strict_this = scoping.scope_flags(f.scope).is_strict_mode();
 

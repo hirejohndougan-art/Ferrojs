@@ -125,6 +125,7 @@ impl CallSite {
             crate::Instruction::Construct(o) => Some(CallSite {
                 dst: o.dst,
                 callee: o.callee,
+                // Unused: a construct's `this` is the new object.
                 this: o.callee,
                 args: o.args,
                 argc: o.argc,

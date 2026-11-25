@@ -1533,5 +1533,13 @@ planning document and gets logged here as each is implemented.
   frame layout is fixed, ARCHITECTURE.md §3.2, and a tail call would
   overwrite it); refusing tail calls inside constructors (the compiler
   can't know which functions will be constructed).
+- **Review:** independent review found nothing serious. Applied: the
+  arguments are read before `dst` is written (the "fresh temporary"
+  rule is the compiler's, the verifier can't check it); the CONSTRUCT
+  flag is documented in ARCHITECTURE.md §3.2 (a JIT must honour it);
+  tighter tests (function-local targets).
 - **Known gaps:** spread arguments in `new`; derived and class
   constructors (1.12e); bound functions; `this` in arrows.
+  `LoadThisSloppy` binds on every evaluation of `this`; once 1.13 makes
+  a primitive `this` a wrapper object, binding must move to once per
+  call (prologue or a register), or `this === this` breaks.
