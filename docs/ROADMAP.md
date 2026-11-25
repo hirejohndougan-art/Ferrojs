@@ -16,7 +16,7 @@ step 10a (D-049).
 | --- | --- | --- |
 | 0. Quality system | Dec 2026 | Differential harness, fuzzing and benchmarks run in the gate |
 | 1. Core engine | Jan–Feb 2027 | Runs real scripts; interpreter within 2× QuickJS |
-| 2. Full language and built-ins | Mar–Aug 2027 | Over 95% of Test262 |
+| 2. Full language and built-ins | Mar–Aug 2027 (likely later, D-056) | 100% of Test262 for the current edition (D-056) |
 | 3. Baseline JIT and inline caches | Sep–Oct 2027 | Faster than QuickJS and Boa on the suite |
 | 4. Warm starts, embedding API 1.0 | Nov 2027 | Repeat-run startup ahead of V8 with code cache |
 | 5. Optimizing tier, moving GC | 2028 | Steady climb toward V8 parity |
@@ -34,12 +34,12 @@ the total work; a phase counts as done in proportion to its progress.
 | Planning and setup (done before autopilot) | 2% | done |
 | 0. Quality system | 3% | finished tasks ÷ tasks |
 | 1. Core engine | 12% | finished tasks ÷ tasks |
-| 2. Full language and built-ins | 35% | Test262 pass rate ÷ 95%, capped at 100% (until then, finished tasks ÷ tasks if that is higher) |
+| 2. Full language and built-ins | 35% | Test262 pass rate (D-056) (until then, finished tasks ÷ tasks if that is higher) |
 | 3. Baseline JIT and inline caches | 10% | finished tasks ÷ tasks |
 | 4. Warm starts, embedding API 1.0 | 5% | finished tasks ÷ tasks |
 | 5. Optimizing tier, moving GC | 23% | finished tasks ÷ tasks |
 | 6. WebAssembly | 7% | finished tasks ÷ tasks |
-| Close to 100% Test262 and 1.0 release | 3% | (Test262 pass rate − 95%) ÷ 5% |
+| 1.0 release | 3% | finished release tasks ÷ tasks (none listed yet; Test262 now finishes in Phase 2, D-056) |
 
 A phase with no task list yet counts as 0%. When the monthly review breaks a
 phase into tasks, the weights stay the same. Change weights only in a
@@ -178,7 +178,7 @@ Order matters: each task builds on the ones above it.
   (packed, holey, sparse) and Array length. needs: 1.8a
 - [x] (2026-11-25, D-054; merged 2026-11-25) 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7
-- [~] (claimed 2026-11-25 07:42 UTC) 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
+- [ ] 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
   `print`, `$262` host object. First real baseline. needs: 1.9
 - [x] 1.11 (2026-11-23) Host hooks for randomness, clocks and job ordering (D-008).
 - 1.12 Bytecode compiler, part 2 (split 2026-11-23: everything but
@@ -208,7 +208,8 @@ Spec-generated built-ins from ECMA-262 pseudocode (fallback: hand-written),
 RegExp via `regress`, Proxy and Reflect, typed arrays and ArrayBuffer,
 Map/Set/WeakMap/WeakRef, iterators and generators complete, modules,
 Annex B, built-in TypeScript type stripping, debugger hooks, WebAssembly
-build target. Gate: over 95% of Test262.
+build target. Gate: 100% of Test262 for the current ECMAScript edition,
+before any JIT work starts (John, 2026-11-25, D-056).
 
 Always included when Phase 2 is broken down (requested by John, 2026-11-20):
 

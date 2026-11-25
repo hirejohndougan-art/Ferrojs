@@ -12,9 +12,8 @@ efficiency. V8 parity is the direction, not the first finish line.
 
 Milestones:
 
-1. **Usable engine:** over 95% of Test262 and runs real scripts, then 100%
-   of Test262 for the current ECMAScript edition (ES2026 today), required
-   for 1.0.
+1. **Usable engine:** 100% of Test262 for the current ECMAScript edition
+   (ES2026 today) and runs real scripts, before any JIT work (D-056).
 2. **Faster than QuickJS and Boa,** via a baseline JIT with inline caches.
 3. **Instant warm starts,** via saved type profiles and a bytecode cache,
    ahead of V8 (with its code cache) on repeat runs.
@@ -146,15 +145,16 @@ Phase 5 steady climb toward V8 parity.
 1. **Core engine (1–2 months):** op-definition language, bytecode compiler
    on oxc, interpreter, shapes, simple GC behind branded handles, basic
    built-ins, minimal embedding API. Runs real scripts.
-2. **Full language and built-ins (3–6 months):** spec generation; over 95%
-   of Test262. Biggest unknown.
+2. **Full language and built-ins (3–6 months):** spec generation; 100%
+   of Test262 for the current edition before Phase 3 starts (D-056).
+   Biggest unknown.
 3. **Baseline JIT and inline caches (1–2 months).**
 4. **Persistent profiles, code caching, embedding API 1.0 (weeks).**
 5. **Optimizing tier and generational moving GC (6–12+ months).** Riskiest.
 6. **WebAssembly (3–6 months, alongside 5).**
 
-Closing the gap to 100% Test262, including tail calls, runs alongside
-Phases 3–4 and gates 1.0 (roughly 9–12 months in). Regex JIT in Phase 5.
+Test262 reaches 100% inside Phase 2, before the JIT (D-056, John,
+2026-11-25; this replaces closing the last 5% alongside Phases 3–4). Regex JIT in Phase 5.
 Size: about 150,000–300,000 lines of Rust, roughly half built-ins.
 
 ## Adoption features (1.0 requires 1–5, 7 and 8)

@@ -1348,3 +1348,21 @@ planning document and gets logged here as each is implemented.
   seen outside accessor paths, which check the attribute first).
 - **Known gaps:** accessors on indexed properties (the elements store
   has no attributes yet, D-040); the lazy key table moved to task 1.8f.
+
+## D-056 100% of Test262 before any JIT work
+- **Status:** Accepted (John, 2026-11-25; recorded at his request). An
+  owner decision, so it changes PLAN.md and the roadmap outside a
+  monthly review.
+- **Choice:** Phase 2's gate is 100% of Test262 for the current
+  ECMAScript edition, not over 95%. Phase 3 (baseline JIT and inline
+  caches) starts only after that. Phase 2's progress is now the
+  Test262 pass rate itself; the 3% slice that measured the last 5% is
+  now the 1.0 release work, so the weights still add up.
+- **Why:** John wants 100% accuracy and chose to finish it before any
+  speed work.
+- **Trade-off accepted:** the last few percent are the slowest, so the
+  JIT starts later and the Phase 2 dates in the roadmap will likely
+  slip. Final correctness was not at risk either way (the interpreter
+  is always the complete implementation, AUTOPILOT.md rules).
+- **Rejected:** starting the JIT at 95% and closing the gap alongside
+  Phases 3–4 (the original plan).
