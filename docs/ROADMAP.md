@@ -150,6 +150,15 @@ Order matters: each task builds on the ones above it.
   - [~] (claimed 2026-11-25 03:10 UTC; stacked on `auto/2026-11-24-interp-strings`)
     1.7d Dispatch cost against the op count (D-036): a benchmark that
     shows it stays flat as ops are added. needs: 1.7b
+  - [~] (claimed 2026-11-25 03:20 UTC; stacked on `auto/2026-11-24-interp-strings`)
+    1.7e Property access (added 2026-11-25: nothing on the roadmap
+    compiled `o.x` yet, and 1.8d, 1.9, 1.12b–e and 1.13 all need it):
+    property ops in the bytecode, object literals with data properties
+    and computed keys, `o.x` / `o[k]` reads, writes, compound and update
+    assignment, `delete`, `in`, method calls with `this`; in the
+    compiler, the toy context and the interpreter (on 1.8's objects).
+    Getters, setters, spread and `__proto__` in literals stay
+    unsupported until 1.8d and 1.13. needs: 1.7c, 1.8c
 - [x] 1.8a (2026-11-23) Objects and shapes, part a: new
   `ferrojs-vm` crate with the cell tracer, string cells and atoms,
   shape transition trees with the prototype, ordinary objects with
