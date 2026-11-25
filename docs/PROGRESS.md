@@ -428,3 +428,29 @@ One entry per autopilot run, newest at the bottom. Format is in
   (both stacked on 1.7c and both add to the op list and
   `benches/interp.rs`: the second to merge rebases). Otherwise 1.8d or
   1.12d could stack on this branch, but the stack is getting deep.
+
+## 2026-11-25 06:10 UTC — 1.9 Minimal embedding API and the `ferrojs` binary
+- Result: done on branch `auto/2026-11-25-cli`, not merged: the stack
+  under it carries 1.7a's `ferrojs-core` change, which still needs a Miri
+  run. GitHub Actions still fails every job in ~3 s with no logs
+  (runs up to 88); rustup still can't reach static.rust-lang.org (proxy
+  refuses the tunnel).
+- Changed: the branch first merges 1.7d into 1.7e (conflicts in the op
+  list, bench file and baseline resolved), so the whole stack is one
+  line: 1.7a → 1.7b → 1.7c → 1.7e + 1.7d → 1.9. Host functions: `Native`
+  cells indexing Rust closures that only see owned `HostValue` copies;
+  `Vm::define_native`, `Vm::host_value`. New `ferrojs` crate (`Engine`:
+  run, register, global, interrupt handle; errors with phase, line and
+  column, constructor name) and `ferrojs-cli` (`ferrojs file.js`, `-e`,
+  `print`, exit codes 0/1/2/3). New fuzz target `run_script` on the real
+  interpreter (3 min run: no crashes). Independent review: no serious
+  findings; fixed its minor ones (host objects now a `TypeError`,
+  CRLF column, slot reuse on redefinition, `--`, panic note).
+  `loop_with_calls` +1% from the call path.
+- Gate: everything passes except Miri (waits for CI).
+- Decisions: D-054
+- Test262: 8699 (+0)
+- Next: 1.10 (the Test262 runner's `ferrojs` engine on the real engine,
+  first real baseline) stacked on `auto/2026-11-25-cli`; or, once Miri
+  can run, merge the stack in order (fast-forward of
+  `auto/2026-11-25-cli` brings everything).

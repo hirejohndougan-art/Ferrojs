@@ -1098,3 +1098,6 @@ planning document and gets logged here as each is implemented.
 - **Status:** written on branch `auto/2026-11-25-property-access` (task
   1.7e); the full entry lands when that branch merges after 1.7a's Miri
   run. Don't reuse the number.
+
+## D-054 (reserved) Host functions, the `ferrojs` embedding crate and CLI
+- On branch `auto/2026-11-25-cli` (task 1.9); merges with the 1.7 stack.
