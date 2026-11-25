@@ -96,12 +96,9 @@ const CALL_PC: u32 = 5;
 const RETURN_INFO: u32 = 6;
 const ARGC: u32 = 7;
 
-// Function cell: header (kind | template << 32), environment reference.
-/// Offset of a function cell's environment reference.
-pub const FUNCTION_ENV: u32 = 8;
-const FUNCTION_SIZE: u32 = 16;
-// Native cell: header (kind | host function index << 32).
-const NATIVE_SIZE: u32 = 8;
+// Functions are objects (D-057): see `object::CLOSURE` and `object::HOST`.
+/// Inline slots of a function object: `length`, `name`, `prototype`.
+const FUNCTION_INLINE: u32 = 3;
 // Env cell: header (kind | slot count << 32), parent reference, slots.
 /// Offset of an environment's parent reference.
 pub const ENV_PARENT: u32 = 8;
@@ -109,10 +106,8 @@ pub const ENV_PARENT: u32 = 8;
 pub const ENV_SLOTS: u32 = 16;
 
 /// Cell type markers.
-pub struct FunctionCell;
 pub struct EnvCell;
 pub struct StackAnchor;
-pub struct NativeCell;
 
 /// The frame stack: slots outside the cage, shared with the tracer.
 pub struct FrameStack {
@@ -182,6 +177,12 @@ pub struct Template {
     pub constants: Vec<Value>,
     pub limits: Limits,
     pub params: u32,
+    /// The closures' `length` property.
+    pub length: u32,
+    /// Whether closures are constructors with a `prototype` object.
+    pub constructor: bool,
+    /// The closures' `name` property: an atom.
+    name_atom: Value,
     /// Template index of each nested function (`Func` operands).
     pub functions: Vec<u32>,
     feedback: Vec<Feedback>,
@@ -195,8 +196,23 @@ pub(crate) struct State {
     /// Atoms for the `typeof` results, by [`TypeName`].
     type_names: Vec<Value>,
     globals: Option<Globals>,
-    /// Host functions, by the index in their `Native` cells.
+    intrinsics: Option<Intrinsics>,
+    /// Host functions, by the index in their function objects.
     natives: Vec<NativeFn>,
+}
+
+/// The intrinsic objects functions and objects need (D-057), and the
+/// atoms of the function properties.
+pub(crate) struct Intrinsics {
+    /// `Object.prototype`: an ordinary object, prototype `null`.
+    object_prototype: Global<Object>,
+    /// `Function.prototype`: a host function that returns `undefined`,
+    /// prototype `Object.prototype`.
+    function_prototype: Global<Object>,
+    length: Global<JsString>,
+    name: Global<JsString>,
+    prototype: Global<JsString>,
+    constructor: Global<JsString>,
 }
 
 impl State {
@@ -207,6 +223,7 @@ impl State {
             templates: Vec::new(),
             type_names: Vec::new(),
             globals: None,
+            intrinsics: None,
             natives: Vec::new(),
         }
     }
@@ -327,7 +344,8 @@ impl Vm {
             if prepare(s, tables, interp).is_err() {
                 return Outcome::OutOfMemory;
             }
-            let Ok(callee) = new_function(s, t, None) else {
+            let intrinsics = interp.intrinsics.as_ref().expect("made by prepare");
+            let Ok(callee) = new_function(s, tables, intrinsics, &interp.templates, t, None) else {
                 return Outcome::OutOfMemory;
             };
             let stack = interp.stack.clone();
@@ -338,6 +356,7 @@ impl Vm {
                 templates: &mut interp.templates,
                 type_names: &interp.type_names,
                 globals: interp.globals.as_mut().expect("made by prepare"),
+                intrinsics: interp.intrinsics.as_ref().expect("made by prepare"),
                 tables,
                 natives: &mut interp.natives,
                 interrupt: interrupt.as_ref(),
@@ -399,6 +418,10 @@ impl Vm {
         let Vm {
             cx, tables, interp, ..
         } = self;
+        // Before the index is picked: `prepare` adds `Function.prototype`'s
+        // host function to the table.
+        cx.scope(|s| prepare(s, tables, interp))
+            .map_err(|()| DefineError::OutOfMemory)?;
         // Replacing a host function reuses its slot in the table.
         let existing = {
             let nogc = cx.nogc();
@@ -412,18 +435,15 @@ impl Vm {
             })
         };
         let index = existing.unwrap_or(interp.natives.len());
-        let header = CellKind::Native as u64 | ((index as u64) << 32);
         let done = cx.scope(|s| {
-            prepare(s, tables, interp).map_err(|()| DefineError::OutOfMemory)?;
             let oom = |_| DefineError::OutOfMemory;
-            let c = s
-                .alloc::<NativeCell>(NATIVE_SIZE)
-                .map_err(oom)?
-                .bind(s.nogc());
-            s.nogc().write_u64(c, 0, header);
-            let c = s.root(c.cast::<Object>());
+            let intrinsics = interp.intrinsics.as_ref().expect("made by prepare");
             let k = string::atom(s, tables, name).map_err(oom)?.bind(s.nogc());
             let k = s.root(k);
+            let c = new_host_function(s, tables, intrinsics, index as u32, k)
+                .map_err(|()| DefineError::OutOfMemory)?
+                .bind(s.nogc());
+            let c = s.root(c);
             let globals = interp.globals.as_ref().expect("made by prepare");
             let o = s.root(globals.object.get(s.nogc()));
             let attrs = Attrs(Attrs::WRITABLE.0 | Attrs::CONFIGURABLE.0);
@@ -479,6 +499,10 @@ fn load_tree(
             }
         });
     }
+    let name_atom = string::atom(s, tables, &f.name)
+        .map_err(|_| LoadError::OutOfMemory)?
+        .bind(s.nogc());
+    let name_atom = Value::string(HeapRef(name_atom.offset()));
     let index = templates.len() as u32;
     templates.push(Template {
         name: f.name.clone(),
@@ -487,6 +511,9 @@ fn load_tree(
         constants,
         limits,
         params: f.params,
+        length: f.length,
+        constructor: f.constructor,
+        name_atom,
         functions: Vec::new(),
         feedback: vec![Feedback::NONE; f.ics as usize],
     });
@@ -506,8 +533,18 @@ fn prepare(s: &mut Scope<'_>, tables: &mut Tables, st: &mut State) -> Result<(),
         s.nogc().write_u64(a, 0, CellKind::Stack as u64);
         st.anchor = Some(s.nogc().global(a));
     }
+    if st.intrinsics.is_none() {
+        st.intrinsics = Some(make_intrinsics(s, tables, &mut st.natives)?);
+    }
     if st.globals.is_none() {
-        let o = object::new_object(s, tables, None, object::DEFAULT_INLINE)
+        let proto = st
+            .intrinsics
+            .as_ref()
+            .expect("just made")
+            .object_prototype
+            .get(s.nogc());
+        let proto = s.root(proto);
+        let o = object::new_object(s, tables, Some(proto), object::DEFAULT_INLINE)
             .map_err(|_| ())?
             .bind(s.nogc());
         let object = s.nogc().global(o);
@@ -534,18 +571,160 @@ fn prepare(s: &mut Scope<'_>, tables: &mut Tables, st: &mut State) -> Result<(),
     Ok(())
 }
 
-/// A new function cell; `env` is an environment cell offset (rooted by
-/// the caller: it is read again after the allocation).
-fn new_function(s: &mut Scope<'_>, t: u32, env: Option<&dyn Fn() -> u32>) -> Result<Value, ()> {
-    let f = s
-        .alloc::<FunctionCell>(FUNCTION_SIZE)
-        .map_err(|_| ())?
+/// The intrinsics and the function property atoms (on first use).
+fn make_intrinsics(
+    s: &mut Scope<'_>,
+    tables: &mut Tables,
+    natives: &mut Vec<NativeFn>,
+) -> Result<Intrinsics, ()> {
+    let oom = |_| ();
+    let mut atom = |s: &mut Scope<'_>, text: &str| -> Result<Global<JsString>, ()> {
+        let a = string::atom(s, tables, text).map_err(oom)?.bind(s.nogc());
+        Ok(s.nogc().global(a))
+    };
+    let length = atom(s, "length")?;
+    let name = atom(s, "name")?;
+    let prototype = atom(s, "prototype")?;
+    let constructor = atom(s, "constructor")?;
+    let empty = atom(s, "")?;
+    let op = object::new_object(s, tables, None, object::DEFAULT_INLINE)
+        .map_err(oom)?
+        .bind(s.nogc());
+    let object_prototype = s.nogc().global(op);
+    // Function.prototype accepts any arguments and returns undefined
+    // (ECMA-262 §20.2.3).
+    let index = natives.len() as u32;
+    natives.push(Box::new(|_, _| Ok(HostValue::Undefined)));
+    let fp = s.scope(|n| -> Result<Global<Object>, ()> {
+        let proto = n.root(object_prototype.get(n.nogc()));
+        let f = object::new_function_object(n, tables, proto, FUNCTION_INLINE, object::HOST)
+            .map_err(oom)?
+            .bind(n.nogc());
+        let nogc = n.nogc();
+        nogc.write_u32(f, object::internal_word(nogc, f), index);
+        let f = n.root(f);
+        let (l, nm) = (n.root(length.get(n.nogc())), n.root(name.get(n.nogc())));
+        let e = RootedValue::String(n.root(empty.get(n.nogc())));
+        define_fixed(n, f, l, RootedValue::Primitive(Value::from_i32(0)))?;
+        define_fixed(n, f, nm, e)?;
+        Ok(n.nogc().global(f.get(n.nogc())))
+    })?;
+    Ok(Intrinsics {
+        object_prototype,
+        function_prototype: fp,
+        length,
+        name,
+        prototype,
+        constructor,
+    })
+}
+
+/// Defines `length` or `name` on a new function: not writable, not
+/// enumerable, configurable (ECMA-262 §10.2.9, §10.2.10).
+fn define_fixed(
+    s: &mut Scope<'_>,
+    f: ferrojs_core::gc::Root<'_, Object>,
+    key: ferrojs_core::gc::Root<'_, JsString>,
+    v: RootedValue<'_>,
+) -> Result<(), ()> {
+    match object::define(s, f, key, v, Attrs::CONFIGURABLE) {
+        Ok(true) => Ok(()),
+        _ => Err(()),
+    }
+}
+
+/// A new closure of template `t` (OrdinaryFunctionCreate, plus
+/// MakeConstructor for constructors); `env` is an environment cell offset
+/// (rooted by the caller: it is read again after the allocation).
+fn new_function(
+    s: &mut Scope<'_>,
+    tables: &mut Tables,
+    intr: &Intrinsics,
+    templates: &[Template],
+    t: u32,
+    env: Option<&dyn Fn() -> u32>,
+) -> Result<Value, ()> {
+    let tmpl = &templates[t as usize];
+    let (length, name_atom, constructor) = (tmpl.length, tmpl.name_atom, tmpl.constructor);
+    s.scope(|n| {
+        let oom = |_| ();
+        let proto = n.root(intr.function_prototype.get(n.nogc()));
+        let f = object::new_function_object(n, tables, proto, FUNCTION_INLINE, object::CLOSURE)
+            .map_err(oom)?
+            .bind(n.nogc());
+        let nogc = n.nogc();
+        let at = object::internal_word(nogc, f);
+        nogc.write_u32(f, at, t);
+        let env = env.map_or(0, |e| e());
+        nogc.write_ref(f, at + 4, nogc.handle::<EnvCell>(env));
+        let f = n.root(f);
+        let len = n.root(intr.length.get(n.nogc()));
+        let length = Value::from_i32(i32::try_from(length).unwrap_or(i32::MAX));
+        define_fixed(n, f, len, RootedValue::Primitive(length))?;
+        let key = n.root(intr.name.get(n.nogc()));
+        let name = rooted(n, name_atom).ok_or(())?;
+        define_fixed(n, f, key, name)?;
+        if constructor {
+            // MakeConstructor: a fresh prototype object whose
+            // `constructor` is the function.
+            let op = n.root(intr.object_prototype.get(n.nogc()));
+            let p = object::new_object(n, tables, Some(op), object::DEFAULT_INLINE)
+                .map_err(oom)?
+                .bind(n.nogc());
+            let p = n.root(p);
+            let key = n.root(intr.constructor.get(n.nogc()));
+            let attrs = Attrs(Attrs::WRITABLE.0 | Attrs::CONFIGURABLE.0);
+            if object::define(n, p, key, RootedValue::Object(f), attrs) != Ok(true) {
+                return Err(());
+            }
+            let key = n.root(intr.prototype.get(n.nogc()));
+            if object::define(n, f, key, RootedValue::Object(p), Attrs::WRITABLE) != Ok(true) {
+                return Err(());
+            }
+        }
+        Ok(Value::object(HeapRef(f.get(n.nogc()).offset())))
+    })
+}
+
+/// A new host function object for table entry `index`, named `name`
+/// (`length` 0; not a constructor).
+fn new_host_function<'s>(
+    s: &mut Scope<'s>,
+    tables: &mut Tables,
+    intr: &Intrinsics,
+    index: u32,
+    name: ferrojs_core::gc::Root<'_, JsString>,
+) -> Result<ferrojs_core::Unbound<Object>, ()> {
+    let oom = |_| ();
+    let proto = s.root(intr.function_prototype.get(s.nogc()));
+    let f = object::new_function_object(s, tables, proto, FUNCTION_INLINE, object::HOST)
+        .map_err(oom)?
         .bind(s.nogc());
     let nogc = s.nogc();
-    nogc.write_u64(f, 0, CellKind::Function as u64 | (u64::from(t) << 32));
-    let env = env.map_or(0, |e| e());
-    nogc.write_ref(f, FUNCTION_ENV, nogc.handle::<EnvCell>(env));
-    Ok(Value::object(HeapRef(f.offset())))
+    nogc.write_u32(f, object::internal_word(nogc, f), index);
+    let f = s.root(f);
+    let len = s.root(intr.length.get(s.nogc()));
+    define_fixed(s, f, len, RootedValue::Primitive(Value::from_i32(0)))?;
+    let key = s.root(intr.name.get(s.nogc()));
+    define_fixed(s, f, key, RootedValue::String(name))?;
+    Ok(f.get(s.nogc()).unbind())
+}
+
+/// Function object `v`'s header flags and internal word, if `v` is a
+/// live function object.
+/// On the call path: one header read, one internal word read.
+#[inline]
+fn function_word(nogc: NoGc<'_>, v: Value) -> Option<(u64, u64)> {
+    let Kind::Object(HeapRef(r)) = v.kind() else {
+        return None;
+    };
+    let o = nogc.handle::<Object>(r)?;
+    let header = nogc.read_u64(o, 0);
+    if header as u8 != CellKind::Object as u8 || header & (object::CLOSURE | object::HOST) == 0 {
+        return None;
+    }
+    let word = object::INLINE + 8 * object::inline_count(header);
+    Some((header & 0xff00, nogc.read_u64(o, word)))
 }
 
 /// Fills a new environment cell of `count` slots with `undefined`.
@@ -591,10 +770,12 @@ enum Called {
     Native(Value),
 }
 
-/// The host function index of `v`, if it is a live `Native` cell.
+/// The host function index of `v`, if it is a live host function.
 fn native_index(nogc: NoGc<'_>, v: Value) -> Option<usize> {
-    let c = cell_of::<NativeCell>(nogc, v, CellKind::Native)?;
-    Some((nogc.read_u64(c, 0) >> 32) as usize)
+    match function_word(nogc, v)? {
+        (flags, word) if flags & object::HOST != 0 => Some(word as u32 as usize),
+        _ => None,
+    }
 }
 
 /// `v` copied out of the heap ([`HostValue`]).
@@ -609,9 +790,7 @@ fn host_value(nogc: NoGc<'_>, v: Value) -> HostValue {
             None => HostValue::Undefined,
         },
         Kind::Object(_) => {
-            let function = cell_of::<FunctionCell>(nogc, v, CellKind::Function).is_some()
-                || native_index(nogc, v).is_some();
-            if function {
+            if function_word(nogc, v).is_some() {
                 HostValue::Function
             } else {
                 HostValue::Object
@@ -654,8 +833,7 @@ enum Base<'a> {
     /// A number or boolean.
     Primitive,
     Nullish,
-    /// Anything this interpreter can't use as a base yet (functions, until
-    /// they are objects) or that isn't a value (the TDZ marker).
+    /// Anything that isn't a value (the TDZ marker, a dead reference).
     Other,
 }
 
@@ -678,6 +856,7 @@ struct Interp<'r, 's> {
     templates: &'r mut Vec<Template>,
     type_names: &'r [Value],
     globals: &'r mut Globals,
+    intrinsics: &'r Intrinsics,
     tables: &'r mut Tables,
     natives: &'r mut Vec<NativeFn>,
     interrupt: &'r std::sync::atomic::AtomicBool,
@@ -719,11 +898,13 @@ impl Interp<'_, '_> {
         Value::from_bits_checked(self.slot(ENV)).unwrap_or(Value::UNDEFINED)
     }
 
-    /// The template of the function cell `callee` (a value in a frame).
+    /// The template of closure `callee` (a value in a frame).
+    #[inline]
     fn template_of(&self, callee: Value) -> Option<u32> {
-        let nogc = self.s.nogc();
-        let f = cell_of::<FunctionCell>(nogc, callee, CellKind::Function)?;
-        Some((nogc.read_u64(f, 0) >> 32) as u32)
+        match function_word(self.s.nogc(), callee)? {
+            (flags, word) if flags & object::CLOSURE != 0 => Some(word as u32),
+            _ => None,
+        }
     }
 
     /// The host function index of `callee`, if it is a `Native` cell.
@@ -1341,10 +1522,10 @@ impl Interp<'_, '_> {
         call_pc: u64,
         info: u64,
     ) -> Result<(), Thrown> {
-        let t = self.template_of(callee).expect("checked by the caller");
-        let nogc = self.s.nogc();
-        let f = cell_of::<FunctionCell>(nogc, callee, CellKind::Function).expect("a function");
-        let env = match nogc.read_u32(f, FUNCTION_ENV) {
+        let (flags, word) = function_word(self.s.nogc(), callee).expect("checked by the caller");
+        debug_assert!(flags & object::CLOSURE != 0, "a closure");
+        let t = word as u32;
+        let env = match (word >> 32) as u32 {
             0 => Value::UNDEFINED,
             e => Value::object(HeapRef(e)),
         };
@@ -1423,7 +1604,15 @@ impl OpCtx for Interp<'_, '_> {
             Some(Kind::Object(HeapRef(e))) => e,
             _ => 0,
         };
-        new_function(self.s, t, Some(&env_of)).map_err(|()| self.out_of_memory())
+        new_function(
+            self.s,
+            self.tables,
+            self.intrinsics,
+            self.templates,
+            t,
+            Some(&env_of),
+        )
+        .map_err(|()| self.out_of_memory())
     }
     fn current_closure(&self) -> Value {
         Value::from_bits_checked(self.slot(CALLEE)).unwrap_or(Value::UNDEFINED)
@@ -1704,8 +1893,15 @@ impl OpCtx for Interp<'_, '_> {
     }
 
     fn rt_new_object(&mut self) -> Completion {
-        match object::new_object(self.s, self.tables, None, object::DEFAULT_INLINE) {
-            Ok(o) => Ok(Value::object(HeapRef(o.bind(self.s.nogc()).offset()))),
+        let tables = &mut *self.tables;
+        let intr = self.intrinsics;
+        let made = self.s.scope(|n| {
+            let proto = n.root(intr.object_prototype.get(n.nogc()));
+            object::new_object(n, tables, Some(proto), object::DEFAULT_INLINE)
+                .map(|o| o.bind(n.nogc()).offset())
+        });
+        match made {
+            Ok(o) => Ok(Value::object(HeapRef(o))),
             Err(_) => Err(self.out_of_memory()),
         }
     }

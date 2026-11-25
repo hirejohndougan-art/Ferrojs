@@ -4,11 +4,19 @@
 //! Layout:
 //!
 //! ```text
-//!  0  header    kind | inline slot count << 16 | shape << 32
+//!  0  header    kind | flags << 8 | inline slot count << 16 | shape << 32
 //!  8  elements  indexed-property store (0 until task 1.8c)
 //! 12  slots     out-of-line slots cell (0 until needed)
 //! 16  inline    N value slots
+//! 16 + 8N       functions only: internal word (see below)
 //! ```
+//!
+//! Header flags: bit 8 marks an array (`elements::ARRAY`), bit 9 a
+//! closure ([`CLOSURE`]), bit 10 a host function ([`HOST`]). Functions are
+//! ordinary objects with one extra 8-byte internal word after the inline
+//! slots (task 1.10a, D-057): a closure's holds its template index (low
+//! half) and its environment cell (high half, 0 for none, traced); a host
+//! function's holds its index in the host function table.
 //!
 //! A property's slot index comes from the shape; slots below N are
 //! inline, the rest live in the out-of-line `Slots` cell (header: kind |
@@ -155,9 +163,16 @@ pub const DEFAULT_INLINE: u32 = 4;
 /// At most this many inline slots (a limit on object size; the header
 /// field itself has 16 bits).
 pub const MAX_INLINE: u32 = 256;
+/// Header flag of a closure (an object with a template and an
+/// environment).
+pub const CLOSURE: u64 = 1 << 9;
+/// Header flag of a host function.
+pub const HOST: u64 = 1 << 10;
+
 /// Out-of-line slots start with this capacity.
 const FIRST_SLOTS: u32 = 4;
 
+#[inline]
 pub(crate) fn inline_count(header: u64) -> u32 {
     ((header >> 16) & 0xffff) as u32
 }
@@ -189,6 +204,50 @@ pub fn new_object(
     nogc.write_u64(o, 0, CellKind::Object as u64 | (inline as u64) << 16);
     nogc.write_ref(o, 4, Some(root.get(nogc)));
     Ok(o.unbind())
+}
+
+/// Allocates a function object of class `class` ([`CLOSURE`] or
+/// [`HOST`]) with prototype `proto` and `inline` inline slots, its
+/// internal word zero. The caller fills the internal word
+/// ([`internal_word`]) before the next allocation.
+pub fn new_function_object(
+    s: &mut Scope<'_>,
+    t: &mut Tables,
+    proto: Root<'_, Object>,
+    inline: u32,
+    class: u64,
+) -> Result<Unbound<Object>, AllocError> {
+    debug_assert!(class == CLOSURE || class == HOST);
+    let inline = inline.min(MAX_INLINE);
+    let root = shape::root_shape(s, t, Some(proto), inline)?.bind(s.nogc());
+    let root = s.root(root);
+    let cell = s.alloc::<Object>(INLINE + 8 * inline + 8)?;
+    let nogc = s.nogc();
+    let o = cell.bind(nogc);
+    let undefined = Value::UNDEFINED.to_bits();
+    for i in 0..inline {
+        nogc.write_u64(o, INLINE + 8 * i, undefined);
+    }
+    nogc.write_u64(o, INLINE + 8 * inline, 0);
+    nogc.write_u64(
+        o,
+        0,
+        CellKind::Object as u64 | class | (inline as u64) << 16,
+    );
+    nogc.write_ref(o, 4, Some(root.get(nogc)));
+    Ok(o.unbind())
+}
+
+/// The header flags of object `o` ([`CLOSURE`], [`HOST`], array).
+pub fn flags(nogc: NoGc<'_>, o: Gc<'_, Object>) -> u64 {
+    header(nogc, o) & 0xff00
+}
+
+/// Offset of function object `o`'s internal word.
+pub fn internal_word(nogc: NoGc<'_>, o: Gc<'_, Object>) -> u32 {
+    let h = header(nogc, o);
+    debug_assert!(h & (CLOSURE | HOST) != 0, "not a function object");
+    INLINE + 8 * inline_count(h)
 }
 
 /// The object's shape.

@@ -294,3 +294,63 @@ fn inherited_object_prototype_names_fail_cleanly() {
         );
     }
 }
+
+/// Functions as objects (task 1.10a, D-057): own properties, `length`,
+/// `name`, `prototype` and `constructor`, attributes, host functions.
+/// Interpreter only: the toy context has no function objects.
+const FUNCTION_OBJECT_CASES: &[&[&str]] = &[
+    &["function f() {} f.x = 5; var result = f.x;"],
+    &["function f(a, b, c = 1, d) {} var result = f.length;"],
+    &["function f() {} var result = f.name;"],
+    &["var result = (function named() {}).name;"],
+    &["var result = (function () {}).name;"],
+    &["var o = { m() {} }; var result = o.m.name;"],
+    &["var o = { g: function () {} }; var result = o.g.name;"],
+    &["var o = { h: () => 1 }; var result = o.h.name;"],
+    &["var o = { k: function named() {} }; var result = o.k.name;"],
+    &["var o = { 'a b': function () {} }; var result = o['a b'].name;"],
+    &["function f() {} var result = typeof f.prototype;"],
+    &["function f() {} var result = f.prototype.constructor === f;"],
+    &["var o = { m() {} }; var result = o.m.prototype;"],
+    &["var a = () => 1; var result = a.prototype;"],
+    &["function f() {} f.name = 'other'; var result = f.name;"],
+    &["function f() {} var result = delete f.name; result = result + ':' + f.name;"],
+    &["function f() {} var result = delete f.prototype;"],
+    &["function f() {} var result = delete f.length; result = result + ':' + f.length;"],
+    &["function f() {} f.prototype = 3; var result = f.prototype;"],
+    &["'use strict'; function f() {} f.name = 'x'; var result = 1;"],
+    &["'use strict'; function f() {} f.length = 2; var result = 1;"],
+    &["function f() {} var result = '' + ('length' in f) + ('name' in f) + ('prototype' in f) + ('x' in f);"],
+    &["function f() {} var p = f.prototype; f.prototype.y = 1; var result = f.prototype === p && p.y;"],
+    &["function f() {} function g() {} var result = f.prototype === g.prototype;"],
+    &["function mk() { return function () {}; } var result = mk().prototype === mk().prototype;"],
+    &["var c = 0; function f() { c++; } f.self = f; f.self.self(); var result = c;"],
+    &["function f() { return f.count = (f.count || 0) + 1; } f(); f(); var result = f.count;"],
+    &["function f() { 'use strict'; return this; } var o = { f: f }; var result = o.f() === o;"],
+    &["var fs = {}; for (let i = 0; i < 5; i++) { var g = () => i; g.tag = i * 10; fs[i] = g; } var result = fs[3]() + fs[3].tag;"],
+    &["function f() {} f[0] = 'zero'; f[1] = 'one'; var result = f[0] + f[1];"],
+    &["var result = typeof (() => {}) + typeof function () {} + typeof {};"],
+];
+
+#[test]
+fn function_objects_match_node() {
+    match_node(FUNCTION_OBJECT_CASES);
+}
+
+#[test]
+fn closures_keep_their_environment_and_properties_across_collections() {
+    let mut vm = vm(true);
+    let scripts = [
+        "function counter() { let n = 0; const inc = () => ++n; inc.tag = 'c'; return inc; } \
+         var a = counter(), b = counter();",
+        "a(); a(); b();",
+        "var result = a() * 10 + b() + a.tag + (a.prototype === undefined);",
+    ];
+    for src in scripts {
+        let f = compile_script_source(src).unwrap();
+        assert!(matches!(vm.run_script(&f).unwrap(), Outcome::Returned(_)));
+        vm.cx.collect();
+    }
+    let result = vm.global("result").unwrap();
+    assert_eq!(text(&vm, result), "32ctrue");
+}

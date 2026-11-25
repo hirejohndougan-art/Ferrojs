@@ -1367,7 +1367,47 @@ planning document and gets logged here as each is implemented.
 - **Rejected:** starting the JIT at 95% and closing the gap alongside
   Phases 3–4 (the original plan).
 
-## D-056 Opus 5.5 for every run and subagent
+## D-057 Functions are ordinary objects with a trailing internal word
+- **Status:** Accepted (autopilot, 2026-11-25)
+- **Choice:** (task 1.10a) closures and host functions are `Object`
+  cells. Header bit 9 marks a closure, bit 10 a host function (bit 8 is
+  already the array flag). After the inline slots comes one 8-byte
+  internal word: a closure's template index (low half) and environment
+  cell (high half, traced, 0 for none); a host function's index in the
+  host function table. Everything in `object.rs` (properties, elements,
+  dictionary mode, deletion) works on functions unchanged. The
+  `Function` and `Native` cell kinds are retired (numbers reserved; the
+  tracer treats them as a bug). New intrinsics, made on first use:
+  `Object.prototype` (prototype `null`) and `Function.prototype` (a host
+  function returning `undefined`, prototype `Object.prototype`). Object
+  literals and the global object now inherit from `Object.prototype`.
+  Every function gets `length` and `name` (non-writable, non-enumerable,
+  configurable); constructors (`function` declarations and expressions,
+  not arrows or object-literal methods) also get `prototype`
+  (writable only) holding a fresh object whose `constructor` points
+  back. Methods and anonymous functions or arrows in object literals
+  take the key as their name.
+- **Why:** Test262's own harness assigns properties to functions
+  (`assert.sameValue = …`) and needs `new`, `instanceof` and
+  `Test262Error.prototype`; every later built-in also hangs off function
+  objects. Keeping one object layout means one property implementation.
+  The internal word sits at the end so `INLINE` stays a constant for
+  every object; the call path reads the header once and the word once
+  (`loop_with_calls` −3% against before).
+- **Rejected:** a separate property object pointed to by the function
+  cell (two cells per function, and every property op would need a
+  function special case); lazy `prototype` objects (V8 does it, but it
+  needs a hook in every own-property operation; eager costs one
+  allocation per closure creation, which no benchmark loop does yet —
+  revisit when the corpus shows it); internal fields in hidden inline
+  slots (the shape's slot numbering would need an offset everywhere).
+- **Known gaps:** named evaluation for `var f = function () {}` and
+  assignments (the name stays `""`); `Function.prototype` has no
+  methods (`call`, `apply`, `bind` come with 1.13); `Object.prototype`
+  has no properties, and reading its future names still fails cleanly
+  as before (D-053).
+
+## D-058 Opus 5.5 for every run and subagent (numbered D-056 when written; renumbered, D-056 was already taken)
 - **Status:** Accepted (John's request, 2026-11-25). Supersedes D-049
   (and D-048).
 - **Choice:** every FerroJS scheduled task (autopilot, Sunday marathon,

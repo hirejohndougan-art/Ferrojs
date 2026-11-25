@@ -67,6 +67,10 @@ pub struct CompiledFunction {
     pub handlers: Vec<Handler>,
     /// Nested function templates, indexed by `Func` operands.
     pub functions: Vec<CompiledFunction>,
+    /// Whether closures of it are constructors (\[\[Construct\]\]) and
+    /// get a `prototype` object: ordinary `function` declarations and
+    /// expressions, not arrows or methods (ECMA-262 §10.2.5, D-057).
+    pub constructor: bool,
 }
 
 impl CompiledFunction {
@@ -373,6 +377,8 @@ struct FnLike<'b, 'a> {
     /// A named function expression's own name binding.
     own_name: Option<SymbolId>,
     arrow: bool,
+    /// See [`CompiledFunction::constructor`].
+    constructor: bool,
 }
 
 impl<'b, 'a> FnLike<'b, 'a> {
@@ -399,6 +405,7 @@ impl<'b, 'a> FnLike<'b, 'a> {
             scope: f.scope_id.get().expect("semantic analysis ran"),
             own_name,
             arrow: false,
+            constructor: true,
         })
     }
 
@@ -418,6 +425,7 @@ impl<'b, 'a> FnLike<'b, 'a> {
             scope: f.scope_id.get().expect("semantic analysis ran"),
             own_name: None,
             arrow: true,
+            constructor: false,
         })
     }
 }
@@ -573,12 +581,14 @@ fn compile_fn(
     }
     let _ = fn_scope_pushed;
 
-    g.finish(
+    let mut compiled = g.finish(
         f.name.clone(),
         count,
         length,
         scoping.scope_flags(f.scope).is_strict_mode(),
-    )
+    )?;
+    compiled.constructor = f.constructor;
+    Ok(compiled)
 }
 
 fn symbol_of(id: &BindingIdentifier<'_>) -> SymbolId {
@@ -986,6 +996,7 @@ impl<'s> Gen<'s> {
             code,
             handlers,
             functions: self.functions,
+            constructor: false,
         })
     }
 
@@ -2809,7 +2820,24 @@ impl Gen<'_> {
             }
             let c = self.string_const(&name)?;
             let v = self.temp()?;
-            self.expr_to(&p.value, v)?;
+            match &p.value {
+                // A method, or an anonymous function or arrow as the value:
+                // the key names it (DefineMethod, NamedEvaluation).
+                Expression::FunctionExpression(func) if p.method || func.id.is_none() => {
+                    let mut f = FnLike::function(func)?;
+                    f.name = name.clone();
+                    f.constructor = !p.method;
+                    let func = self.nested(&f)?;
+                    self.asm.create_closure(v, func);
+                }
+                Expression::ArrowFunctionExpression(func) => {
+                    let mut f = FnLike::arrow(func)?;
+                    f.name = name.clone();
+                    let func = self.nested(&f)?;
+                    self.asm.create_closure(v, func);
+                }
+                _ => self.expr_to(&p.value, v)?,
+            }
             self.asm.define_named(dst, c, v);
             self.free(v);
         }
