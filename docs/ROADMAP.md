@@ -168,7 +168,7 @@ Order matters: each task builds on the ones above it.
     accessor pair cells, `get`/`set` handing back the getter or setter,
     `define_property` with partial descriptors
     (ValidateAndApplyPropertyDescriptor). needs: 1.8b
-  - [ ] 1.8e Call getters and setters from the interpreter's property and
+  - [~] (claimed 2026-11-25 08:15 UTC) 1.8e Call getters and setters from the interpreter's property and
     global-name paths (a frame for the call, D-036), and compile `get` /
     `set` in object literals. needs: 1.8d, 1.7
   - [ ] 1.8f The lazy key table for large shapes (hashed lookup for
