@@ -150,8 +150,8 @@ Order matters: each task builds on the ones above it.
   - [x] 1.7d (2026-11-25, on branch `auto/2026-11-25-dispatch`, stacked on
     1.7c; waiting for 1.7a's Miri run, D-052) Dispatch cost against the op count (D-036): a benchmark that
     shows it stays flat as ops are added. needs: 1.7b
-  - [~] (claimed 2026-11-25 03:20 UTC; stacked on `auto/2026-11-24-interp-strings`)
-    1.7e Property access (added 2026-11-25: nothing on the roadmap
+  - [x] 1.7e (2026-11-25, on branch `auto/2026-11-25-property-access`,
+    stacked on 1.7c; waiting for 1.7a's Miri run, D-053) Property access (added 2026-11-25: nothing on the roadmap
     compiled `o.x` yet, and 1.8d, 1.9, 1.12b–e and 1.13 all need it):
     property ops in the bytecode, object literals with data properties
     and computed keys, `o.x` / `o[k]` reads, writes, compound and update

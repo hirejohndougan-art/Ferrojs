@@ -1093,3 +1093,8 @@ planning document and gets logged here as each is implemented.
 - **Status:** written on branch `auto/2026-11-25-dispatch` (task 1.7d);
   the full entry lands when that branch merges after 1.7a's Miri run.
   Don't reuse the number.
+
+## D-053 (reserved) Property access before the built-ins
+- **Status:** written on branch `auto/2026-11-25-property-access` (task
+  1.7e); the full entry lands when that branch merges after 1.7a's Miri
+  run. Don't reuse the number.

@@ -403,3 +403,28 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 8699 (+0)
 - Next: 1.8d (accessors) or 1.9 (embedding API and the `ferrojs`
   binary), stacked on this branch; or merge 1.7a → 1.7d once CI runs.
+
+## 2026-11-25 04:40 UTC — 1.7e Property access (task added this run)
+- Result: done on branch `auto/2026-11-25-property-access` (stacked on
+  1.7c, beside 1.7d's branch), not merged: the stack carries 1.7a's
+  `ferrojs-core` change, which still needs a Miri run. GitHub Actions
+  still fails every job in ~3 s; rustup still can't reach
+  static.rust-lang.org.
+- Changed: added task 1.7e (nothing compiled `o.x`, and 1.8d, 1.9,
+  1.12b–e and 1.13 need it). 12 property ops; object literals, member
+  reads, writes, compound, logical and update assignment, `delete`, `in`,
+  method calls with `this`; in the compiler, the toy context and the
+  interpreter (elements for indices, atoms for names). 70 Node-checked
+  script cases on both engines (plus GC stress), 5 interpreter-only
+  ones, refusal tests; new benchmark `interp/run.properties`.
+  Independent review: no rooting or memory-safety bugs; fixed its
+  findings (inherited `Object.prototype` names and `__proto__` now fail
+  cleanly instead of answering wrongly; error kinds asserted; toy and
+  interpreter agree on odd bytecode).
+- Gate: everything passes except Miri (waits for CI).
+- Decisions: D-053 (D-052 went to 1.7d)
+- Test262: 8699 (+0)
+- Next: once Miri runs, merge 1.7a → 1.7b → 1.7c, then 1.7d and 1.7e
+  (both stacked on 1.7c and both add to the op list and
+  `benches/interp.rs`: the second to merge rebases). Otherwise 1.8d or
+  1.12d could stack on this branch, but the stack is getting deep.
