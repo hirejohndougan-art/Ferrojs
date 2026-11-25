@@ -126,30 +126,33 @@ Order matters: each task builds on the ones above it.
   Number::toString in the toy. needs: 1.6e
 - [x] 1.6g (2026-11-23) Accept sloppy-mode call expressions as assignment targets
   (runtime `ReferenceError`; the 7 Annex B failures, D-032). needs: 1.6e
-- [ ] 1.7a (risky; done on branch `auto/2026-11-23-core-handles`, reviewed,
-  waiting for a CI Miri run: GitHub Actions has started no job since
-  2026-11-21, likely out of minutes) Core handle API for the interpreter: a checked way to
+- [x] 1.7a (2026-11-25, risky; reviewed; CI Miri passed in run 45558416159
+  once the repo went public) Core handle API for the interpreter: a checked way to
   turn a raw cell offset held in a register `Value` into a `Gc` handle
   (`NoGc::handle(offset) -> Option<Gc>`, live-cell check under the
   verifier), with tests. Every VM task needs it: registers hold raw
   values (ARCHITECTURE.md §2) and cells are only readable and writable
   through `Gc` handles. Core change: CI Miri required. needs: 1.3b
-- 1.7 Interpreter (split 2026-11-23, D-047; stacked on the 1.7a branch,
-  merges after its Miri run):
-  - [x] 1.7b (2026-11-23, on branch `auto/2026-11-23-interpreter`, waiting for
-    1.7a's Miri run) Interpreter core: frame stack (ARCHITECTURE.md §3)
+- 1.7 Interpreter (split 2026-11-23, D-047; merged 2026-11-25 with 1.7a):
+  - [x] 1.7b (2026-11-23; merged 2026-11-25) Interpreter core: frame stack (ARCHITECTURE.md §3)
     rooted through an anchor cell, function and environment cells, calls,
     proper tail calls, returns, exception unwinding, interrupts, stack
     overflow; every compiled function case matches the toy context, also
     under GC stress. needs: 1.3b, 1.6d, 1.7a
-  - [x] 1.7c (2026-11-24, on branch `auto/2026-11-24-interp-strings`,
-    stacked on 1.7b; waiting for 1.7a's Miri run, D-050) Strings and globals in the interpreter: string values beyond
+  - [x] 1.7c (2026-11-24; merged 2026-11-25, D-050) Strings and globals in the interpreter: string values beyond
     atoms (concatenation, Number::toString, comparisons), the global
     object and global lexical environment; the script cases (1.6e, 1.6f)
     match Node.js. needs: 1.7b, 1.8b
-  - [x] 1.7d (2026-11-25, on branch `auto/2026-11-25-dispatch`, stacked on
-    1.7c; waiting for 1.7a's Miri run, D-052) Dispatch cost against the op count (D-036): a benchmark that
+  - [x] 1.7d (2026-11-25, D-052) Dispatch cost against the op count (D-036): a benchmark that
     shows it stays flat as ops are added. needs: 1.7b
+  - [x] 1.7e (2026-11-25, D-053) Property access (added 2026-11-25: nothing on the roadmap
+    compiled `o.x` yet, and 1.8d, 1.9, 1.12b–e and 1.13 all need it):
+    property ops in the bytecode, object literals with data properties
+    and computed keys, `o.x` / `o[k]` reads, writes, compound and update
+    assignment, `delete`, `in`, method calls with `this`; in the
+    compiler, the toy context and the interpreter (on 1.8's objects).
+    Getters, setters, spread and `__proto__` in literals stay
+    unsupported until 1.8d and 1.13. needs: 1.7c, 1.8c
 - [x] 1.8a (2026-11-23) Objects and shapes, part a: new
   `ferrojs-vm` crate with the cell tracer, string cells and atoms,
   shape transition trees with the prototype, ordinary objects with
@@ -163,7 +166,7 @@ Order matters: each task builds on the ones above it.
   called from get/set), the lazy key table for large shapes. needs: 1.8b, 1.7
 - [x] 1.8c (2026-11-23) Objects, part c: indexed properties in the elements store
   (packed, holey, sparse) and Array length. needs: 1.8a
-- [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
+- [x] (2026-11-25, D-054; merged 2026-11-25) 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7
 - [ ] 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
   `print`, `$262` host object. First real baseline. needs: 1.9

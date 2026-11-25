@@ -421,3 +421,68 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Test262: 8699 (+0)
 - Next: 1.8d (accessors) or 1.9 (embedding API and the `ferrojs`
   binary), stacked on this branch; or merge 1.7a → 1.7d once CI runs.
+
+## 2026-11-25 04:40 UTC — 1.7e Property access (task added this run)
+- Result: done on branch `auto/2026-11-25-property-access` (stacked on
+  1.7c, beside 1.7d's branch), not merged: the stack carries 1.7a's
+  `ferrojs-core` change, which still needs a Miri run. GitHub Actions
+  still fails every job in ~3 s; rustup still can't reach
+  static.rust-lang.org.
+- Changed: added task 1.7e (nothing compiled `o.x`, and 1.8d, 1.9,
+  1.12b–e and 1.13 need it). 12 property ops; object literals, member
+  reads, writes, compound, logical and update assignment, `delete`, `in`,
+  method calls with `this`; in the compiler, the toy context and the
+  interpreter (elements for indices, atoms for names). 70 Node-checked
+  script cases on both engines (plus GC stress), 5 interpreter-only
+  ones, refusal tests; new benchmark `interp/run.properties`.
+  Independent review: no rooting or memory-safety bugs; fixed its
+  findings (inherited `Object.prototype` names and `__proto__` now fail
+  cleanly instead of answering wrongly; error kinds asserted; toy and
+  interpreter agree on odd bytecode).
+- Gate: everything passes except Miri (waits for CI).
+- Decisions: D-053 (D-052 went to 1.7d)
+- Test262: 8699 (+0)
+- Next: once Miri runs, merge 1.7a → 1.7b → 1.7c, then 1.7d and 1.7e
+  (both stacked on 1.7c and both add to the op list and
+  `benches/interp.rs`: the second to merge rebases). Otherwise 1.8d or
+  1.12d could stack on this branch, but the stack is getting deep.
+
+## 2026-11-25 06:10 UTC — 1.9 Minimal embedding API and the `ferrojs` binary
+- Result: done on branch `auto/2026-11-25-cli`, not merged: the stack
+  under it carries 1.7a's `ferrojs-core` change, which still needs a Miri
+  run. GitHub Actions still fails every job in ~3 s with no logs
+  (runs up to 88); rustup still can't reach static.rust-lang.org (proxy
+  refuses the tunnel).
+- Changed: the branch first merges 1.7d into 1.7e (conflicts in the op
+  list, bench file and baseline resolved), so the whole stack is one
+  line: 1.7a → 1.7b → 1.7c → 1.7e + 1.7d → 1.9. Host functions: `Native`
+  cells indexing Rust closures that only see owned `HostValue` copies;
+  `Vm::define_native`, `Vm::host_value`. New `ferrojs` crate (`Engine`:
+  run, register, global, interrupt handle; errors with phase, line and
+  column, constructor name) and `ferrojs-cli` (`ferrojs file.js`, `-e`,
+  `print`, exit codes 0/1/2/3). New fuzz target `run_script` on the real
+  interpreter (3 min run: no crashes). Independent review: no serious
+  findings; fixed its minor ones (host objects now a `TypeError`,
+  CRLF column, slot reuse on redefinition, `--`, panic note).
+  `loop_with_calls` +1% from the call path.
+- Gate: everything passes except Miri (waits for CI).
+- Decisions: D-054
+- Test262: 8699 (+0)
+- Next: 1.10 (the Test262 runner's `ferrojs` engine on the real engine,
+  first real baseline) stacked on `auto/2026-11-25-cli`; or, once Miri
+  can run, merge the stack in order (fast-forward of
+  `auto/2026-11-25-cli` brings everything).
+
+## 2026-11-25 06:40 UTC — merge the 1.7 stack and 1.9 (John's request)
+- Result: merged (`auto/2026-11-25-cli` fast-forwarded onto `main`,
+  bringing 1.7a, 1.7b, 1.7c, 1.7d, 1.7e and 1.9)
+- Changed: John made the repo public, so GitHub Actions runs again.
+  1.7a's CI Miri run passed (run 45558416159), and so did the stack's
+  (run 45558416116). Fixed `tools/dispatch-flat.sh`, which found no
+  results in CI: the toolchain action sets `CARGO_TERM_COLOR=always`
+  and gungraun's colour codes hid the lines it parses. Merged `main`
+  into the branch (docs only; reserved D-052–D-054 lines replaced by
+  the full entries).
+- Decisions: none
+- Test262: 8699 (+0)
+- Next: 1.10 (the Test262 runner on the real engine, first real baseline).
