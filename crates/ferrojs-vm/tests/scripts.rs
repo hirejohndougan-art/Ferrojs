@@ -354,3 +354,36 @@ fn closures_keep_their_environment_and_properties_across_collections() {
     let result = vm.global("result").unwrap();
     assert_eq!(text(&vm, result), "32ctrue");
 }
+
+/// Review findings (1.10a): methods under computed keys are not
+/// constructors; parenthesized anonymous functions are named.
+const FUNCTION_OBJECT_CASES_2: &[&[&str]] = &[
+    &["var o = { ['m']() {} }; var result = o.m.prototype;"],
+    &["var o = { y: (function () {}) }; var result = o.y.name;"],
+    &["var o = { z: (() => 1) }; var result = o.z.name;"],
+];
+
+#[test]
+fn function_objects_match_node_2() {
+    match_node(FUNCTION_OBJECT_CASES_2);
+}
+
+/// `Function.prototype`'s methods don't exist yet: a function base
+/// fails cleanly instead of answering `undefined` or `false`.
+#[test]
+fn missing_function_prototype_names_fail_cleanly() {
+    for src in [
+        "function f() {} var result = typeof f.call;",
+        "function f() {} var result = 'apply' in f;",
+        "function f() {} var result = f.bind;",
+    ] {
+        let got = run_scripts(&mut vm(false), &[src]);
+        assert!(got.starts_with("throw:"), "{src}: {got}");
+    }
+    // An own property of that name is fine.
+    let got = run_scripts(
+        &mut vm(false),
+        &["function f() {} f.call = 3; var result = f.call;"],
+    );
+    assert_eq!(got, "n:4008000000000000");
+}

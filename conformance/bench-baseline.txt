@@ -6,9 +6,9 @@ bytecode/bytecode/dispatch.count_loop 1139902
 heap/heap_alloc/bump_alloc.mixed 167391
 heap/heap_alloc/collect.half_live 439835
 heap/heap_alloc/cx_alloc.mixed 214725
-interp/interp/run.global_strings 4678211
-interp/interp/run.loop_with_calls 3127260
-interp/interp/run.properties 17895702
+interp/interp/run.global_strings 4678489
+interp/interp/run.loop_with_calls 3127429
+interp/interp/run.properties 17923173
 objects/objects/get_set.two_objects 2399741
 parse/parse_group/front_end.mixed 1166469
 value/value_encoding/as_number.mixed 25447

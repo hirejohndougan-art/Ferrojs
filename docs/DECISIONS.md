@@ -1401,8 +1401,17 @@ planning document and gets logged here as each is implemented.
   allocation per closure creation, which no benchmark loop does yet —
   revisit when the corpus shows it); internal fields in hidden inline
   slots (the shape's slot numbering would need an offset everywhere).
-- **Known gaps:** named evaluation for `var f = function () {}` and
-  assignments (the name stays `""`); `Function.prototype` has no
+- **Review:** independent review found no rooting, tracer or
+  memory-safety problems. Fixed its findings: methods under computed
+  keys were constructors; parenthesized anonymous functions weren't
+  named; a function missing a `Function.prototype` name (`call`,
+  `apply`, `bind`, …) read `undefined` instead of failing cleanly; a
+  failed intrinsics allocation left a dead host-table entry; stale docs.
+- **Known gaps:** named evaluation for `var f = function () {}`,
+  assignments and computed keys (the name stays `""`; computed keys
+  need a run-time SetFunctionName); `define_native` replacing a global
+  that a script aliased to another host function (`alias = print`)
+  reuses that function's table slot (from 1.9, not changed here); `Function.prototype` has no
   methods (`call`, `apply`, `bind` come with 1.13); `Object.prototype`
   has no properties, and reading its future names still fails cleanly
   as before (D-053).

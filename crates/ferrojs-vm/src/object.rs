@@ -238,11 +238,6 @@ pub fn new_function_object(
     Ok(o.unbind())
 }
 
-/// The header flags of object `o` ([`CLOSURE`], [`HOST`], array).
-pub fn flags(nogc: NoGc<'_>, o: Gc<'_, Object>) -> u64 {
-    header(nogc, o) & 0xff00
-}
-
 /// Offset of function object `o`'s internal word.
 pub fn internal_word(nogc: NoGc<'_>, o: Gc<'_, Object>) -> u32 {
     let h = header(nogc, o);

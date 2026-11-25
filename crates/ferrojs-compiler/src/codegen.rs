@@ -2799,7 +2799,9 @@ impl Gen<'_> {
                     .expect("a computed key is an expression");
                 self.expr_to(key, k)?;
                 let v = self.temp()?;
-                self.expr_to(&p.value, v)?;
+                // The name of a function under a computed key is only
+                // known at run time (SetFunctionName): left "" for now.
+                self.property_value(&p.value, None, p.method, v)?;
                 self.asm.define_keyed(dst, k, v);
                 self.free(v);
                 self.free(k);
@@ -2820,28 +2822,48 @@ impl Gen<'_> {
             }
             let c = self.string_const(&name)?;
             let v = self.temp()?;
-            match &p.value {
-                // A method, or an anonymous function or arrow as the value:
-                // the key names it (DefineMethod, NamedEvaluation).
-                Expression::FunctionExpression(func) if p.method || func.id.is_none() => {
-                    let mut f = FnLike::function(func)?;
-                    f.name = name.clone();
-                    f.constructor = !p.method;
-                    let func = self.nested(&f)?;
-                    self.asm.create_closure(v, func);
-                }
-                Expression::ArrowFunctionExpression(func) => {
-                    let mut f = FnLike::arrow(func)?;
-                    f.name = name.clone();
-                    let func = self.nested(&f)?;
-                    self.asm.create_closure(v, func);
-                }
-                _ => self.expr_to(&p.value, v)?,
-            }
+            self.property_value(&p.value, Some(&name), p.method, v)?;
             self.asm.define_named(dst, c, v);
             self.free(v);
         }
         Ok(())
+    }
+}
+
+impl Gen<'_> {
+    /// An object literal property's value into `v`. A method is not a
+    /// constructor (DefineMethod); a method or an anonymous function or
+    /// arrow, parenthesized or not, is named after the key when it is
+    /// known (`name`; NamedEvaluation).
+    fn property_value(
+        &mut self,
+        value: &Expression<'_>,
+        name: Option<&str>,
+        method: bool,
+        v: Reg,
+    ) -> CResult<()> {
+        match value.without_parentheses() {
+            Expression::FunctionExpression(func) if method || func.id.is_none() => {
+                let mut f = FnLike::function(func)?;
+                if let Some(name) = name {
+                    f.name = name.to_owned();
+                }
+                f.constructor = !method;
+                let func = self.nested(&f)?;
+                self.asm.create_closure(v, func);
+                Ok(())
+            }
+            Expression::ArrowFunctionExpression(func) => {
+                let mut f = FnLike::arrow(func)?;
+                if let Some(name) = name {
+                    f.name = name.to_owned();
+                }
+                let func = self.nested(&f)?;
+                self.asm.create_closure(v, func);
+                Ok(())
+            }
+            _ => self.expr_to(value, v),
+        }
     }
 }
 

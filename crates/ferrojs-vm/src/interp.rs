@@ -21,22 +21,28 @@
 //!   ToString make flat, non-interned string cells, so strings compare by
 //!   contents (code units), not by reference.
 //! - **Globals** (task 1.7c, D-050): the global object is an ordinary
-//!   object (prototype `null` until the built-ins, 1.13); `var` and
+//!   object (prototype `Object.prototype` since 1.10a); `var` and
 //!   function declarations are its non-configurable properties, implicit
 //!   sloppy globals its configurable ones. The global lexical environment
 //!   (`let`, `const`) is an `Env` cell, grown by copying, with the names
 //!   and `const` flags in a Rust table ([`Globals`]).
 //!
 //! - **Properties** (task 1.7e, D-053): objects made by literals are
-//!   ordinary objects with prototype `null` (`Object.prototype` comes with
-//!   the built-ins, 1.13). Keys go through ToPropertyKey: array indices to
+//!   ordinary objects with prototype `Object.prototype` (empty until the
+//!   built-ins, 1.13; reading one of its future names fails cleanly). Keys go through ToPropertyKey: array indices to
 //!   the elements store, other keys to named properties as atoms (a key
 //!   computed at run time is interned when it is written; reads of a key
 //!   no atom exists for find nothing without allocating). Strings have
-//!   `length` and their indices; other primitive and function bases throw
-//!   until their prototypes exist.
+//!   `length` and their indices; other primitive bases throw until their
+//!   prototypes exist.
 //!
-//! - **Host functions** (task 1.9, D-054): `Native` cells, an index into
+//! - **Functions** (task 1.10a, D-057): closures and host functions are
+//!   ordinary objects with a closure or host flag and an internal word
+//!   after the inline slots (template and environment, or host function
+//!   index); prototype `Function.prototype`; `length`, `name` and, for
+//!   constructors, `prototype`.
+//!
+//! - **Host functions** (task 1.9, D-054): function objects holding an index into
 //!   the [`Vm`]'s table of Rust closures ([`crate::native`]). Calling one
 //!   copies `this` and the arguments out of the heap, runs the closure
 //!   and stores its result; no frame is pushed.
@@ -594,7 +600,6 @@ fn make_intrinsics(
     // Function.prototype accepts any arguments and returns undefined
     // (ECMA-262 §20.2.3).
     let index = natives.len() as u32;
-    natives.push(Box::new(|_, _| Ok(HostValue::Undefined)));
     let fp = s.scope(|n| -> Result<Global<Object>, ()> {
         let proto = n.root(object_prototype.get(n.nogc()));
         let f = object::new_function_object(n, tables, proto, FUNCTION_INLINE, object::HOST)
@@ -609,6 +614,8 @@ fn make_intrinsics(
         define_fixed(n, f, nm, e)?;
         Ok(n.nogc().global(f.get(n.nogc())))
     })?;
+    // Only once it exists: a failed attempt leaves no dead entry.
+    natives.push(Box::new(|_, _| Ok(HostValue::Undefined)));
     Ok(Intrinsics {
         object_prototype,
         function_prototype: fp,
@@ -907,7 +914,7 @@ impl Interp<'_, '_> {
         }
     }
 
-    /// The host function index of `callee`, if it is a `Native` cell.
+    /// The host function index of `callee`, if it is a host function.
     fn native_of(&self, callee: Value) -> Option<usize> {
         native_index(self.s.nogc(), callee)
     }
@@ -1509,7 +1516,7 @@ impl Interp<'_, '_> {
         end <= u64::from(self.stack.capacity())
     }
 
-    /// Writes a frame at `fp` for function cell `callee` and makes it
+    /// Writes a frame at `fp` for closure `callee` and makes it
     /// current; a `RangeError` (in the current frame) if it doesn't fit.
     #[allow(clippy::too_many_arguments)]
     fn push_frame(
@@ -1858,9 +1865,7 @@ impl OpCtx for Interp<'_, '_> {
             Kind::Bool(_) => TypeName::Boolean,
             Kind::Int32(_) | Kind::Double(_) => TypeName::Number,
             Kind::String(_) => TypeName::String,
-            Kind::Object(_) if self.template_of(v).is_some() || self.native_of(v).is_some() => {
-                TypeName::Function
-            }
+            Kind::Object(_) if function_word(self.s.nogc(), v).is_some() => TypeName::Function,
             Kind::Object(_) => TypeName::Object,
             Kind::Other(ferrojs_value::OtherKind::Symbol, _) => TypeName::Symbol,
             Kind::Other(ferrojs_value::OtherKind::BigInt, _) => TypeName::Bigint,
@@ -1931,8 +1936,9 @@ impl OpCtx for Interp<'_, '_> {
                     Some(PropertyValue::Data(v)) => Ok(v),
                     // Calling getters comes with task 1.8e.
                     Some(PropertyValue::Accessor { .. }) => self.fail(),
-                    // Inherited from Object.prototype once it exists (1.13).
-                    None if number::is_object_prototype_name(units) => self.fail(),
+                    // Inherited from Object.prototype or Function.prototype
+                    // once their methods exist (1.13).
+                    None if missing_builtin(nogc, obj, units) => self.fail(),
                     None => Ok(Value::UNDEFINED),
                 }
             }
@@ -1948,7 +1954,7 @@ impl OpCtx for Interp<'_, '_> {
                 self.make_string(&[unit])
             }
             // Other keys on strings, numbers and booleans need their
-            // prototypes (1.13); so do functions.
+            // prototypes (1.13).
             _ => self.fail(),
         }
     }
@@ -2042,12 +2048,30 @@ impl OpCtx for Interp<'_, '_> {
             unreachable!("checked above")
         };
         let has = self.has(o, &key);
-        if !has && matches!(&key, Key::Name(u) if number::is_object_prototype_name(u)) {
-            // Inherited from Object.prototype once it exists (1.13).
+        if !has && matches!(&key, Key::Name(u) if missing_builtin(self.s.nogc(), obj, u)) {
+            // Inherited from Object.prototype or Function.prototype once
+            // their methods exist (1.13).
             return self.fail();
         }
         Ok(Value::from_bool(has))
     }
+}
+
+/// Names of `Function.prototype`'s properties that don't exist yet
+/// (1.13); a function missing one of them must fail cleanly, not read
+/// `undefined`.
+const FUNCTION_PROTOTYPE_NAMES: [&str; 6] =
+    ["apply", "arguments", "bind", "call", "caller", "toString"];
+
+/// Whether a missing named property `units` of `base` would be found on
+/// a built-in prototype once the built-ins exist (1.13): looking it up
+/// must fail cleanly instead of answering `undefined` or `false`.
+fn missing_builtin(nogc: NoGc<'_>, base: Value, units: &[u16]) -> bool {
+    number::is_object_prototype_name(units)
+        || (function_word(nogc, base).is_some()
+            && FUNCTION_PROTOTYPE_NAMES
+                .iter()
+                .any(|n| n.encode_utf16().eq(units.iter().copied())))
 }
 
 /// Whether `units` spell `length`.
