@@ -619,6 +619,12 @@ fn random_operations_with_many_keys_match_the_model() {
     for seed in 1..=2 {
         random_model_run(seed * 0x1b87_3593, 800, true, 200);
     }
+    // Enough keys for shared shapes with key tables (D-060), branching
+    // between objects, but few enough that most stay shared.
+    for seed in 1..=8 {
+        random_model_run(seed * 0x5bd1_e995, 2500, false, 24);
+    }
+    random_model_run(0x68e3_1da4, 1200, true, 24);
 }
 
 /// Running out of memory while adding properties leaves every visible

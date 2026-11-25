@@ -83,6 +83,9 @@ pub enum CellKind {
     /// An accessor property's getter and setter (task 1.8d, D-055): two
     /// values, each a function or `undefined`.
     Accessor = 11,
+    /// The hashed key table of a large shared shape chain (task 1.8f,
+    /// D-060).
+    KeyTable = 12,
 }
 
 impl CellKind {
@@ -99,6 +102,7 @@ impl CellKind {
             9 => Some(CellKind::Stack),
             10 => Some(CellKind::Native),
             11 => Some(CellKind::Accessor),
+            12 => Some(CellKind::KeyTable),
             _ => None,
         }
     }
@@ -142,6 +146,7 @@ impl Trace for Tracer {
         match kind {
             CellKind::String => {}
             CellKind::Shape => {
+                assert!(shape::SIZE <= size, "shape larger than its cell");
                 for field in shape::REF_FIELDS {
                     edges.push(cage.read_u32(cell + field));
                 }
@@ -169,11 +174,21 @@ impl Trace for Tracer {
                 let cap = (header >> 32) as u32;
                 let len = shape::dict_len(cage, cell);
                 assert!(
-                    len <= cap && shape::DICT_ENTRIES + 16 * cap <= size,
+                    len <= cap && shape::dict_size(cap).is_some_and(|n| n <= size),
                     "bad table"
                 );
                 for i in 0..len {
                     edges.push(cage.read_u32(cell + shape::DICT_ENTRIES + 16 * i));
+                }
+            }
+            CellKind::KeyTable => {
+                let (cap, len) = shape::kt_cap_len(cage, cell);
+                assert!(
+                    len <= cap && shape::kt_size(cap).is_some_and(|n| n <= size),
+                    "bad key table"
+                );
+                for i in 0..len {
+                    edges.push(cage.read_u32(cell + shape::KT_ENTRIES + shape::KT_ENTRY * i));
                 }
             }
             CellKind::Elements => {

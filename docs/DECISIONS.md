@@ -829,7 +829,7 @@ planning document and gets logged here as each is implemented.
     `Scope` and `Root`s; values to store come as `RootedValue`.
 - **Phase 1 simplifications, to revisit:** atoms and transition trees
   are strong (never collected while the engine lives; Phase 2/5 make
-  them weak, ARCHITECTURE.md §5.4 and §7.3); no lazy key table yet, so
+  them weak, ARCHITECTURE.md §5.4 and §7.3); no key table yet (D-060 adds one), so
   lookup is linear in the property count; attribute changes, deletion
   and dictionary mode wait for 1.8b. The first `objects/get_set`
   benchmark (about 1,500 instructions per access without inline caches)
@@ -857,7 +857,7 @@ planning document and gets logged here as each is implemented.
   ValidateAndApplyPropertyDescriptor for complete data descriptors;
   `delete` refuses non-configurable properties and clears the slot.
 - **Phase 1 simplifications:** lookup in a dictionary table is linear
-  (a hash table comes with the lazy key table, task 1.8d); objects never
+  (hashed since task 1.8f, D-060); objects never
   leave dictionary mode.
 - **Rejected:** a non-extensible flag on shared shapes (needs extra
   transitions for a rare operation); moving values into the dictionary
@@ -1459,3 +1459,38 @@ planning document and gets logged here as each is implemented.
   1.13, which should add a ToPropertyKey op); getters and setters compile
   as plain function expressions, not methods (matters with `new`,
   `prototype` and `super`, 1.12e/1.13).
+
+## D-060 Hashed key tables: shared along shape chains, and in dictionaries
+- **Status:** Accepted (autopilot, 2026-11-25). Task 1.8f. Updates the
+  "linear lookup" simplifications of D-038 and D-039.
+- **Choice:** shapes grow from 32 to 40 bytes with a `TABLE` field.
+  A shared shape with 8 or more properties (`TABLE_MIN`) has a key table
+  (cell kind 12): the chain's keys and attributes in slot order (entry
+  index = slot), then an open-addressing index of `2 * capacity` `u32`
+  buckets (entry + 1, 0 empty), linear probing. A child appends its key
+  to its parent's table in place when the parent's properties are the
+  whole table and there is room, so a straight chain shares one table
+  (capacity 16, 32, 64, 128, doubling by copy); a branch or a full table
+  copies the parent's entries into a new one. A shape trusts only the
+  table's first `count` entries. Smaller shapes keep the parent walk.
+  Dictionary tables (D-039) get the same kind of index after their
+  entries (`next_pow2(2 * capacity)` buckets; deleted entries keep key 0
+  and their bucket, compaction rebuilds) and a count of free slots at
+  offset 12, so adds skip the scan for free slots when there are none.
+  Hashes are of key atoms' heap offsets, which needs a non-moving heap
+  (true in Phase 1, as for the root shape table); a moving collector
+  must rehash these tables.
+- **Not lazy:** the roadmap said "lazy", but lookup runs under `NoGc` and
+  can't allocate, so the table is made when a shape is created (in
+  `add_property`, which can allocate), from the 8th property on.
+- **Cost:** a branch at 8+ properties copies the table (272 bytes at
+  capacity 16, against a 40-byte shape); tree-shaped object families pay
+  O(count) per branch. `objects/get_set` −16%, interpreter benchmarks
+  up to +2% (bigger shapes and the table check on adds).
+- **Rejected:** a table per shape (quadratic memory on long chains); a
+  Rust-side hash map (heap pointers from Rust, D-009); building tables on
+  first lookup (needs allocation in read paths); a tombstone-free
+  dictionary index with deletion (more code, and compaction already
+  bounds the stale buckets).
+- **Still linear:** reusing a deleted entry's slot scans for the first
+  free one (only when the free count is non-zero).

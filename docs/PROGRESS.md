@@ -550,3 +550,20 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Decisions: D-059
 - Test262: 8699 (+0)
 - Next: 1.10b (`new` and `instanceof`) or 1.8f (lazy key table).
+
+## 2026-11-25 09:55 UTC — 1.8f Key tables for large shapes
+- Result: merged
+- Changed: shapes are 40 bytes with a `TABLE` field; shared shapes with
+  8+ properties carry a hashed key table (cell kind 12) shared along a
+  chain and copied at branches and growth; dictionary tables get a hashed
+  index and a free-slot count. New `tests/key_tables.rs` (long chains,
+  branches, attributes, dictionary churn, tracer; plain and GC stress),
+  24-key model runs in `tests/objects.rs`; new benchmark
+  `objects/get_large`. `objects/get_set` −16%; interpreter benchmarks up
+  to +2%. Independent review: nothing serious; fixed its findings
+  (decision entry, shape size check in the tracer, test doc).
+- Gate: all steps pass (Miri skipped: no nightly, `ferrojs-core`
+  unchanged).
+- Decisions: D-060
+- Test262: 8699 (+0)
+- Next: 1.10b (`new` and `instanceof`).

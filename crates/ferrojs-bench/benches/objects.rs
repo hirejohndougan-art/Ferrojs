@@ -101,8 +101,79 @@ fn work((mut vm, child, keys): Setup) -> u64 {
     })
 }
 
+/// Large objects (task 1.8f, D-060): one with 100 properties on shared
+/// shapes (a key table) and one in dictionary mode with 300, and the keys.
 #[cfg(target_os = "linux")]
-library_benchmark_group!(name = objects, benchmarks = [get_set]);
+type LargeSetup = (Vm, Global<Object>, Global<Object>, Vec<Global<JsString>>);
+
+#[cfg(target_os = "linux")]
+fn large_objects() -> LargeSetup {
+    let mut vm = quiet_vm();
+    let (shared, dict, keys) = vm.with(|s, t| {
+        let keys: Vec<_> = (0..300)
+            .map(|i| {
+                let k = string::atom(s, t, &format!("k{i}")).unwrap().bind(s.nogc());
+                s.root(k)
+            })
+            .collect();
+        let mut objs = Vec::new();
+        for n in [100, 300] {
+            let o = object::new_object(s, t, None, DEFAULT_INLINE)
+                .unwrap()
+                .bind(s.nogc());
+            let o = s.root(o);
+            for (i, &k) in keys.iter().take(n).enumerate() {
+                let v = RootedValue::Primitive(Value::from_i32(i as i32));
+                object::set(s, o, k, v).unwrap();
+            }
+            objs.push(o);
+        }
+        assert!(!object::is_dictionary(s.nogc(), objs[0].get(s.nogc())));
+        assert!(object::is_dictionary(s.nogc(), objs[1].get(s.nogc())));
+        let nogc = s.nogc();
+        let keys: Vec<_> = keys.iter().map(|k| nogc.global(k.get(nogc))).collect();
+        (
+            nogc.global(objs[0].get(nogc)),
+            nogc.global(objs[1].get(nogc)),
+            keys,
+        )
+    });
+    (vm, shared, dict, keys)
+}
+
+// 1,000 reads of the shared-shape object's keys, then 1,000 of the
+// dictionary object's.
+#[cfg(target_os = "linux")]
+#[library_benchmark]
+#[bench::large(setup = large_objects)]
+fn get_large(setup: LargeSetup) -> u64 {
+    work_large(black_box(setup))
+}
+
+#[cfg(target_os = "linux")]
+#[inline(never)]
+fn work_large((mut vm, shared, dict, keys): LargeSetup) -> u64 {
+    vm.with(|s, _| {
+        let nogc = s.nogc();
+        let (shared, dict) = (shared.get(nogc), dict.get(nogc));
+        let keys: Vec<_> = keys.iter().map(|k| k.get(nogc)).collect();
+        let mut acc = 0u64;
+        for (o, n) in [(shared, 100), (dict, 300)] {
+            for i in 0..1000 {
+                // A stride that visits every key in a scattered order.
+                let k = keys[(i * 37) % n];
+                let v = match object::get(nogc, black_box(o), k) {
+                    Got::Value(v) | Got::Getter(v) => v,
+                };
+                acc = acc.wrapping_add(v.to_bits());
+            }
+        }
+        acc
+    })
+}
+
+#[cfg(target_os = "linux")]
+library_benchmark_group!(name = objects, benchmarks = [get_set, get_large]);
 
 #[cfg(target_os = "linux")]
 main!(library_benchmark_groups = objects);
