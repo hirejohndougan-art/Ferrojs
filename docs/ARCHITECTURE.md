@@ -196,8 +196,9 @@ dispatches on the kind afterwards (rethrow, return, or the pending
   by a `FunctionTemplate` cell, which also holds: name, parameter count
   `P`, register count `R`, flags (strict, arrow, generator, async, uses
   `arguments`, …), constant pool, exception table, source-position table,
-  and the feedback layout (the kind of each IC slot). A closure is a
-  `JsFunction` cell: template + captured environment.
+  and the feedback layout (the kind of each IC slot). A closure is an
+  ordinary object cell with a closure flag and an internal word after its
+  inline slots: template + captured environment (D-057).
 - Phase 1 keeps one feedback vector per `FunctionTemplate`, allocated on
   first call.
 - Bytecode can come from a cache file later, so it is untrusted (Safety

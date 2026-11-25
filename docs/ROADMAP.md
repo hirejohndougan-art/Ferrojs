@@ -168,7 +168,7 @@ Order matters: each task builds on the ones above it.
     accessor pair cells, `get`/`set` handing back the getter or setter,
     `define_property` with partial descriptors
     (ValidateAndApplyPropertyDescriptor). needs: 1.8b
-  - [x] 1.8e (2026-11-25, D-058) Call getters and setters from the
+  - [x] 1.8e (2026-11-25, D-059) Call getters and setters from the
     interpreter's property ops (a frame for the call, D-036), and compile
     `get` / `set` in object literals. Global-name accessors wait for
     1.13's `Object.defineProperty` (none can be made before). needs: 1.8d, 1.7
@@ -183,7 +183,7 @@ Order matters: each task builds on the ones above it.
   harness, `assert.js` and `sta.js`, needs functions that carry
   properties, `new`, `instanceof` and error objects, none of which
   existed; the old entry only listed 1.9):
-  - [~] (claimed 2026-11-25 07:46 UTC) 1.10a (risky) Functions as
+  - [x] 1.10a (2026-11-25, risky, D-057) Functions as
     ordinary objects: closure and host function cells get the object
     header (shape, elements, slots), so `f.x = 1` works; the
     `Object.prototype` and `Function.prototype` intrinsics; `prototype`,

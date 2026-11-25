@@ -69,15 +69,16 @@ pub enum CellKind {
     Dict = 5,
     /// An object's indexed properties.
     Elements = 6,
-    /// A closure: function template index and captured environment.
+    /// No longer made: functions are objects since task 1.10a (D-057).
+    /// The number stays reserved.
     Function = 7,
     /// A declarative environment: parent and binding slots.
     Env = 8,
     /// The frame stack's anchor: tracing it reports every reference on
     /// the live part of the frame stack.
     Stack = 9,
-    /// A host function (task 1.9, D-054): an index into the [`Vm`]'s
-    /// table of Rust closures. No references.
+    /// No longer made: host functions are objects since task 1.10a
+    /// (D-057). The number stays reserved.
     Native = 10,
     /// An accessor property's getter and setter (task 1.8d, D-055): two
     /// values, each a function or `undefined`.
@@ -150,12 +151,18 @@ impl Trace for Tracer {
                 edges.push(cage.read_u32(cell + object::ELEMENTS));
                 edges.push(cage.read_u32(cell + object::SLOTS));
                 let inline = object::inline_count(header);
+                let function = header & (object::CLOSURE | object::HOST) != 0;
+                let end = object::INLINE + 8 * inline;
                 assert!(
-                    object::INLINE + 8 * inline <= size,
+                    end + if function { 8 } else { 0 } <= size,
                     "object larger than its cell"
                 );
                 for i in 0..inline {
                     value_at(object::INLINE + 8 * i, edges);
+                }
+                if header & object::CLOSURE != 0 {
+                    // The closure's environment (D-057).
+                    edges.push(cage.read_u32(cell + end + 4));
                 }
             }
             CellKind::Dict => {
@@ -187,7 +194,9 @@ impl Trace for Tracer {
                     }
                 }
             }
-            CellKind::Function => edges.push(cage.read_u32(cell + interp::FUNCTION_ENV)),
+            CellKind::Function | CellKind::Native => {
+                unreachable!("retired cell kind {kind:?} (D-057)")
+            }
             CellKind::Env => {
                 let count = (header >> 32) as u32;
                 assert!(
@@ -200,7 +209,6 @@ impl Trace for Tracer {
                 }
             }
             CellKind::Stack => self.stack.trace(edges),
-            CellKind::Native => {}
             CellKind::Accessor => {
                 assert!(object::ACCESSOR_SIZE <= size, "bad accessor pair");
                 value_at(object::ACCESSOR_GET, edges);

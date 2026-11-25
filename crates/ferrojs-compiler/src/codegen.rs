@@ -67,6 +67,10 @@ pub struct CompiledFunction {
     pub handlers: Vec<Handler>,
     /// Nested function templates, indexed by `Func` operands.
     pub functions: Vec<CompiledFunction>,
+    /// Whether closures of it are constructors (\[\[Construct\]\]) and
+    /// get a `prototype` object: ordinary `function` declarations and
+    /// expressions, not arrows or methods (ECMA-262 §10.2.5, D-057).
+    pub constructor: bool,
 }
 
 impl CompiledFunction {
@@ -373,6 +377,8 @@ struct FnLike<'b, 'a> {
     /// A named function expression's own name binding.
     own_name: Option<SymbolId>,
     arrow: bool,
+    /// See [`CompiledFunction::constructor`].
+    constructor: bool,
 }
 
 impl<'b, 'a> FnLike<'b, 'a> {
@@ -399,6 +405,7 @@ impl<'b, 'a> FnLike<'b, 'a> {
             scope: f.scope_id.get().expect("semantic analysis ran"),
             own_name,
             arrow: false,
+            constructor: true,
         })
     }
 
@@ -418,6 +425,7 @@ impl<'b, 'a> FnLike<'b, 'a> {
             scope: f.scope_id.get().expect("semantic analysis ran"),
             own_name: None,
             arrow: true,
+            constructor: false,
         })
     }
 }
@@ -573,12 +581,14 @@ fn compile_fn(
     }
     let _ = fn_scope_pushed;
 
-    g.finish(
+    let mut compiled = g.finish(
         f.name.clone(),
         count,
         length,
         scoping.scope_flags(f.scope).is_strict_mode(),
-    )
+    )?;
+    compiled.constructor = f.constructor;
+    Ok(compiled)
 }
 
 fn symbol_of(id: &BindingIdentifier<'_>) -> SymbolId {
@@ -986,6 +996,7 @@ impl<'s> Gen<'s> {
             code,
             handlers,
             functions: self.functions,
+            constructor: false,
         })
     }
 
@@ -2795,6 +2806,8 @@ impl Gen<'_> {
                 // `get k() {}` / `set k(v) {}`: one half of an accessor,
                 // defined on its own (the other half stays as it is).
                 let k = self.temp()?;
+                let getter = p.kind == PropertyKind::Get;
+                let mut fname = None;
                 if p.computed {
                     let key = p
                         .key
@@ -2805,10 +2818,12 @@ impl Gen<'_> {
                     let name = self.literal_key(&p.key)?;
                     let c = self.string_const(&name)?;
                     self.asm.load_const(k, c);
+                    fname = Some(format!("{} {name}", if getter { "get" } else { "set" }));
                 }
                 let f = self.temp()?;
-                self.expr_to(&p.value, f)?;
-                if p.kind == PropertyKind::Get {
+                // A method: named "get k" / "set k", not a constructor.
+                self.property_value(&p.value, fname.as_deref(), true, f)?;
+                if getter {
                     self.asm.define_getter(dst, k, f);
                 } else {
                     self.asm.define_setter(dst, k, f);
@@ -2825,7 +2840,9 @@ impl Gen<'_> {
                     .expect("a computed key is an expression");
                 self.expr_to(key, k)?;
                 let v = self.temp()?;
-                self.expr_to(&p.value, v)?;
+                // The name of a function under a computed key is only
+                // known at run time (SetFunctionName): left "" for now.
+                self.property_value(&p.value, None, p.method, v)?;
                 self.asm.define_keyed(dst, k, v);
                 self.free(v);
                 self.free(k);
@@ -2838,11 +2855,48 @@ impl Gen<'_> {
             }
             let c = self.string_const(&name)?;
             let v = self.temp()?;
-            self.expr_to(&p.value, v)?;
+            self.property_value(&p.value, Some(&name), p.method, v)?;
             self.asm.define_named(dst, c, v);
             self.free(v);
         }
         Ok(())
+    }
+}
+
+impl Gen<'_> {
+    /// An object literal property's value into `v`. A method is not a
+    /// constructor (DefineMethod); a method or an anonymous function or
+    /// arrow, parenthesized or not, is named after the key when it is
+    /// known (`name`; NamedEvaluation).
+    fn property_value(
+        &mut self,
+        value: &Expression<'_>,
+        name: Option<&str>,
+        method: bool,
+        v: Reg,
+    ) -> CResult<()> {
+        match value.without_parentheses() {
+            Expression::FunctionExpression(func) if method || func.id.is_none() => {
+                let mut f = FnLike::function(func)?;
+                if let Some(name) = name {
+                    f.name = name.to_owned();
+                }
+                f.constructor = !method;
+                let func = self.nested(&f)?;
+                self.asm.create_closure(v, func);
+                Ok(())
+            }
+            Expression::ArrowFunctionExpression(func) => {
+                let mut f = FnLike::arrow(func)?;
+                if let Some(name) = name {
+                    f.name = name.to_owned();
+                }
+                let func = self.nested(&f)?;
+                self.asm.create_closure(v, func);
+                Ok(())
+            }
+            _ => self.expr_to(value, v),
+        }
     }
 }
 

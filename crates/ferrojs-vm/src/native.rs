@@ -9,7 +9,7 @@
 //! string argument, which is fine for host hooks; the built-ins (1.13) are
 //! written against the heap directly and don't go through this.
 //!
-//! A host function is a `Native` cell holding an index into the
+//! A host function is a function object (D-057) holding an index into the
 //! [`Vm`](crate::Vm)'s table of closures; `typeof` says `"function"`.
 //! Host functions can't call back into JavaScript yet.
 

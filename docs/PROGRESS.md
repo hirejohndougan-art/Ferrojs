@@ -510,6 +510,28 @@ One entry per autopilot run, newest at the bottom. Format is in
 - Next: 1.8e (core: interpreter frames for getter/setter calls) on an
   Opus run; routine runs can take 1.10.
 
+
+## 2026-11-25 08:35 UTC — 1.10a Functions as ordinary objects (1.10 split a/b/c/d)
+- Result: merged
+- Changed: split 1.10 (the Test262 harness needs functions with
+  properties, `new`, `instanceof` and error objects) into 1.10a–d.
+  Closures and host functions are now object cells with a closure or
+  host flag and an internal word after the inline slots (template and
+  environment, or host index); the `Function` and `Native` cell kinds
+  are retired. New `Object.prototype` and `Function.prototype`
+  intrinsics; object literals and the global object inherit from
+  `Object.prototype`. Functions get `length`, `name` and (constructors)
+  `prototype` with `constructor`; methods and anonymous function values
+  in literals are named after their key. 34 new Node-checked cases,
+  plain and under GC stress. Independent review: no rooting, tracer or
+  memory-safety bugs; fixed its findings. `loop_with_calls` −3%.
+  Renumbered a second D-056 (Opus for every run) to D-058.
+- Gate: all steps pass locally except cargo-deny (not installed here;
+  passes in CI run 45575027682). Miri: `ferrojs-core` unchanged.
+- Decisions: D-057
+- Test262: 8699 (+0)
+- Next: 1.10b (`new` and `instanceof`).
+
 ## 2026-11-25 08:15 UTC — 1.8e Getter and setter calls (John asked to continue)
 - Result: merged
 - Changed: property reads and writes that meet an accessor leave the
@@ -522,10 +544,9 @@ One entry per autopilot run, newest at the bottom. Format is in
   accessors, refusal tests for index keys. New benchmark
   `interp/run.accessors`; others within 1%. Independent review: nothing
   serious; fixed its findings (explicit `accessor_dst`, decision entry,
-  known gaps noted). Renumbered the second D-056 (model choice) to D-057.
+  known gaps noted).
 - Gate: all steps pass (Miri skipped: no nightly, `ferrojs-core`
   unchanged).
-- Decisions: D-058 (D-057 renumbered)
+- Decisions: D-059
 - Test262: 8699 (+0)
-- Next: 1.8f (lazy key table) or 1.10a, whichever is free.
-
+- Next: 1.10b (`new` and `instanceof`) or 1.8f (lazy key table).

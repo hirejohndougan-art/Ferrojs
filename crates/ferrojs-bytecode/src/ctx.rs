@@ -31,7 +31,7 @@ pub enum Flow {
     /// Handlers never recurse into the callee themselves. It carries no
     /// data so `Flow` stays small on the hot path.
     Call,
-    /// A property read or write met an accessor (task 1.8e, D-058): the
+    /// A property read or write met an accessor (task 1.8e, D-059): the
     /// runtime function left the getter or setter call in the context,
     /// and the dispatch loop makes it as an ordinary call from this
     /// instruction. A getter's result goes to the instruction's `dst`
