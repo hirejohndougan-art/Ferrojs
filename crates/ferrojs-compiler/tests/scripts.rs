@@ -138,8 +138,6 @@ fn script_level_unsupported_things_are_refused() {
 #[test]
 fn property_forms_not_supported_yet_are_refused() {
     for src in [
-        "var o = { get x() { return 1; } };",
-        "var o = { set x(v) {} };",
         "var p = {}; var o = { ...p };",
         "var o = { __proto__: null };",
         "var o = { '__proto__': null };",
