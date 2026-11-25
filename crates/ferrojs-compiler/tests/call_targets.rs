@@ -136,12 +136,12 @@ fn offsets_are_in_the_original_source() {
 
 #[test]
 fn unsupported_offsets_are_in_the_original_source() {
-    // Property assignment isn't compiled yet; its offset is reported in
+    // Optional chaining isn't compiled yet; its offset is reported in
     // the caller's source, past a rewritten site.
-    let src = "f() = 1; o.p = 2; function f() {} var o;";
+    let src = "f() = 1; o?.p; function f() {} var o;";
     match compile_script_source(src) {
         Err(ferrojs_compiler::CompileError::Unsupported { offset, .. }) => {
-            assert_eq!(offset, src.find("o.p").unwrap() as u32);
+            assert_eq!(offset, src.find("o?.p").unwrap() as u32);
         }
         other => panic!("{other:?}"),
     }
@@ -192,7 +192,13 @@ fn run(src: &str) -> String {
                 | ErrorKind::UnresolvableReference
                 | ErrorKind::InvalidAssignmentTarget,
             ) => "throw:ReferenceError".into(),
-            Some(ErrorKind::ConstAssignment | ErrorKind::NotCallable) => "throw:TypeError".into(),
+            Some(
+                ErrorKind::ConstAssignment
+                | ErrorKind::NotCallable
+                | ErrorKind::NullishBase
+                | ErrorKind::NotAnObject
+                | ErrorKind::PropertyRefused,
+            ) => "throw:TypeError".into(),
             Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
             Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
             None => format!("throw:{}", show(v)),

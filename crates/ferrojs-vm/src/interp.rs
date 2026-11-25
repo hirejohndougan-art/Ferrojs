@@ -27,6 +27,15 @@
 //!   (`let`, `const`) is an `Env` cell, grown by copying, with the names
 //!   and `const` flags in a Rust table ([`Globals`]).
 //!
+//! - **Properties** (task 1.7e, D-052): objects made by literals are
+//!   ordinary objects with prototype `null` (`Object.prototype` comes with
+//!   the built-ins, 1.13). Keys go through ToPropertyKey: array indices to
+//!   the elements store, other keys to named properties as atoms (a key
+//!   computed at run time is interned when it is written; reads of a key
+//!   no atom exists for find nothing without allocating). Strings have
+//!   `length` and their indices; other primitive and function bases throw
+//!   until their prototypes exist.
+//!
 //! Error objects come with 1.13: until then a thrown error is `undefined`
 //! with its [`ErrorKind`] recorded, as in the toy context.
 
@@ -48,7 +57,9 @@ use ferrojs_core::{Gc, NoGc};
 use ferrojs_value::{HeapRef, Kind, Value};
 
 use crate::shape::Attrs;
-use crate::{object, string, value_ref, CellKind, JsString, Object, RootedValue, Tables, Vm};
+use crate::{
+    elements, object, string, value_ref, CellKind, JsString, Object, RootedValue, Tables, Vm,
+};
 
 /// Frame stack slots by default: 8 MB (ARCHITECTURE.md §3.1).
 pub const DEFAULT_STACK_SLOTS: u32 = 1 << 20;
@@ -313,6 +324,7 @@ impl Vm {
                 templates: &mut interp.templates,
                 type_names: &interp.type_names,
                 globals: interp.globals.as_mut().expect("made by prepare"),
+                tables,
                 interrupt: interrupt.as_ref(),
                 fp: 0,
                 tmpl: t,
@@ -512,6 +524,27 @@ fn store<T>(nogc: NoGc<'_>, cell: Gc<'_, T>, field: u32, v: Value) {
     nogc.write_value_bits(cell, field, bits, referent);
 }
 
+/// A property key after ToPropertyKey.
+enum Key {
+    /// An array index: the elements store.
+    Index(u32),
+    /// Any other key, as code units: a named property.
+    Name(Vec<u16>),
+}
+
+/// The base of a property access.
+enum Base<'a> {
+    Object(Gc<'a, Object>),
+    /// A string primitive and its length.
+    String(Gc<'a, JsString>, u32),
+    /// A number or boolean.
+    Primitive,
+    Nullish,
+    /// Anything this interpreter can't use as a base yet (functions, until
+    /// they are objects) or that isn't a value (the TDZ marker).
+    Other,
+}
+
 /// ToNumber for primitives other than strings and symbols.
 fn to_number(v: Value) -> Option<f64> {
     match v.kind() {
@@ -531,6 +564,7 @@ struct Interp<'r, 's> {
     templates: &'r mut Vec<Template>,
     type_names: &'r [Value],
     globals: &'r mut Globals,
+    tables: &'r mut Tables,
     interrupt: &'r std::sync::atomic::AtomicBool,
     fp: u32,
     tmpl: u32,
@@ -692,6 +726,132 @@ impl Interp<'_, '_> {
             }
         }
         self.fail()
+    }
+
+    /// ToPropertyKey for primitives other than symbols; a throw for the
+    /// rest (objects need ToPrimitive, 1.13).
+    fn key(&mut self, k: Value) -> Result<Key, Thrown> {
+        if let Some(i) = k.as_int32() {
+            if let Ok(i) = u32::try_from(i) {
+                return Ok(Key::Index(i));
+            }
+        }
+        if let Some(d) = k.as_number() {
+            if let Some(i) = number::array_index_of_number(d) {
+                return Ok(Key::Index(i));
+            }
+        }
+        if matches!(
+            k.kind(),
+            Kind::Object(_) | Kind::Other(..) | Kind::Uninitialized
+        ) {
+            return self.fail();
+        }
+        let Some(units) = self.text(k) else {
+            return self.fail();
+        };
+        Ok(match number::array_index_of_units(&units) {
+            Some(i) => Key::Index(i),
+            None => Key::Name(units),
+        })
+    }
+
+    /// What kind of base `v` is.
+    fn base(&self, v: Value) -> Base<'_> {
+        let nogc = self.s.nogc();
+        match v.kind() {
+            Kind::Undefined | Kind::Null => Base::Nullish,
+            Kind::Bool(_) | Kind::Int32(_) | Kind::Double(_) => Base::Primitive,
+            Kind::String(HeapRef(r)) => match nogc.handle::<JsString>(r) {
+                Some(s) if nogc.read_u8(s, 0) == CellKind::String as u8 => {
+                    Base::String(s, string::len(nogc, s))
+                }
+                _ => Base::Other,
+            },
+            Kind::Object(_) => match cell_of::<Object>(nogc, v, CellKind::Object) {
+                Some(o) => Base::Object(o),
+                None => Base::Other,
+            },
+            Kind::Other(..) | Kind::Uninitialized => Base::Other,
+        }
+    }
+
+    /// The existing atom for `units`, if any (no allocation: a key no
+    /// atom exists for is on no object).
+    fn find_atom(&self, units: &[u16]) -> Option<Gc<'_, JsString>> {
+        let nogc = self.s.nogc();
+        self.tables.atoms.get(units).map(|g| g.get(nogc))
+    }
+
+    /// \[\[HasProperty\]\] on an ordinary object: own, then up the
+    /// prototype chain. An array's `length` is always there.
+    fn has(&self, o: Gc<'_, Object>, key: &Key) -> bool {
+        let nogc = self.s.nogc();
+        match key {
+            Key::Index(i) => {
+                let mut cur = Some(o.cast::<Object>());
+                while let Some(obj) = cur {
+                    if elements::get_own(nogc, obj, *i).is_some() {
+                        return true;
+                    }
+                    cur = object::prototype(nogc, obj);
+                }
+                false
+            }
+            Key::Name(units) => {
+                if is_length(units) && elements::is_array(nogc, o) {
+                    return true;
+                }
+                let Some(k) = self.find_atom(units) else {
+                    return false;
+                };
+                let mut cur = Some(o.cast::<Object>());
+                while let Some(obj) = cur {
+                    if object::get_own(nogc, obj, k).is_some() {
+                        return true;
+                    }
+                    cur = object::prototype(nogc, obj);
+                }
+                false
+            }
+        }
+    }
+
+    /// Sets (`define` false: OrdinarySet) or defines (CreateDataProperty)
+    /// property `key` of object `o` to `v`, interning a named key. Returns
+    /// whether the object accepted it.
+    fn put(&mut self, o: Value, key: Key, v: Value, define: bool) -> Result<bool, Thrown> {
+        let tables = &mut *self.tables;
+        let done = self.s.scope(|n| {
+            let nogc = n.nogc();
+            let obj = cell_of::<Object>(nogc, o, CellKind::Object).expect("checked by the caller");
+            let obj = n.root(obj);
+            let Some(v) = rooted(n, v) else {
+                return Ok(None);
+            };
+            match key {
+                Key::Index(i) => elements::set(n, obj, i, v).map(Some),
+                Key::Name(units) => {
+                    if is_length(&units) && elements::is_array(n.nogc(), obj.get(n.nogc())) {
+                        // ArraySetLength comes with the Array built-ins.
+                        return Ok(None);
+                    }
+                    let k = string::atom_units(n, tables, &units)?.bind(n.nogc());
+                    let k = n.root(k);
+                    if define {
+                        object::define(n, obj, k, v, Attrs::DEFAULT).map(Some)
+                    } else {
+                        object::set(n, obj, k, v).map(Some)
+                    }
+                }
+            }
+        });
+        match done {
+            Ok(Some(ok)) => Ok(ok),
+            // A value no property can hold, or an array length.
+            Ok(None) => self.fail(),
+            Err(_) => Err(self.out_of_memory()),
+        }
     }
 
     /// The global lexical binding named `units`.
@@ -1335,4 +1495,135 @@ impl OpCtx for Interp<'_, '_> {
             None => self.fail(),
         }
     }
+
+    fn rt_new_object(&mut self) -> Completion {
+        match object::new_object(self.s, self.tables, None, object::DEFAULT_INLINE) {
+            Ok(o) => Ok(Value::object(HeapRef(o.bind(self.s.nogc()).offset()))),
+            Err(_) => Err(self.out_of_memory()),
+        }
+    }
+    fn rt_get_property(&mut self, obj: Value, key: Value) -> Completion {
+        if obj.is_nullish() {
+            return Err(self.error(ErrorKind::NullishBase));
+        }
+        let key = self.key(key)?;
+        let nogc = self.s.nogc();
+        match (self.base(obj), &key) {
+            (Base::Object(o), Key::Index(i)) => Ok(elements::get(nogc, o, *i)),
+            (Base::Object(o), Key::Name(units)) => {
+                if is_length(units) && elements::is_array(nogc, o) {
+                    return Ok(Value::number(f64::from(elements::length(nogc, o))));
+                }
+                Ok(self
+                    .find_atom(units)
+                    .map_or(Value::UNDEFINED, |k| object::get(nogc, o, k)))
+            }
+            (Base::String(_, len), Key::Name(units)) if is_length(units) => {
+                Ok(Value::number(f64::from(len)))
+            }
+            (Base::String(s, len), Key::Index(i)) => {
+                if *i >= len {
+                    // Nothing on String.prototype has an index key.
+                    return Ok(Value::UNDEFINED);
+                }
+                let unit = string::units(nogc, s)[*i as usize];
+                self.make_string(&[unit])
+            }
+            // Other keys on strings, numbers and booleans need their
+            // prototypes (1.13); so do functions.
+            _ => self.fail(),
+        }
+    }
+    fn rt_set_property(
+        &mut self,
+        obj: Value,
+        key: Value,
+        v: Value,
+        strict: bool,
+    ) -> Result<(), Thrown> {
+        if obj.is_nullish() {
+            return Err(self.error(ErrorKind::NullishBase));
+        }
+        let key = self.key(key)?;
+        let ok = match self.base(obj) {
+            Base::Object(_) => self.put(obj, key, v, false)?,
+            // The wrapper object is the receiver: OrdinarySet refuses (no
+            // setters on the prototypes yet).
+            Base::String(..) | Base::Primitive => false,
+            Base::Nullish | Base::Other => return self.fail(),
+        };
+        if !ok && strict {
+            return Err(self.error(ErrorKind::PropertyRefused));
+        }
+        Ok(())
+    }
+    fn rt_define_property(&mut self, obj: Value, key: Value, v: Value) -> Result<(), Thrown> {
+        let key = self.key(key)?;
+        if !matches!(self.base(obj), Base::Object(_)) {
+            return self.fail();
+        }
+        if self.put(obj, key, v, true)? {
+            Ok(())
+        } else {
+            // Literals define on fresh extensible objects: can't refuse.
+            self.fail()
+        }
+    }
+    fn rt_delete_property(&mut self, obj: Value, key: Value, strict: bool) -> Completion {
+        if obj.is_nullish() {
+            return Err(self.error(ErrorKind::NullishBase));
+        }
+        let key = self.key(key)?;
+        let gone = match (self.base(obj), key) {
+            (Base::Object(o), Key::Index(i)) => elements::delete(self.s.nogc(), o, i),
+            (Base::Object(o), Key::Name(units)) => {
+                let nogc = self.s.nogc();
+                if is_length(&units) && elements::is_array(nogc, o) {
+                    false
+                } else {
+                    match self.find_atom(&units).map(|k| k.offset()) {
+                        None => true,
+                        Some(k) => {
+                            let o = o.offset();
+                            let done = self.s.scope(|n| {
+                                let nogc = n.nogc();
+                                let o = n.root(nogc.handle::<Object>(o).expect("a live object"));
+                                let k = n.root(nogc.handle::<JsString>(k).expect("a live atom"));
+                                object::delete(n, o, k)
+                            });
+                            match done {
+                                Ok(gone) => gone,
+                                Err(_) => return Err(self.out_of_memory()),
+                            }
+                        }
+                    }
+                }
+            }
+            (Base::String(_, len), Key::Index(i)) => i >= len,
+            (Base::String(..), Key::Name(units)) => !is_length(&units),
+            (Base::Primitive, _) => true,
+            (Base::Nullish | Base::Other, _) => return self.fail(),
+        };
+        if !gone && strict {
+            return Err(self.error(ErrorKind::PropertyRefused));
+        }
+        Ok(Value::from_bool(gone))
+    }
+    fn rt_has_property(&mut self, key: Value, obj: Value) -> Completion {
+        match self.base(obj) {
+            Base::Object(_) => {}
+            Base::Other => return self.fail(),
+            _ => return Err(self.error(ErrorKind::NotAnObject)),
+        }
+        let key = self.key(key)?;
+        let Base::Object(o) = self.base(obj) else {
+            unreachable!("checked above")
+        };
+        Ok(Value::from_bool(self.has(o, &key)))
+    }
+}
+
+/// Whether `units` spell `length`.
+fn is_length(units: &[u16]) -> bool {
+    units.iter().copied().eq("length".encode_utf16())
 }

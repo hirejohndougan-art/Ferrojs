@@ -1,7 +1,8 @@
 //! The interpreter (task 1.7b, D-047): a compiled loop with a call per
 //! iteration, run on the real frame stack. Dispatch cost must not grow
 //! with the number of ops (D-036). Task 1.7c (D-050) adds a script loop on
-//! global variables with string concatenation.
+//! global variables with string concatenation; task 1.7e (D-052) a loop
+//! of property reads and writes.
 //!
 //! Linux-only like the other benchmarks: every item is behind
 //! `cfg(target_os = "linux")`, and other platforms get an empty `main`.
@@ -61,11 +62,27 @@ fn global_strings() -> (Vm, u32) {
     )
 }
 
+/// A function: 1,000 iterations of named and keyed property reads and
+/// writes on a small object, plus a method call.
+#[cfg(target_os = "linux")]
+fn properties() -> (Vm, u32) {
+    loaded(
+        &compile_function_source(
+            "function f(n) { 'use strict'; \
+             const o = { x: 0, y: 1, k: { v: 2 }, m() { return this.y; } }; \
+             for (let i = 0; i < n; i++) { o.x = o.x + o.k.v; o['y'] += i % 3; o[i % 8] = i; } \
+             return o.x + o.m() + o[3]; }",
+        )
+        .expect("compiles"),
+    )
+}
+
 // loop_with_calls: 1,000 iterations, each with a call and a return.
 #[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::loop_with_calls(setup = loop_with_calls)]
 #[bench::global_strings(setup = global_strings)]
+#[bench::properties(setup = properties)]
 fn run(setup: (Vm, u32)) -> Outcome {
     work(black_box(setup))
 }

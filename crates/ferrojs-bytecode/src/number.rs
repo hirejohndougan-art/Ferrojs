@@ -399,3 +399,75 @@ mod tests {
         assert_eq!(unary_int(UnaryOp::Negate, 0), None, "-0");
     }
 }
+
+/// The largest array index, 2^32 − 2 (ECMA-262 §6.1.7).
+pub const MAX_ARRAY_INDEX: u32 = u32::MAX - 1;
+
+/// The array index a number names as a property key: ToString(`d`) is a
+/// canonical array index exactly when `d` is an integer in
+/// `0 ..= 2^32 − 2` (`-0` included: its string is `"0"`).
+pub fn array_index_of_number(d: f64) -> Option<u32> {
+    (d.fract() == 0.0 && (0.0..=f64::from(MAX_ARRAY_INDEX)).contains(&d)).then_some(d as u32)
+}
+
+/// The array index a string names as a property key: decimal digits with
+/// no leading zero (except `"0"` itself), at most 2^32 − 2.
+pub fn array_index_of_units(units: &[u16]) -> Option<u32> {
+    if units.is_empty() || units.len() > 10 || (units.len() > 1 && units[0] == u16::from(b'0')) {
+        return None;
+    }
+    let mut n: u64 = 0;
+    for &u in units {
+        if !(u16::from(b'0')..=u16::from(b'9')).contains(&u) {
+            return None;
+        }
+        n = n * 10 + u64::from(u - u16::from(b'0'));
+    }
+    u32::try_from(n).ok().filter(|&i| i <= MAX_ARRAY_INDEX)
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    fn units(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn array_indices_from_strings() {
+        for (s, want) in [
+            ("0", Some(0)),
+            ("7", Some(7)),
+            ("4294967294", Some(MAX_ARRAY_INDEX)),
+            ("4294967295", None),
+            ("99999999999", None),
+            ("01", None),
+            ("", None),
+            ("-1", None),
+            ("1.5", None),
+            ("1e3", None),
+            (" 1", None),
+            ("٣", None),
+        ] {
+            assert_eq!(array_index_of_units(&units(s)), want, "{s:?}");
+        }
+    }
+
+    #[test]
+    fn array_indices_from_numbers() {
+        for (d, want) in [
+            (0.0, Some(0)),
+            (-0.0, Some(0)),
+            (3.0, Some(3)),
+            (4294967294.0, Some(MAX_ARRAY_INDEX)),
+            (4294967295.0, None),
+            (-1.0, None),
+            (1.5, None),
+            (f64::NAN, None),
+            (f64::INFINITY, None),
+        ] {
+            assert_eq!(array_index_of_number(d), want, "{d}");
+        }
+    }
+}

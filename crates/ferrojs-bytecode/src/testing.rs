@@ -7,6 +7,8 @@
 //! do. Functions, closures and environments live in
 //! vectors; [`run_program`] runs calls with a frame stack, the way the
 //! interpreter will (ARCHITECTURE.md §3.3–3.4), without Rust recursion.
+//! Objects (task 1.7e) are string-keyed maps of plain data properties
+//! with no prototype; strings have `length` and their indices.
 
 use ferrojs_value::{HeapRef, Kind, Value};
 
@@ -20,6 +22,8 @@ use crate::{
 const CLOSURE_BIT: u32 = 1 << 30;
 /// Toy environments are object values with this bit set.
 const ENV_BIT: u32 = 1 << 29;
+/// Toy objects are object values with this bit set.
+const OBJECT_BIT: u32 = 1 << 28;
 /// The most slots one toy environment may have (fuzzed code can ask for
 /// 2^32).
 const MAX_ENV_SLOTS: u32 = 1 << 16;
@@ -90,6 +94,9 @@ pub struct ToyCtx {
     /// The global object's properties: value and whether configurable
     /// (implicit sloppy globals are; declared `var`s aren't).
     pub global_object: std::collections::HashMap<String, (Value, bool)>,
+    /// Ordinary objects: own data properties by key (all writable,
+    /// enumerable and configurable; no prototype).
+    objects: Vec<std::collections::HashMap<String, Value>>,
 }
 
 impl ToyCtx {
@@ -176,6 +183,54 @@ impl ToyCtx {
                 self.closures.get((r & !CLOSURE_BIT) as usize).copied()
             }
             _ => None,
+        }
+    }
+
+    /// The index of toy object `v`, if it is one.
+    fn object_of(&self, v: Value) -> Option<usize> {
+        match v.kind() {
+            Kind::Object(HeapRef(r)) if r & (CLOSURE_BIT | ENV_BIT) == 0 && r & OBJECT_BIT != 0 => {
+                let i = (r & !OBJECT_BIT) as usize;
+                (i < self.objects.len()).then_some(i)
+            }
+            _ => None,
+        }
+    }
+
+    /// Own property `key` of toy object `v` (for tests).
+    pub fn property(&self, v: Value, key: &str) -> Option<Value> {
+        self.objects.get(self.object_of(v)?)?.get(key).copied()
+    }
+
+    /// ToPropertyKey for primitives other than symbols: the key's text
+    /// (an array index's text is canonical, so one string per key).
+    fn key_text(&mut self, k: Value) -> Result<String, Thrown> {
+        match k.kind() {
+            Kind::Object(_) | Kind::Other(..) | Kind::Uninitialized => self.fail(),
+            _ => match self.text(k) {
+                Some(t) => Ok(t),
+                None => self.fail(),
+            },
+        }
+    }
+
+    /// `length` or an index of string `s`: `Some(None)` when the key
+    /// names nothing on the string itself.
+    fn string_property(&mut self, s: &str, key: &str) -> Result<Option<Value>, Thrown> {
+        let units: Vec<u16> = s.encode_utf16().collect();
+        if key == "length" {
+            return Ok(Some(Value::from_i32(units.len() as i32)));
+        }
+        let index_units: Vec<u16> = key.encode_utf16().collect();
+        match number::array_index_of_units(&index_units) {
+            Some(i) if (i as usize) < units.len() => {
+                // A lone surrogate can't be a Rust string.
+                match String::from_utf16(&units[i as usize..=i as usize]) {
+                    Ok(c) => Ok(Some(self.intern(&c))),
+                    Err(_) => self.fail(),
+                }
+            }
+            _ => Ok(None),
         }
     }
 
@@ -580,6 +635,109 @@ impl OpCtx for ToyCtx {
             Some(t) => self.make_string(&t),
             None => self.fail(),
         }
+    }
+    fn rt_new_object(&mut self) -> Completion {
+        let i = u32::try_from(self.objects.len()).unwrap_or(u32::MAX);
+        if i >= OBJECT_BIT {
+            return self.fail();
+        }
+        self.objects.push(Default::default());
+        Ok(Value::object(HeapRef(OBJECT_BIT | i)))
+    }
+    fn rt_get_property(&mut self, obj: Value, key: Value) -> Completion {
+        if obj.is_nullish() {
+            return Err(self.error(ErrorKind::NullishBase));
+        }
+        let k = self.key_text(key)?;
+        if let Some(o) = self.object_of(obj) {
+            return Ok(self.objects[o].get(&k).copied().unwrap_or(Value::UNDEFINED));
+        }
+        if let Some(s) = self.string_of(obj).map(str::to_owned) {
+            if let Some(v) = self.string_property(&s, &k)? {
+                return Ok(v);
+            }
+            // An index past the end names nothing on String.prototype
+            // either; anything else needs the built-ins (1.13).
+            let units: Vec<u16> = k.encode_utf16().collect();
+            if number::array_index_of_units(&units).is_some() {
+                return Ok(Value::UNDEFINED);
+            }
+        }
+        // Numbers, booleans and functions need their prototypes (1.13).
+        self.fail()
+    }
+    fn rt_set_property(
+        &mut self,
+        obj: Value,
+        key: Value,
+        v: Value,
+        strict: bool,
+    ) -> Result<(), Thrown> {
+        if obj.is_nullish() {
+            return Err(self.error(ErrorKind::NullishBase));
+        }
+        let k = self.key_text(key)?;
+        if v.is_uninitialized() {
+            return self.fail();
+        }
+        if let Some(o) = self.object_of(obj) {
+            self.objects[o].insert(k, v);
+            return Ok(());
+        }
+        match obj.kind() {
+            // A primitive base: the wrapper object is the receiver, which
+            // OrdinarySet refuses (no setters on the prototypes yet).
+            Kind::String(_) | Kind::Bool(_) | Kind::Int32(_) | Kind::Double(_) => {
+                if strict {
+                    Err(self.error(ErrorKind::PropertyRefused))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => self.fail(),
+        }
+    }
+    fn rt_define_property(&mut self, obj: Value, key: Value, v: Value) -> Result<(), Thrown> {
+        let k = self.key_text(key)?;
+        match self.object_of(obj) {
+            Some(o) if !v.is_uninitialized() => {
+                self.objects[o].insert(k, v);
+                Ok(())
+            }
+            _ => self.fail(),
+        }
+    }
+    fn rt_delete_property(&mut self, obj: Value, key: Value, strict: bool) -> Completion {
+        if obj.is_nullish() {
+            return Err(self.error(ErrorKind::NullishBase));
+        }
+        let k = self.key_text(key)?;
+        if let Some(o) = self.object_of(obj) {
+            self.objects[o].remove(&k);
+            return Ok(Value::TRUE);
+        }
+        let gone = match obj.kind() {
+            Kind::String(_) => {
+                let s = self.string_of(obj).map(str::to_owned).unwrap_or_default();
+                self.string_property(&s, &k)?.is_none()
+            }
+            Kind::Bool(_) | Kind::Int32(_) | Kind::Double(_) => true,
+            _ => return self.fail(),
+        };
+        if !gone && strict {
+            return Err(self.error(ErrorKind::PropertyRefused));
+        }
+        Ok(Value::from_bool(gone))
+    }
+    fn rt_has_property(&mut self, key: Value, obj: Value) -> Completion {
+        let Some(o) = self.object_of(obj) else {
+            return match obj.kind() {
+                Kind::Object(_) => self.fail(),
+                _ => Err(self.error(ErrorKind::NotAnObject)),
+            };
+        };
+        let k = self.key_text(key)?;
+        Ok(Value::from_bool(self.objects[o].contains_key(&k)))
     }
 }
 

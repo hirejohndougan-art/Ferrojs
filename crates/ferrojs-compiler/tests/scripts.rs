@@ -62,9 +62,13 @@ fn run_scripts(sources: &[&str]) -> String {
                         | ErrorKind::UnresolvableReference
                         | ErrorKind::InvalidAssignmentTarget,
                     ) => "throw:ReferenceError".into(),
-                    Some(ErrorKind::ConstAssignment | ErrorKind::NotCallable) => {
-                        "throw:TypeError".into()
-                    }
+                    Some(
+                        ErrorKind::ConstAssignment
+                        | ErrorKind::NotCallable
+                        | ErrorKind::NullishBase
+                        | ErrorKind::NotAnObject
+                        | ErrorKind::PropertyRefused,
+                    ) => "throw:TypeError".into(),
                     Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
                     Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
                     None => format!("throw:{}", show(&cx, v)),
@@ -108,6 +112,11 @@ fn default_parameters_match_node() {
 }
 
 #[test]
+fn properties_match_node() {
+    match_node(PROPERTY_CASES);
+}
+
+#[test]
 fn script_level_unsupported_things_are_refused() {
     for src in [
         "this;",
@@ -123,4 +132,46 @@ fn script_level_unsupported_things_are_refused() {
             "{src}"
         );
     }
+}
+
+#[test]
+fn property_forms_not_supported_yet_are_refused() {
+    for src in [
+        "var o = { get x() { return 1; } };",
+        "var o = { set x(v) {} };",
+        "var p = {}; var o = { ...p };",
+        "var o = { __proto__: null };",
+        "var o = { '__proto__': null };",
+        "var o = {}; o?.x;",
+        "var o = {}; o?.f();",
+        "var o = {}; delete o?.x;",
+        "var x = 1; delete x;",
+        "var o = {}; var r = o instanceof o;",
+        "var a = [1, 2];",
+        "var o = { [1n]: 1 };",
+    ] {
+        assert!(
+            matches!(
+                compile_script_source(src),
+                Err(CompileError::Unsupported { .. })
+            ),
+            "{src}"
+        );
+    }
+    // These are ordinary properties, not the prototype.
+    for src in [
+        "var __proto__ = 1; var o = { __proto__ };",
+        "var o = { ['__proto__']: 1 };",
+        "var o = { __proto__() {} };",
+    ] {
+        compile_script_source(src).unwrap_or_else(|e| panic!("{src}: {e}"));
+    }
+}
+
+#[test]
+fn computed_proto_key_is_a_plain_property() {
+    assert_eq!(
+        run_scripts(&["var o = { ['__proto__']: 5 }; var result = o['__proto__'];"]),
+        "n:4014000000000000"
+    );
 }

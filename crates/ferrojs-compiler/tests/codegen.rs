@@ -84,7 +84,13 @@ fn show_outcome((o, cx): (Outcome, ToyCtx)) -> String {
                 | ErrorKind::InvalidAssignmentTarget,
             ) => "throw:ReferenceError".into(),
             Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
-            Some(ErrorKind::ConstAssignment | ErrorKind::NotCallable) => "throw:TypeError".into(),
+            Some(
+                ErrorKind::ConstAssignment
+                | ErrorKind::NotCallable
+                | ErrorKind::NullishBase
+                | ErrorKind::NotAnObject
+                | ErrorKind::PropertyRefused,
+            ) => "throw:TypeError".into(),
             Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
             None => format!("throw:{}", show(v)),
         },
@@ -230,7 +236,7 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function f() { return `a\\uDC00${1}`; }",
         "function f() { return f`x`; }",
         "function f() { if (1) { function g() {} } }",
-        "function f() { return { a: 1 }.a; }",
+        "function f() { return { get a() { return 1; } }.a; }",
         "function f() { return new f(); }",
         "function f(a, g = () => a) { var a = 2; }",
         "function f(a = 1, g = function () { return a; }) { function a() {} }",
@@ -241,9 +247,9 @@ fn everything_else_is_unsupported_not_miscompiled() {
         "function f(...r) {}",
         "function f({ a }) {}",
         "function f() { let [a] = [1]; }",
-        "function f() { return {}; }",
+        "function f() { return [1]; }",
         "function f() { return this; }",
-        "function f(o) { return o.p; }",
+        "function f(o) { return o?.p; }",
         "function f() { try {} catch ({ e }) {} }",
         "function f() { try {} catch (e) { var e = 1; } }",
         "function f() { for (var k in {}) ; }",

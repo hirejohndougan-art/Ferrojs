@@ -95,6 +95,15 @@ pub enum ErrorKind {
     /// `ReferenceError`: sloppy code assigned to a call, like `f() = 1`
     /// (assignment target type *web-compat*, D-045).
     InvalidAssignmentTarget,
+    /// `TypeError`: a property of `undefined` or `null` was read,
+    /// written or deleted (task 1.7e).
+    NullishBase,
+    /// `TypeError`: the right side of `in` is not an object.
+    NotAnObject,
+    /// `TypeError`: strict code assigned or deleted a property and the
+    /// object refused (a non-writable or non-configurable property, a
+    /// primitive base).
+    PropertyRefused,
 }
 
 /// What a global declaration creates (GlobalDeclarationInstantiation).
@@ -260,6 +269,32 @@ pub trait OpCtx {
     fn rt_typeof_name(&mut self, name: Value) -> Completion;
     /// ToString for a value that isn't a string (template substitutions).
     fn rt_to_string(&mut self, v: Value) -> Completion;
+
+    // Properties (task 1.7e). Keys are any primitive (ToPropertyKey runs
+    // inside); named ops pass their string constant.
+
+    /// A new ordinary object (an object literal).
+    fn rt_new_object(&mut self) -> Completion;
+    /// `obj[key]` (GetValue of a property reference): a `TypeError` for an
+    /// `undefined` or `null` base.
+    fn rt_get_property(&mut self, obj: Value, key: Value) -> Completion;
+    /// `obj[key] = v` (PutValue): a `TypeError` for an `undefined` or
+    /// `null` base; in strict code also when the assignment is refused.
+    fn rt_set_property(
+        &mut self,
+        obj: Value,
+        key: Value,
+        v: Value,
+        strict: bool,
+    ) -> Result<(), Thrown>;
+    /// CreateDataPropertyOrThrow on `obj` (object literal members).
+    fn rt_define_property(&mut self, obj: Value, key: Value, v: Value) -> Result<(), Thrown>;
+    /// `delete obj[key]`: whether the property is gone; in strict code a
+    /// refusal is a `TypeError`.
+    fn rt_delete_property(&mut self, obj: Value, key: Value, strict: bool) -> Completion;
+    /// `key in obj` (HasProperty): a `TypeError` unless `obj` is an
+    /// object.
+    fn rt_has_property(&mut self, key: Value, obj: Value) -> Completion;
 
     /// Stores a completion's value in `dst`, or reports the throw.
     #[inline]

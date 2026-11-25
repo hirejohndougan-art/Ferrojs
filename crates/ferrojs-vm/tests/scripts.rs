@@ -63,9 +63,13 @@ fn run_scripts(vm: &mut Vm, sources: &[&str]) -> String {
                         | ErrorKind::UnresolvableReference
                         | ErrorKind::InvalidAssignmentTarget,
                     ) => "throw:ReferenceError".into(),
-                    Some(ErrorKind::ConstAssignment | ErrorKind::NotCallable) => {
-                        "throw:TypeError".into()
-                    }
+                    Some(
+                        ErrorKind::ConstAssignment
+                        | ErrorKind::NotCallable
+                        | ErrorKind::NullishBase
+                        | ErrorKind::NotAnObject
+                        | ErrorKind::PropertyRefused,
+                    ) => "throw:TypeError".into(),
                     Some(ErrorKind::GlobalRedeclaration) => "throw:SyntaxError".into(),
                     Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
                     None => format!("throw:{}", show(vm, v)),
@@ -107,6 +111,11 @@ fn strings_match_node() {
 #[test]
 fn default_parameters_match_node() {
     match_node(DEFAULT_CASES);
+}
+
+#[test]
+fn properties_match_node() {
+    match_node(PROPERTY_CASES);
 }
 
 fn text(vm: &Vm, v: Value) -> String {
@@ -211,4 +220,58 @@ fn many_lexical_bindings_grow_the_environment() {
         run(&mut vm, &src).unwrap(),
         Outcome::Threw(Value::UNDEFINED, Some(ErrorKind::UninitializedBinding))
     );
+}
+
+/// Property cases only the interpreter can run (the toy context has no
+/// lone surrogates, shapes or elements stores).
+const INTERP_PROPERTY_CASES: &[&[&str]] = &[
+    &["var s = '\\u{1F600}'; var result = s[0] + '|' + s[1] + '|' + s.length;"],
+    &["var o = {}; for (var i = 0; i < 200; i++) o['p' + i] = i; delete o.p7; o.p199 += 1; var s = 0; for (var i = 0; i < 200; i++) if ('p' + i in o) s += o['p' + i]; var result = s;"],
+    &["var o = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }; delete o.b; delete o.f; o.g = 7; var result = o.a + o.c + o.d + o.e + o.g + ('b' in o) + ('f' in o);"],
+    &["var o = {}; o[4000000000] = 'far'; o[2] = 'near'; o[1e6] = 'mid'; var result = o[4e9] + o[2] + o[1000000] + (delete o[1e6]) + (1e6 in o);"],
+    &["var objs = {}; for (let i = 0; i < 50; i++) objs[i] = { v: 'x' + i, n: { m: i } }; var s = ''; for (let i = 0; i < 50; i += 7) s += objs[i].v + objs[i].n.m; var result = s;"],
+];
+
+#[test]
+fn interpreter_properties_match_node() {
+    match_node(INTERP_PROPERTY_CASES);
+}
+
+#[test]
+fn objects_survive_collections_between_scripts() {
+    let mut vm = vm(true);
+    let scripts = [
+        "var o = { a: 'x' + 1, n: { s: 'deep' + 2 } }; var k = 'key' + 3;",
+        "o[k] = { list: {} }; for (let i = 0; i < 30; i++) o[k].list[i] = 'e' + i;",
+        "delete o.a; o.b = o.n; var result = o.b.s + o[k].list[29] + ('a' in o);",
+    ];
+    for src in scripts {
+        let f = compile_script_source(src).unwrap();
+        assert!(
+            matches!(vm.run_script(&f).unwrap(), Outcome::Returned(_)),
+            "{src}"
+        );
+        vm.cx.collect();
+    }
+    let result = vm.global("result").unwrap();
+    assert_eq!(text(&vm, result), "deep2e29false");
+}
+
+#[test]
+fn reading_an_unknown_computed_key_interns_nothing() {
+    let mut vm = vm(false);
+    let run = |vm: &mut Vm, src: &str| vm.run_script(&compile_script_source(src).unwrap());
+    run(&mut vm, "var o = { a: 1 }; var k = 'never' + 'written';").unwrap();
+    let atoms = vm.tables.atom_count();
+    let out = run(
+        &mut vm,
+        "var r = o[k] === undefined && !(k in o) && delete o[k];",
+    )
+    .unwrap();
+    assert!(matches!(out, Outcome::Returned(_)));
+    assert_eq!(vm.global("r"), Some(Value::TRUE));
+    // The script's own constants (`r`) may be new; `neverwritten` isn't.
+    assert!(vm.tables.atom_count() <= atoms + 1);
+    run(&mut vm, "o[k] = 2;").unwrap();
+    assert!(vm.tables.atom_count() > atoms);
 }

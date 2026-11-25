@@ -16,11 +16,15 @@
 //! code). `let`/`const` bindings that may be used in
 //! their temporal dead zone hold the uninitialized marker until declared
 //! and are checked at every use. Everything else is reported as
-//! [`CompileError::Unsupported`], never miscompiled: objects, tagged
+//! [`CompileError::Unsupported`], never miscompiled: arrays, tagged
 //! templates, `this` in sloppy functions, block-level function
 //! declarations, destructuring. String literals and template cooked
 //! strings become string constants (D-044); strings with lone surrogates
-//! are unsupported until the constant pool can hold UTF-16.
+//! are unsupported until the constant pool can hold UTF-16. Task 1.7e
+//! (D-052) adds object literals with data properties, property reads,
+//! writes, compound and update assignments, `delete`, `in` and method
+//! calls; getters, setters, spread, `__proto__` and optional chaining are
+//! unsupported.
 //!
 //! Register-writing contract: `expr_to(e, dst)` may write `dst` before it
 //! has finished reading `e`'s operands, so `dst` must be a register `e`
@@ -2140,6 +2144,16 @@ impl<'s> Gen<'s> {
                 self.free_call(call);
                 Ok(())
             }
+            Expression::ObjectExpression(o) => self.object_literal(o, dst),
+            Expression::StaticMemberExpression(_)
+            | Expression::ComputedMemberExpression(_)
+            | Expression::PrivateFieldExpression(_) => {
+                let m = e.as_member_expression().expect("a member expression");
+                let r = self.prop_ref(m, false)?;
+                self.get_prop(dst, &r)?;
+                self.release_ref(r);
+                Ok(())
+            }
             other => unsupported(expression_name(other), other.span()),
         }
     }
@@ -2150,16 +2164,29 @@ impl<'s> Gen<'s> {
         if c.optional {
             return unsupported("optional calls", c.span);
         }
-        if c.callee.without_parentheses().is_member_expression() {
-            return unsupported("method calls (need objects)", c.span);
-        }
         if matches!(c.callee, Expression::Super(_)) {
             return unsupported("super calls", c.span);
         }
         let callee = self.temp()?;
-        self.expr_to(&c.callee, callee)?;
         let this = self.temp()?;
-        self.asm.load_undefined(this);
+        if let Some(m) = c.callee.without_parentheses().as_member_expression() {
+            // A method call: `this` is the object the method was read from.
+            self.check_member(m)?;
+            self.expr_to(m.object(), this)?;
+            let key = self.member_key(m, false)?;
+            let r = PropRef {
+                obj: Operand {
+                    reg: this,
+                    temp: false,
+                },
+                key,
+            };
+            self.get_prop(callee, &r)?;
+            self.release_ref(r);
+        } else {
+            self.expr_to(&c.callee, callee)?;
+            self.asm.load_undefined(this);
+        }
         let mut args = Vec::with_capacity(c.arguments.len());
         for a in &c.arguments {
             let Some(e) = a.as_expression() else {
@@ -2205,7 +2232,7 @@ impl<'s> Gen<'s> {
                 return Ok(());
             }
             UnaryOperator::Typeof => return self.type_of(&u.argument, dst),
-            UnaryOperator::Delete => return unsupported("delete", u.span),
+            UnaryOperator::Delete => return self.delete(&u.argument, dst),
             op => op,
         };
         let a = self.expr_any(&u.argument)?;
@@ -2303,8 +2330,8 @@ impl<'s> Gen<'s> {
     }
 
     fn binary(&mut self, b: &BinaryExpression<'_>, dst: Reg) -> CResult<()> {
-        if matches!(b.operator, BinaryOperator::In | BinaryOperator::Instanceof) {
-            return unsupported("`in` and `instanceof` (need objects)", b.span);
+        if b.operator == BinaryOperator::Instanceof {
+            return unsupported("`instanceof` (needs the built-ins)", b.span);
         }
         // The left operand is read after the right one is evaluated, so it
         // must not sit in a local the right side can assign.
@@ -2354,11 +2381,11 @@ impl<'s> Gen<'s> {
                     B::GreaterThan => self.asm.greater_than(dst, l, r, ic),
                     B::LessEqualThan => self.asm.less_equal(dst, l, r, ic),
                     B::GreaterEqualThan => self.asm.greater_equal(dst, l, r, ic),
+                    B::In => self.asm.has_property(dst, l, r, ic),
                     B::StrictEquality
                     | B::StrictInequality
                     | B::Equality
                     | B::Inequality
-                    | B::In
                     | B::Instanceof => unreachable!("handled above"),
                 }
             }
@@ -2374,8 +2401,11 @@ impl<'s> Gen<'s> {
         {
             return self.assign_to_call(call);
         }
+        if let Some(m) = a.left.as_member_expression() {
+            return self.assign_property(a, m, dst);
+        }
         let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left else {
-            return unsupported("assignment to a property or a pattern", a.left.span());
+            return unsupported("assignment to a pattern", a.left.span());
         };
         let t = self.write_target(id)?;
         match a.operator {
@@ -2463,9 +2493,12 @@ impl<'s> Gen<'s> {
         if let Some(call) = self.call_target(&u.argument) {
             return self.assign_to_call(call);
         }
+        if let Some(m) = u.argument.as_member_expression() {
+            return self.update_property(u, m, dst);
+        }
         let t = match &u.argument {
             SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => self.write_target(id)?,
-            other => return unsupported("update of a property", other.span()),
+            other => return unsupported("this update target", other.span()),
         };
         let cur = self.read_target(t)?;
         let ic = self.ic()?;
@@ -2510,6 +2543,275 @@ impl<'s> Gen<'s> {
                 self.free(v);
                 self.release(cur);
             }
+        }
+        Ok(())
+    }
+}
+
+/// A property reference: the object and the key (ARCHITECTURE.md §7).
+#[derive(Clone, Copy)]
+struct PropRef {
+    obj: Operand,
+    key: PropKey,
+}
+
+#[derive(Clone, Copy)]
+enum PropKey {
+    /// A static name: a string constant.
+    Named(Const),
+    /// A computed key in a register.
+    Keyed(Operand),
+}
+
+impl Gen<'_> {
+    // ---- properties (task 1.7e, D-052) ----
+
+    /// Refuses the member expressions this compiler doesn't do.
+    fn check_member(&self, m: &MemberExpression<'_>) -> CResult<()> {
+        if m.optional() {
+            return unsupported("optional chaining", m.span());
+        }
+        if matches!(m, MemberExpression::PrivateFieldExpression(_)) {
+            return unsupported("private fields", m.span());
+        }
+        if matches!(m.object(), Expression::Super(_)) {
+            return unsupported("super properties", m.span());
+        }
+        Ok(())
+    }
+
+    /// The key of `m`, evaluated after its object. `keep` if code that
+    /// may assign locals runs before the key is last used: then a key read
+    /// from a local is copied first.
+    fn member_key(&mut self, m: &MemberExpression<'_>, keep: bool) -> CResult<PropKey> {
+        Ok(match m {
+            MemberExpression::StaticMemberExpression(s) => {
+                PropKey::Named(self.string_const(s.property.name.as_str())?)
+            }
+            MemberExpression::ComputedMemberExpression(c) => {
+                PropKey::Keyed(self.operand(&c.expression, keep)?)
+            }
+            MemberExpression::PrivateFieldExpression(p) => {
+                return unsupported("private fields", p.span)
+            }
+        })
+    }
+
+    /// Evaluates `e` into a register; into a fresh temporary if `keep`
+    /// (code that may assign locals runs before the value is used).
+    fn operand(&mut self, e: &Expression<'_>, keep: bool) -> CResult<Operand> {
+        if keep {
+            let t = self.temp()?;
+            self.expr_to(e, t)?;
+            Ok(Operand { reg: t, temp: true })
+        } else {
+            self.expr_any(e)
+        }
+    }
+
+    /// Evaluates the object and key of `m` (the base is read before the
+    /// key is evaluated, so it is copied if the key may assign it). `keep`
+    /// as for [`Gen::member_key`].
+    fn prop_ref(&mut self, m: &MemberExpression<'_>, keep: bool) -> CResult<PropRef> {
+        self.check_member(m)?;
+        let key_effects = match m {
+            MemberExpression::ComputedMemberExpression(c) => has_side_effects(&c.expression),
+            _ => false,
+        };
+        let obj = self.operand(m.object(), keep || key_effects)?;
+        let key = self.member_key(m, keep)?;
+        Ok(PropRef { obj, key })
+    }
+
+    fn release_ref(&mut self, r: PropRef) {
+        if let PropKey::Keyed(k) = r.key {
+            self.release(k);
+        }
+        self.release(r.obj);
+    }
+
+    /// `dst = obj[key]`.
+    fn get_prop(&mut self, dst: Reg, r: &PropRef) -> CResult<()> {
+        let ic = self.ic()?;
+        match r.key {
+            PropKey::Named(c) => self.asm.get_named(dst, r.obj.reg, c, ic),
+            PropKey::Keyed(k) => self.asm.get_keyed(dst, r.obj.reg, k.reg, ic),
+        }
+        Ok(())
+    }
+
+    /// `obj[key] = v` (PutValue: strict code throws on a refusal).
+    fn set_prop(&mut self, r: &PropRef, v: Reg) -> CResult<()> {
+        let ic = self.ic()?;
+        let obj = r.obj.reg;
+        match (r.key, self.strict()) {
+            (PropKey::Named(c), false) => self.asm.set_named(obj, c, v, ic),
+            (PropKey::Named(c), true) => self.asm.set_named_strict(obj, c, v, ic),
+            (PropKey::Keyed(k), false) => self.asm.set_keyed(obj, k.reg, v, ic),
+            (PropKey::Keyed(k), true) => self.asm.set_keyed_strict(obj, k.reg, v, ic),
+        }
+        Ok(())
+    }
+
+    /// `o.x = e`, `o[k] op= e`, `o.x ||= e`, …: the reference (object,
+    /// then key) is evaluated first, then (for compound and logical
+    /// forms) the old value is read, then `e` runs, then the store.
+    fn assign_property(
+        &mut self,
+        a: &AssignmentExpression<'_>,
+        m: &MemberExpression<'_>,
+        dst: Reg,
+    ) -> CResult<()> {
+        let r = self.prop_ref(m, has_side_effects(&a.right))?;
+        match a.operator {
+            AssignmentOperator::Assign => {
+                self.expr_to(&a.right, dst)?;
+                self.set_prop(&r, dst)?;
+            }
+            op if op.is_logical() => {
+                self.get_prop(dst, &r)?;
+                let end = self.asm.new_label();
+                match op {
+                    AssignmentOperator::LogicalAnd => self.asm.jump_if_false(dst, end),
+                    AssignmentOperator::LogicalOr => self.asm.jump_if_true(dst, end),
+                    _ => self.asm.jump_if_not_nullish(dst, end),
+                }
+                self.expr_to(&a.right, dst)?;
+                self.set_prop(&r, dst)?;
+                self.asm.bind(end);
+            }
+            op => {
+                let bop = op.to_binary_operator().expect("arithmetic assignment");
+                // `dst` is never a local `e` can assign (see the module
+                // docs), so the old value can wait there.
+                self.get_prop(dst, &r)?;
+                let rhs = self.expr_any(&a.right)?;
+                self.binary_op(bop, dst, dst, rhs.reg)?;
+                self.release(rhs);
+                self.set_prop(&r, dst)?;
+            }
+        }
+        self.release_ref(r);
+        Ok(())
+    }
+
+    /// `o.x++`, `--o[k]`, …
+    fn update_property(
+        &mut self,
+        u: &UpdateExpression<'_>,
+        m: &MemberExpression<'_>,
+        dst: Option<Reg>,
+    ) -> CResult<()> {
+        let r = self.prop_ref(m, false)?;
+        let v = self.temp()?;
+        self.get_prop(v, &r)?;
+        let ic = self.ic()?;
+        let step = |g: &mut Self, d: Reg, s: Reg| match u.operator {
+            UpdateOperator::Increment => g.asm.inc(d, s, ic),
+            UpdateOperator::Decrement => g.asm.dec(d, s, ic),
+        };
+        match dst {
+            Some(dst) if !u.prefix => {
+                let ic = self.ic()?;
+                self.asm.to_numeric(dst, v, ic);
+                step(self, v, dst);
+                self.set_prop(&r, v)?;
+            }
+            _ => {
+                step(self, v, v);
+                self.set_prop(&r, v)?;
+                if let Some(dst) = dst {
+                    self.asm.mov(dst, v);
+                }
+            }
+        }
+        self.free(v);
+        self.release_ref(r);
+        Ok(())
+    }
+
+    /// `delete e`: a property reference is deleted; anything else is
+    /// evaluated and gives `true`.
+    fn delete(&mut self, e: &Expression<'_>, dst: Reg) -> CResult<()> {
+        let inner = e.without_parentheses();
+        if let Some(m) = inner.as_member_expression() {
+            let r = self.prop_ref(m, false)?;
+            let (key, temp) = match r.key {
+                PropKey::Keyed(k) => (k.reg, false),
+                PropKey::Named(c) => {
+                    let t = self.temp()?;
+                    self.asm.load_const(t, c);
+                    (t, true)
+                }
+            };
+            if self.strict() {
+                self.asm.delete_strict(dst, r.obj.reg, key);
+            } else {
+                self.asm.delete(dst, r.obj.reg, key);
+            }
+            if temp {
+                self.free(key);
+            }
+            self.release_ref(r);
+            return Ok(());
+        }
+        match inner {
+            Expression::Identifier(id) => unsupported("delete of a binding", id.span),
+            Expression::ChainExpression(c) => unsupported("optional chaining", c.span),
+            _ => {
+                self.effect(e)?;
+                self.asm.load_true(dst);
+                Ok(())
+            }
+        }
+    }
+
+    /// An object literal: a new object, then each member defined in
+    /// order (CreateDataPropertyOrThrow).
+    fn object_literal(&mut self, o: &ObjectExpression<'_>, dst: Reg) -> CResult<()> {
+        self.asm.new_object(dst);
+        for p in &o.properties {
+            let p = match p {
+                ObjectPropertyKind::ObjectProperty(p) => p,
+                ObjectPropertyKind::SpreadProperty(s) => {
+                    return unsupported("spread in object literals", s.span)
+                }
+            };
+            if p.kind != PropertyKind::Init {
+                return unsupported("getters and setters", p.span);
+            }
+            if p.computed {
+                let k = self.temp()?;
+                let key = p
+                    .key
+                    .as_expression()
+                    .expect("a computed key is an expression");
+                self.expr_to(key, k)?;
+                let v = self.temp()?;
+                self.expr_to(&p.value, v)?;
+                self.asm.define_keyed(dst, k, v);
+                self.free(v);
+                self.free(k);
+                continue;
+            }
+            let name = match &p.key {
+                PropertyKey::StaticIdentifier(id) => id.name.as_str().to_owned(),
+                PropertyKey::StringLiteral(lit) => match lit.value.as_str() {
+                    Some(text) => text.to_owned(),
+                    None => return unsupported("strings with lone surrogates", lit.span),
+                },
+                PropertyKey::NumericLiteral(n) => ferrojs_bytecode::number::to_js_string(n.value),
+                other => return unsupported("this property key", other.span()),
+            };
+            if name == "__proto__" && !p.shorthand && !p.method {
+                // `__proto__: v` sets the prototype (B.3.1), not a property.
+                return unsupported("__proto__ in object literals", p.span);
+            }
+            let c = self.string_const(&name)?;
+            let v = self.temp()?;
+            self.expr_to(&p.value, v)?;
+            self.asm.define_named(dst, c, v);
+            self.free(v);
         }
         Ok(())
     }
@@ -2710,7 +3012,8 @@ fn expression_name(e: &Expression<'_>) -> &'static str {
         Expression::BigIntLiteral(_) => "BigInt",
         Expression::RegExpLiteral(_) => "regular expressions",
         Expression::NewExpression(_) => "`new`",
-        Expression::ObjectExpression(_) | Expression::ArrayExpression(_) => "objects and arrays",
+        Expression::ArrayExpression(_) => "array literals",
+        Expression::ChainExpression(_) => "optional chaining",
         Expression::ThisExpression(_) => "this",
         _ => "this expression",
     }

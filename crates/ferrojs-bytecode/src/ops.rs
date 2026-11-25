@@ -704,4 +704,136 @@ define_ops! {
             let c = cx.rt_to_string(v);
             cx.complete(dst, c)
         }
+
+    // Properties (task 1.7e). The `ic` operands reserve feedback slots for
+    // the inline caches (ARCHITECTURE.md §7.3); nothing records into them
+    // yet.
+
+    /// `dst = {}`: a new ordinary object.
+    NewObject(new_object) { dst: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let c = cx.rt_new_object();
+            cx.complete(dst, c)
+        }
+
+    /// `dst = obj.name`; `name` is a string constant.
+    GetNamed(get_named) { dst: Reg, obj: Reg, name: Const, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let _ = ic;
+            let (o, k) = (cx.reg(obj), cx.constant(name));
+            let c = cx.rt_get_property(o, k);
+            cx.complete(dst, c)
+        }
+
+    /// `dst = obj[key]`.
+    GetKeyed(get_keyed) { dst: Reg, obj: Reg, key: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let _ = ic;
+            let (o, k) = (cx.reg(obj), cx.reg(key));
+            let c = cx.rt_get_property(o, k);
+            cx.complete(dst, c)
+        }
+
+    /// `obj.name = src` (sloppy code); `name` is a string constant.
+    SetNamed(set_named) { obj: Reg, name: Const, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let _ = ic;
+            let (o, k, v) = (cx.reg(obj), cx.constant(name), cx.reg(src));
+            match cx.rt_set_property(o, k, v, false) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// `obj.name = src` (strict code); `name` is a string constant.
+    SetNamedStrict(set_named_strict) { obj: Reg, name: Const, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let _ = ic;
+            let (o, k, v) = (cx.reg(obj), cx.constant(name), cx.reg(src));
+            match cx.rt_set_property(o, k, v, true) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// `obj[key] = src` (sloppy code).
+    SetKeyed(set_keyed) { obj: Reg, key: Reg, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let _ = ic;
+            let (o, k, v) = (cx.reg(obj), cx.reg(key), cx.reg(src));
+            match cx.rt_set_property(o, k, v, false) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// `obj[key] = src` (strict code).
+    SetKeyedStrict(set_keyed_strict) { obj: Reg, key: Reg, src: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let _ = ic;
+            let (o, k, v) = (cx.reg(obj), cx.reg(key), cx.reg(src));
+            match cx.rt_set_property(o, k, v, true) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// Defines own data property `obj.name = src` (an object literal
+    /// member; `name` is a string constant).
+    DefineNamed(define_named) { obj: Reg, name: Const, src: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (o, k, v) = (cx.reg(obj), cx.constant(name), cx.reg(src));
+            match cx.rt_define_property(o, k, v) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// Defines own data property `obj[key] = src` (a computed object
+    /// literal member).
+    DefineKeyed(define_keyed) { obj: Reg, key: Reg, src: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (o, k, v) = (cx.reg(obj), cx.reg(key), cx.reg(src));
+            match cx.rt_define_property(o, k, v) {
+                Ok(()) => Flow::Next,
+                Err(Thrown) => Flow::Throw,
+            }
+        }
+
+    /// `dst = delete obj[key]` (sloppy code).
+    Delete(delete) { dst: Reg, obj: Reg, key: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (o, k) = (cx.reg(obj), cx.reg(key));
+            let c = cx.rt_delete_property(o, k, false);
+            cx.complete(dst, c)
+        }
+
+    /// `dst = delete obj[key]` (strict code: a refusal throws).
+    DeleteStrict(delete_strict) { dst: Reg, obj: Reg, key: Reg }
+        flags(may_throw, may_gc)
+        handler(cx) {
+            let (o, k) = (cx.reg(obj), cx.reg(key));
+            let c = cx.rt_delete_property(o, k, true);
+            cx.complete(dst, c)
+        }
+
+    /// `dst = key in obj`.
+    In(has_property) { dst: Reg, key: Reg, obj: Reg, ic: Ic }
+        flags(may_throw, may_gc, has_ic)
+        handler(cx) {
+            let _ = ic;
+            let (k, o) = (cx.reg(key), cx.reg(obj));
+            let c = cx.rt_has_property(k, o);
+            cx.complete(dst, c)
+        }
 }
