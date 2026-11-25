@@ -4,6 +4,7 @@
 //! ```text
 //! ferrojs <file.js>        run a script file
 //! ferrojs -e '<source>'    run source text
+//! ferrojs -- <file.js>     a file whose name starts with `-`
 //! ```
 //!
 //! Scripts get one host function, `print(value)`, which writes
@@ -26,20 +27,34 @@ fn usage() -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (name, source) = match args.as_slice() {
-        [flag, source] if flag == "-e" => ("<command line>".to_owned(), source.clone()),
+        [flag, source] if flag == "-e" => ("<command line>".to_owned(), Some(source.clone())),
         [flag] if flag == "-h" || flag == "--help" => {
             println!("usage: ferrojs <file.js>\n       ferrojs -e '<source>'");
             return ExitCode::SUCCESS;
         }
-        [path] if !path.starts_with('-') => match std::fs::read_to_string(path) {
-            Ok(s) => (path.clone(), s),
-            Err(e) => {
-                eprintln!("ferrojs: can't read {path}: {e}");
-                return ExitCode::from(2);
-            }
-        },
+        [path] if !path.starts_with('-') => read(path),
+        [dashes, path] if dashes == "--" => read(path),
         _ => return usage(),
     };
+    let (name, source) = match (name, source) {
+        (name, Some(source)) => (name, source),
+        (_, None) => return ExitCode::from(2),
+    };
+    run(&name, &source)
+}
+
+/// The file at `path` (name and text), or `None` after reporting why not.
+fn read(path: &str) -> (String, Option<String>) {
+    match std::fs::read_to_string(path) {
+        Ok(s) => (path.to_owned(), Some(s)),
+        Err(e) => {
+            eprintln!("ferrojs: can't read {path}: {e}");
+            (path.to_owned(), None)
+        }
+    }
+}
+
+fn run(name: &str, source: &str) -> ExitCode {
     let mut engine = match Engine::new() {
         Ok(e) => e,
         Err(e) => {
@@ -58,7 +73,7 @@ fn main() -> ExitCode {
         eprintln!("ferrojs: {e}");
         return ExitCode::from(2);
     }
-    let result = engine.run(&source);
+    let result = engine.run(source);
     let _ = std::io::stdout().flush();
     match result {
         Ok(()) => ExitCode::SUCCESS,

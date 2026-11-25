@@ -174,7 +174,9 @@ impl Engine {
     /// `f` gets the arguments; `Ok` is its result and `Err` is thrown.
     /// Both must be primitives: returning an object or a function throws
     /// in the script instead. Host functions can't call back into
-    /// JavaScript yet.
+    /// JavaScript yet. A host function that panics leaves the engine in
+    /// an unknown state: drop it rather than catching the panic and
+    /// running more code.
     pub fn register(
         &mut self,
         name: &str,
@@ -276,6 +278,10 @@ fn describe(k: ErrorKind) -> (&'static str, &'static str) {
         ),
         ErrorKind::NotAnObject => ("TypeError", "the right side of 'in' is not an object"),
         ErrorKind::PropertyRefused => ("TypeError", "the property can't be assigned or deleted"),
+        ErrorKind::HostResult => (
+            "TypeError",
+            "a host function returned an object or a function",
+        ),
     }
 }
 
@@ -287,23 +293,16 @@ fn line_col(source: &str, offset: u32) -> (u32, u32) {
         .rev()
         .find(|&i| source.is_char_boundary(i))
         .unwrap_or(0);
-    let before = &source[..end];
-    let line_start = before
-        .rfind(['\n', '\r', '\u{2028}', '\u{2029}'])
-        .map_or(0, |i| {
-            i + before[i..].chars().next().map_or(1, char::len_utf8)
-        });
-    let line = before
-        .char_indices()
-        .filter(|&(i, c)| match c {
-            // CRLF is one line terminator.
-            '\r' => !before[i + 1..].starts_with('\n'),
-            '\n' | '\u{2028}' | '\u{2029}' => true,
-            _ => false,
-        })
-        .count();
-    let col: usize = before[line_start..].chars().map(char::len_utf16).sum();
-    (line as u32 + 1, col as u32 + 1)
+    let (mut line, mut col) = (1u32, 1u32);
+    for (i, c) in source[..end].char_indices() {
+        match c {
+            // CRLF is one line terminator: its `\n` ends the line.
+            '\r' if source[i + 1..].starts_with('\n') => {}
+            '\r' | '\n' | '\u{2028}' | '\u{2029}' => (line, col) = (line + 1, 1),
+            c => col += c.len_utf16() as u32,
+        }
+    }
+    (line, col)
 }
 
 #[cfg(test)]
@@ -316,6 +315,9 @@ mod tests {
         assert_eq!(line_col("abc", 2), (1, 3));
         assert_eq!(line_col("a\nbc", 3), (2, 2));
         assert_eq!(line_col("a\r\nbc", 4), (2, 2));
+        // The `\n` of a CRLF still belongs to the first line.
+        assert_eq!(line_col("a\r\nb", 2), (1, 2));
+        assert_eq!(line_col("a\r\nb", 3), (2, 1));
         assert_eq!(line_col("a\rb\u{2028}c", 6), (3, 1));
         // An astral character is two UTF-16 units.
         assert_eq!(line_col("😀x", 4), (1, 3));

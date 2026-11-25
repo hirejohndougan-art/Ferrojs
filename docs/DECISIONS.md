@@ -1281,8 +1281,8 @@ planning document and gets logged here as each is implemented.
   the result (`Ok`) or the thrown value (`Err`) a value, allocating
   strings after the call. No frame is pushed; a tail call to a host
   function returns its result from the calling frame. Objects and
-  functions can't come back from the host side yet (a clean
-  unsupported throw). `Vm::define_native` installs one as a writable,
+  functions can't come back from the host side yet (a `TypeError`,
+  new `ErrorKind::HostResult`). `Vm::define_native` installs one as a writable,
   configurable, non-enumerable global property (built-in function
   attributes, ECMA-262 §18), refused over a non-configurable `var`.
   The `ferrojs` crate wraps this as `Engine` (`run`, `register`,
@@ -1308,5 +1308,8 @@ planning document and gets logged here as each is implemented.
   doesn't track them yet; `global` reads results instead).
 - **Known gaps:** engine errors carry no detail (`ReferenceError: a
   name is not defined`, not which name) until error objects (1.13);
-  re-defining a host function leaves the old closure in the table;
-  host functions can't call back into JavaScript.
+  host functions can't call back into JavaScript; a panicking host
+  function leaves the engine unusable (documented, not caught);
+  `HostValue`'s `String(v)` prints every object as `[object Object]`
+  and every function as a placeholder until 1.13. Re-defining a host
+  function reuses its table slot.

@@ -75,3 +75,20 @@ fn unsupported_features_and_usage_errors_have_their_own_status() {
     assert_eq!(missing.status.code(), Some(2));
     assert!(ferrojs(&["--help"]).status.success());
 }
+
+#[test]
+fn double_dash_runs_a_file_named_like_a_flag() {
+    let dir = std::env::temp_dir().join(format!("ferrojs-cli-dash-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("-x.js"), "print('dash')").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ferrojs"))
+        .current_dir(&dir)
+        .args(["--", "-x.js"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "dash\n");
+    // Two plain arguments are a usage error.
+    assert_eq!(ferrojs(&["a.js", "b.js"]).status.code(), Some(2));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -89,7 +89,8 @@ fn show_outcome((o, cx): (Outcome, ToyCtx)) -> String {
                 | ErrorKind::NotCallable
                 | ErrorKind::NullishBase
                 | ErrorKind::NotAnObject
-                | ErrorKind::PropertyRefused,
+                | ErrorKind::PropertyRefused
+                | ErrorKind::HostResult,
             ) => "throw:TypeError".into(),
             Some(ErrorKind::StackOverflow) => "throw:RangeError".into(),
             None => format!("throw:{}", show(v)),

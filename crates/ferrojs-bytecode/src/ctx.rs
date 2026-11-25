@@ -104,6 +104,9 @@ pub enum ErrorKind {
     /// object refused (a non-writable or non-configurable property, a
     /// primitive base).
     PropertyRefused,
+    /// `TypeError`: a host function returned or threw an object or a
+    /// function, which can't be made from the host side yet (D-054).
+    HostResult,
 }
 
 /// What a global declaration creates (GlobalDeclarationInstantiation).

@@ -214,3 +214,20 @@ fn the_interrupt_flag_stops_a_host_call() {
     // The first call sets the flag; the second is refused.
     assert!(matches!(vm.run_script(&f).unwrap(), Outcome::Terminated));
 }
+
+#[test]
+fn replacing_a_host_function_reuses_its_slot_and_objects_throw_a_type_error() {
+    let mut vm = vm(false);
+    for n in [1.0, 2.0] {
+        vm.define_native("which", Box::new(move |_, _| Ok(HostValue::Number(n))))
+            .unwrap();
+    }
+    assert_eq!(run(&mut vm, "var r = which()"), Ok(HostValue::Number(2.0)));
+    vm.define_native("obj", Box::new(|_, _| Err(HostValue::Function)))
+        .unwrap();
+    let f = compile_script_source("obj()").unwrap();
+    assert!(matches!(
+        vm.run_script(&f).unwrap(),
+        Outcome::Threw(_, Some(ferrojs_bytecode::ErrorKind::HostResult))
+    ));
+}

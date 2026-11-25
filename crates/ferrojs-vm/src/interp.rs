@@ -395,7 +395,17 @@ impl Vm {
         let Vm {
             cx, tables, interp, ..
         } = self;
-        let index = interp.natives.len();
+        // Replacing a host function reuses its slot in the table.
+        let existing = {
+            let nogc = cx.nogc();
+            interp.globals.as_ref().and_then(|g| {
+                let units: Vec<u16> = name.encode_utf16().collect();
+                let key = tables.atoms.get(&units)?.get(nogc);
+                let (v, _) = object::get_own(nogc, g.object.get(nogc), key)?;
+                native_index(nogc, v)
+            })
+        };
+        let index = existing.unwrap_or(interp.natives.len());
         let header = CellKind::Native as u64 | ((index as u64) << 32);
         let done = cx.scope(|s| {
             prepare(s, tables, interp).map_err(|()| DefineError::OutOfMemory)?;
@@ -418,7 +428,10 @@ impl Vm {
             }
         });
         if done.is_ok() {
-            interp.natives.push(f);
+            match existing {
+                Some(i) => interp.natives[i] = f,
+                None => interp.natives.push(f),
+            }
         }
         done
     }
@@ -729,7 +742,7 @@ impl Interp<'_, '_> {
                 let units: Vec<u16> = t.encode_utf16().collect();
                 self.make_string(&units)
             }
-            HostValue::Object | HostValue::Function => self.fail(),
+            HostValue::Object | HostValue::Function => Err(self.error(ErrorKind::HostResult)),
         }
     }
 
