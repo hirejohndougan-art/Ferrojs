@@ -47,9 +47,8 @@ use std::sync::atomic::Ordering;
 
 use ferrojs_bytecode::number::{self, CompareOp, NumericOp, UnaryOp};
 use ferrojs_bytecode::{
-    decode, execute, verify, verify_handlers, CallSite, Completion, Const, Count, EnvSlot,
-    ErrorKind, Feedback, Flow, Func, GlobalKind, Handler, Ic, Limits, OpCtx, Reg, Thrown,
-    VerifyError,
+    decode, step, verify, verify_handlers, CallSite, Completion, Const, Count, EnvSlot, ErrorKind,
+    Feedback, Flow, Func, GlobalKind, Handler, Ic, Limits, OpCtx, Reg, Thrown, VerifyError,
 };
 use ferrojs_compiler::{CompiledFunction, Constant};
 use ferrojs_core::gc::{Global, Scope};
@@ -164,7 +163,9 @@ impl FrameStack {
 #[derive(Debug)]
 pub struct Template {
     pub name: String,
-    pub code: Vec<u8>,
+    /// Shared so the dispatch loop can hold it while handlers borrow the
+    /// interpreter.
+    pub code: Rc<[u8]>,
     pub handlers: Vec<Handler>,
     /// Constants as values; strings are atoms (kept alive by the atom
     /// table).
@@ -406,7 +407,7 @@ fn load_tree(
     let index = templates.len() as u32;
     templates.push(Template {
         name: f.name.clone(),
-        code: f.code.clone(),
+        code: f.code.as_slice().into(),
         handlers: f.handlers.clone(),
         constants,
         limits,
@@ -586,6 +587,11 @@ impl Interp<'_, '_> {
 
     fn template(&self) -> &Template {
         &self.templates[self.tmpl as usize]
+    }
+
+    /// The running function's code.
+    fn code(&self) -> Rc<[u8]> {
+        self.template().code.clone()
     }
 
     /// The end of the current frame: registers, then extra arguments.
@@ -984,15 +990,20 @@ impl Interp<'_, '_> {
             Err(Thrown) => return self.uncaught(),
         }
         let mut pc = 0usize;
+        // The running function's code; replaced whenever the frame changes.
+        let mut code = self.code();
         loop {
-            let t = &self.templates[self.tmpl as usize];
-            let (insn, len) = decode(&t.code, pc).expect("verified bytecode decodes");
-            let flow = match execute(self, insn) {
+            let (flow, len) = step(self, &code, pc);
+            let flow = match flow {
                 Flow::Call => {
+                    // Calls read their operands again (one decode per call,
+                    // none per other instruction).
+                    let (insn, _) = decode(&code, pc).expect("verified bytecode decodes");
                     let site = CallSite::of(&insn).expect("only calls return Flow::Call");
                     match self.call(site, pc) {
                         Ok(()) => {
                             pc = 0;
+                            code = self.code();
                             continue;
                         }
                         Err(Thrown) => Flow::Throw,
@@ -1017,13 +1028,16 @@ impl Interp<'_, '_> {
                         .template_of(Value::from_bits_checked(self.slot(CALLEE)).expect("callee"))
                         .expect("a caller frame runs a function");
                     self.stack.top.set(self.frame_end());
-                    let code = &self.templates[self.tmpl as usize].code;
-                    let (_, call_len) = decode(code, call_pc).expect("verified call");
+                    code = self.code();
+                    let (_, call_len) = decode(&code, call_pc).expect("verified call");
                     pc = call_pc + call_len;
                     self.set(dst, v);
                 }
                 Flow::Throw => match self.unwind(pc) {
-                    Some(target) => pc = target,
+                    Some(target) => {
+                        pc = target;
+                        code = self.code();
+                    }
                     None => return self.uncaught(),
                 },
                 Flow::Call => unreachable!("handled above"),

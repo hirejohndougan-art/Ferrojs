@@ -124,6 +124,11 @@ fn unary_op<C: OpCtx + ?Sized>(cx: &mut C, op: UnaryOp, dst: Reg, src: Reg, ic: 
     cx.complete(dst, c)
 }
 
+/// The op list, with room for extra ops at the end (the `padding-ops`
+/// feature adds unused ones to measure dispatch against the op count,
+/// D-052).
+macro_rules! all_ops {
+    ($($extra:tt)*) => {
 define_ops! {
     /// `dst = src`.
     Mov(mov) { dst: Reg, src: Reg }
@@ -836,4 +841,15 @@ define_ops! {
             let c = cx.rt_has_property(k, o);
             cx.complete(dst, c)
         }
+    $($extra)*
 }
+    };
+}
+
+#[cfg(not(feature = "padding-ops"))]
+all_ops! {}
+
+// 150 ops that are never emitted: only for measuring that dispatch cost
+// doesn't depend on the number of ops (D-052).
+#[cfg(feature = "padding-ops")]
+include!("padding_ops.rs");

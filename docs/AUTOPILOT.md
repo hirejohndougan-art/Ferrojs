@@ -135,6 +135,7 @@ cargo run --release -p ferrojs-diff -- --engine node tests/diff
 cargo run --release -p ferrojs-diff -- --engine ferrojs tests/diff
 tools/fuzz.sh smoke
 tools/bench.sh check --write
+tools/dispatch-flat.sh
 tools/miri.sh
 tools/deny.sh
 ```
@@ -160,6 +161,11 @@ tools/deny.sh
   like Test262. Needs `valgrind` and the matching `gungraun-runner`
   (the script prints the install command). When a task adds a feature on a
   hot path, it adds a benchmark for it.
+- The dispatch step (D-052) runs the interpreter benchmarks again with
+  150 extra ops that are never executed (the `padding-ops` feature) and
+  fails if any count moves by more than 1%: the cost of running an
+  instruction must not depend on how many ops exist. Same tools as the
+  benchmark step.
 - The Miri step (D-016) runs `ferrojs-core`'s tests under Miri with strict
   provenance. It needs nightly Rust with the `miri` component. If the run
   environment can't install nightly, the step passes only when
@@ -180,8 +186,9 @@ tools/deny.sh
 
 ## Pacing
 
-John chose three runs a night, at 1, 3 and 5 AM Central (2026-11-20);
-a long run can still overlap the next one. Usage is protected by
+John chose a run every two hours, around the clock, at 12 minutes past
+each odd hour Central (12 runs a day; 2026-11-24, D-051, replacing three
+runs a night); a long run can still overlap the next one. Usage is protected by
 keeping each run to **one task** and stopping when it's done.
 
 **Sunday marathon (D-029).** John also chose one long run a week,

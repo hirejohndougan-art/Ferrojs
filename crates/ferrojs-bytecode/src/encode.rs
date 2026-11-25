@@ -71,7 +71,23 @@ pub struct Reader<'a> {
     width: Width,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    /// A reader of narrow units at `pos` (the dispatch fast path).
+    #[inline]
+    pub(crate) fn narrow(code: &'a [u8], pos: usize) -> Reader<'a> {
+        Reader {
+            code,
+            pos,
+            width: Width::Narrow,
+        }
+    }
+
+    /// The byte offset just past what was read.
+    #[inline]
+    pub(crate) fn pos(&self) -> usize {
+        self.pos
+    }
+
     #[inline]
     fn take<const N: usize>(&mut self) -> Result<[u8; N], DecodeErrorKind> {
         let end = self.pos.checked_add(N).ok_or(DecodeErrorKind::Truncated)?;

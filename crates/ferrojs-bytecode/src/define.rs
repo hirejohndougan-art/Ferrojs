@@ -5,7 +5,8 @@
 //! op (in `operands`), the decoded `Instruction` enum, the decoder, the
 //! encoder (`Instruction::encode`) and one `Assembler` method per op, and
 //! one handler function per op (in `handlers`) plus the `execute`
-//! dispatch. Handlers are generic over [`OpCtx`](crate::OpCtx), so later
+//! dispatch, and one step function per op (decode and run, in `steps`)
+//! behind the table-driven `step` the interpreter uses (D-052). Handlers are generic over [`OpCtx`](crate::OpCtx), so later
 //! tiers can instantiate the same bodies.
 //!
 //! Syntax of one op:
@@ -272,6 +273,58 @@ macro_rules! define_ops {
             match insn {
                 $( Instruction::$name(o) => handlers::$snake(cx, o), )*
             }
+        }
+
+        /// One step function per op (D-052): decodes the op's narrow
+        /// operands and runs its handler. Each is its own function, so how
+        /// one op compiles doesn't depend on how many others there are.
+        pub mod steps {
+            #[allow(unused_imports)]
+            use super::*;
+            $(
+                $(#[$attr])*
+                #[allow(unused_mut)]
+                pub fn $snake<C: $crate::OpCtx + ?Sized>(cx: &mut C, code: &[u8], pc: usize) -> ($crate::Flow, usize) {
+                    let mut r = $crate::Reader::narrow(code, pc + 1);
+                    let o = operands::$name {
+                        $( $field: <$kind as $crate::Operand>::read(&mut r)
+                            .expect("verified bytecode decodes"), )*
+                    };
+                    (handlers::$snake(cx, o), r.pos() - pc)
+                }
+            )*
+        }
+
+        /// The step function of every op, by opcode byte.
+        pub struct StepTable<C: ?Sized>(core::marker::PhantomData<C>);
+
+        impl<C: $crate::OpCtx + ?Sized> StepTable<C> {
+            #[allow(clippy::type_complexity)]
+            pub const STEPS: [fn(&mut C, &[u8], usize) -> ($crate::Flow, usize); Opcode::ALL.len()] =
+                [ $( steps::$snake::<C>, )* ];
+        }
+
+        /// Decodes and runs the instruction at `pc` of verified code
+        /// (D-052): one indexed call through [`StepTable`] for narrow
+        /// instructions, [`decode`](crate::decode) and [`execute`] for
+        /// prefixed ones. Returns the flow and the instruction's length.
+        /// The cost per instruction doesn't grow with the number of ops.
+        ///
+        /// # Panics
+        /// If the code at `pc` doesn't decode (it must be verified).
+        #[inline]
+        pub fn step<C: $crate::OpCtx + ?Sized>(cx: &mut C, code: &[u8], pc: usize) -> ($crate::Flow, usize) {
+            match StepTable::<C>::STEPS.get(code[pc] as usize) {
+                Some(f) => f(cx, code, pc),
+                None => step_prefixed(cx, code, pc),
+            }
+        }
+
+        #[cold]
+        #[inline(never)]
+        fn step_prefixed<C: $crate::OpCtx + ?Sized>(cx: &mut C, code: &[u8], pc: usize) -> ($crate::Flow, usize) {
+            let (insn, len) = $crate::decode(code, pc).expect("verified bytecode decodes");
+            (execute(cx, insn), len)
         }
     };
 }

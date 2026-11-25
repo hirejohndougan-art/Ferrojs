@@ -243,7 +243,8 @@ From this one list the macro generates:
 3. the decoder and disassembler (used by dump tools and tests);
 4. the verifier's per-op operand table;
 5. a metadata table (`flags`, operand kinds, is-jump, is-terminator);
-6. the interpreter's dispatch `match`, calling each handler body;
+6. one step function per op (decode the op's narrow operands, run its
+   handler) and the table of them the interpreter dispatches through (D-052);
 7. later (Phase 3) one copy-and-patch stencil per op, by instantiating the
    same handler body against a stencil context whose operand reads are
    patchable holes;
@@ -274,8 +275,15 @@ Rules for op definitions:
 
 ### 4.3 Interpreter loop
 
-`ferrojs-vm` runs a `loop { match opcode { … } }` over the current
-function's bytecode with `pc` and `fp` in locals. Register access is
+`ferrojs-vm` runs a loop over the current function's bytecode with `pc`
+and `fp` in locals. Each iteration is one call through a table of per-op
+step functions indexed by the opcode byte (D-052); prefixed (wide)
+instructions take a cold path through the generic decoder. Keeping each
+op's code in its own function means adding ops doesn't change how the
+others compile: a gate step (`tools/dispatch-flat.sh`) adds 150 unused
+ops and fails if any interpreter benchmark moves by more than 1%. The
+loop holds the running function's code as an `Rc<[u8]>`, swapped on
+calls, returns and unwinding. Register access is
 bounds-checked safe Rust in Phase 1. If benchmarks show the checks matter,
 a verified-bytecode fast path with unchecked access moves into
 `ferrojs-core` under the risky-review rule, justified by the verifier.
