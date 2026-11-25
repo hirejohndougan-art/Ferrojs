@@ -178,8 +178,28 @@ Order matters: each task builds on the ones above it.
   (packed, holey, sparse) and Array length. needs: 1.8a
 - [x] (2026-11-25, D-054; merged 2026-11-25) 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7
-- [~] (claimed 2026-11-25 07:46 UTC) 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
-  `print`, `$262` host object. First real baseline. needs: 1.9
+- 1.10 Run Test262 on the real engine (split 2026-11-25: Test262's own
+  harness, `assert.js` and `sta.js`, needs functions that carry
+  properties, `new`, `instanceof` and error objects, none of which
+  existed; the old entry only listed 1.9):
+  - [~] (claimed 2026-11-25 07:46 UTC) 1.10a (risky) Functions as
+    ordinary objects: closure and host function cells get the object
+    header (shape, elements, slots), so `f.x = 1` works; the
+    `Object.prototype` and `Function.prototype` intrinsics; `prototype`,
+    `name` and `length` on functions. Core: object layout. needs: 1.7,
+    1.8d, 1.9
+  - [ ] 1.10b (risky) `new` and `instanceof` for ordinary functions:
+    \[\[Construct\]\] (OrdinaryCreateFromConstructor, `this` in the new
+    frame, returning an object), `new.target`, OrdinaryHasInstance.
+    needs: 1.10a
+  - [ ] 1.10c Error objects: the engine throws real `Error`,
+    `TypeError`, `ReferenceError`, `SyntaxError` and `RangeError`
+    objects (constructor, `name`, `message`, prototype chain), and the
+    constructors exist as globals; a minimal `String()` for values the
+    harness prints. The rest of 1.13 stays there. needs: 1.10b
+  - [ ] 1.10d Hook the Test262 runner's `ferrojs` engine to the real
+    engine; `print`, `$262` host object. First real baseline.
+    needs: 1.10c
 - [x] 1.11 (2026-11-23) Host hooks for randomness, clocks and job ordering (D-008).
 - 1.12 Bytecode compiler, part 2 (split 2026-11-23: everything but
   default values needs objects, iterators or the interpreter):
