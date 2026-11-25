@@ -172,7 +172,7 @@ Order matters: each task builds on the ones above it.
   called from get/set), the lazy key table for large shapes. needs: 1.8b, 1.7
 - [x] 1.8c (2026-11-23) Objects, part c: indexed properties in the elements store
   (packed, holey, sparse) and Array length. needs: 1.8a
-- [ ] 1.9 Minimal embedding API and a `ferrojs` command-line binary that
+- [~] (claimed 2026-11-25 05:20 UTC; stacked on 1.7d + 1.7e) 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7
 - [ ] 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
   `print`, `$262` host object. First real baseline. needs: 1.9
