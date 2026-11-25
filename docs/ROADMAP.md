@@ -147,8 +147,8 @@ Order matters: each task builds on the ones above it.
     atoms (concatenation, Number::toString, comparisons), the global
     object and global lexical environment; the script cases (1.6e, 1.6f)
     match Node.js. needs: 1.7b, 1.8b
-  - [~] (claimed 2026-11-25 03:10 UTC; stacked on `auto/2026-11-24-interp-strings`)
-    1.7d Dispatch cost against the op count (D-036): a benchmark that
+  - [x] 1.7d (2026-11-25, on branch `auto/2026-11-25-dispatch`, stacked on
+    1.7c; waiting for 1.7a's Miri run, D-052) Dispatch cost against the op count (D-036): a benchmark that
     shows it stays flat as ops are added. needs: 1.7b
   - [~] (claimed 2026-11-25 03:20 UTC; stacked on `auto/2026-11-24-interp-strings`)
     1.7e Property access (added 2026-11-25: nothing on the roadmap

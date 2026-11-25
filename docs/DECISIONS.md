@@ -1088,3 +1088,8 @@ planning document and gets logged here as each is implemented.
   hourly, and John picked every two hours all day.
 - **Rejected:** hourly runs (more overlap between runs, which the claim
   rule handles but which wastes usage); 9 runs between 1 AM and 5 PM.
+
+## D-052 (reserved) Dispatch through a table of per-op step functions
+- **Status:** written on branch `auto/2026-11-25-dispatch` (task 1.7d);
+  the full entry lands when that branch merges after 1.7a's Miri run.
+  Don't reuse the number.
