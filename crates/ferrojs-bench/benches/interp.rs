@@ -1,7 +1,7 @@
 //! The interpreter (task 1.7b, D-047): a compiled loop with a call per
 //! iteration, run on the real frame stack. Dispatch cost must not grow
 //! with the number of ops (D-036). Task 1.7c (D-050) adds a script loop on
-//! global variables with string concatenation; task 1.7e (D-052) a loop
+//! global variables with string concatenation; task 1.7e (D-053) a loop
 //! of property reads and writes.
 //!
 //! Linux-only like the other benchmarks: every item is behind

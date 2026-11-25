@@ -1171,3 +1171,41 @@ planning document and gets logged here as each is implemented.
   free them); the global lexical bindings as properties of a second
   object (object slots can't hold the TDZ marker); keying the lexical
   table by atom offset (breaks when the collector moves cells).
+
+## D-053 Property access before the built-ins
+- **Status:** Accepted (autopilot, 2026-11-25). Task 1.7e.
+- **Choice:** twelve property ops (`NewObject`, `GetNamed`, `GetKeyed`,
+  `SetNamed[Strict]`, `SetKeyed[Strict]`, `DefineNamed`, `DefineKeyed`,
+  `Delete[Strict]`, `In`), each a call into one `rt_*` runtime function
+  that takes any primitive key and runs ToPropertyKey itself; named ops
+  pass their string constant. Get, set and `in` carry an `Ic` operand
+  that nothing records into yet (ICs per ARCHITECTURE.md §7.3 come with
+  1.15 or Phase 3). Strictness is in the opcode, as for `StoreName`.
+  In the interpreter, array-index keys go to the elements store and other
+  keys to named properties as atoms: a key computed at run time is
+  interned when written (atoms are never freed in Phase 1, D-038), and
+  reads, `in` and `delete` of a key no atom exists for find nothing
+  without allocating. Literal objects have prototype `null` until
+  `Object.prototype` exists (1.13); to avoid wrong answers meanwhile, a
+  read or `in` of an `Object.prototype` name (`toString`, `__proto__`, …)
+  that isn't an own property, and any assignment to `__proto__`, fails
+  cleanly (the unsupported throw), and `{ __proto__: v }` doesn't compile.
+  Strings have `length` and their indices; other primitive and function
+  bases fail until their prototypes exist. Primitive bases refuse
+  assignments (a `TypeError` in strict code); null and undefined bases
+  are a `TypeError` (`ErrorKind::NullishBase`, `NotAnObject`,
+  `PropertyRefused`). Getters, setters, spread, optional chaining, array
+  literals and `instanceof` stay unsupported.
+- **Why:** nothing compiled `o.x` yet, and 1.8d, 1.9, 1.12b–e and 1.13
+  all need it. One runtime function per operation keeps the toy context,
+  the interpreter and later tiers in step; the IC operands now avoid an
+  encoding change later.
+- **Rejected:** separate named and indexed runtime paths (the key
+  canonicalization would be duplicated in every tier); interning every
+  computed key on reads (unbounded atom growth from lookups); returning
+  `undefined` for inherited names before 1.13 (silently wrong).
+- **Known gap (from the review):** with no error objects, an
+  unsupported operation (`fail()`) and a real `TypeError` both throw a
+  catchable `undefined`; objects now reach operators that need
+  ToPrimitive (`o + ''`, `o < 1`), which throw that way until 1.13.
+  Tests assert error kinds on uncaught throws for this reason.

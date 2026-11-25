@@ -141,10 +141,11 @@ const DEFAULT_CASES: &[&[&str]] = &[
     &["var arguments = 3; var result = (() => arguments)() + arguments;"],
 ];
 
-/// Properties (task 1.7e, D-052): object literals, reads, writes,
+/// Properties (task 1.7e, D-053): object literals, reads, writes,
 /// compound and update assignments, `delete`, `in`, method calls, keys
 /// through ToPropertyKey, string `length` and indices, and the errors.
-/// Objects have no prototype yet, so no case touches an inherited name.
+/// Objects have no prototype yet: inherited names and `__proto__` fail
+/// cleanly instead (those cases are in the compiler's tests).
 const PROPERTY_CASES: &[&[&str]] = &[
     &["var o = { a: 1, b: 'x' }; var result = o.a + o.b;"],
     &["var o = {}; o.x = 5; o['y'] = 6; var result = o.x * 10 + o.y;"],
@@ -210,7 +211,9 @@ const PROPERTY_CASES: &[&[&str]] = &[
     &["var o = { x: 1 }; var r = o.x++ + o.x + ++o.x; var result = r * 100 + o.x;"],
     &["var o = { '': 'empty' }; var result = o[''];"],
     &["var o = {}; o.a = o; o.a.a.a.b = 7; var result = o.b;"],
-    &["var o = {}; var result = 0; try { o.x.y = 1; } catch (e) { result = 1; }"],
+    &["var o = {}; o.x.y = 1;"],
+    &["var calls = ''; function t(s, v) { calls += s; return v; } t('o', null)[t('k', 'p')] = t('v', 1);"],
+    &["var o = { toString: 1, valueOf: 'v' }; var result = o.toString + o.valueOf + ('toString' in o);"],
     &["var o = { v: 1 }; with_like: { o.v = 2; break with_like; } var result = o.v;"],
 ];
 

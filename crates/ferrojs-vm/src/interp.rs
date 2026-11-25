@@ -27,7 +27,7 @@
 //!   (`let`, `const`) is an `Env` cell, grown by copying, with the names
 //!   and `const` flags in a Rust table ([`Globals`]).
 //!
-//! - **Properties** (task 1.7e, D-052): objects made by literals are
+//! - **Properties** (task 1.7e, D-053): objects made by literals are
 //!   ordinary objects with prototype `null` (`Object.prototype` comes with
 //!   the built-ins, 1.13). Keys go through ToPropertyKey: array indices to
 //!   the elements store, other keys to named properties as atoms (a key
@@ -1514,9 +1514,22 @@ impl OpCtx for Interp<'_, '_> {
                 if is_length(units) && elements::is_array(nogc, o) {
                     return Ok(Value::number(f64::from(elements::length(nogc, o))));
                 }
-                Ok(self
-                    .find_atom(units)
-                    .map_or(Value::UNDEFINED, |k| object::get(nogc, o, k)))
+                let found = self.find_atom(units).and_then(|k| {
+                    let mut cur = Some(o.cast::<Object>());
+                    while let Some(obj) = cur {
+                        if let Some((v, _)) = object::get_own(nogc, obj, k) {
+                            return Some(v);
+                        }
+                        cur = object::prototype(nogc, obj);
+                    }
+                    None
+                });
+                match found {
+                    Some(v) => Ok(v),
+                    // Inherited from Object.prototype once it exists (1.13).
+                    None if number::is_object_prototype_name(units) => self.fail(),
+                    None => Ok(Value::UNDEFINED),
+                }
             }
             (Base::String(_, len), Key::Name(units)) if is_length(units) => {
                 Ok(Value::number(f64::from(len)))
@@ -1545,6 +1558,10 @@ impl OpCtx for Interp<'_, '_> {
             return Err(self.error(ErrorKind::NullishBase));
         }
         let key = self.key(key)?;
+        if matches!(&key, Key::Name(u) if u.iter().copied().eq("__proto__".encode_utf16())) {
+            // The Object.prototype accessor sets the prototype (1.13).
+            return self.fail();
+        }
         let ok = match self.base(obj) {
             Base::Object(_) => self.put(obj, key, v, false)?,
             // The wrapper object is the receiver: OrdinarySet refuses (no
@@ -1619,7 +1636,12 @@ impl OpCtx for Interp<'_, '_> {
         let Base::Object(o) = self.base(obj) else {
             unreachable!("checked above")
         };
-        Ok(Value::from_bool(self.has(o, &key)))
+        let has = self.has(o, &key);
+        if !has && matches!(&key, Key::Name(u) if number::is_object_prototype_name(u)) {
+            // Inherited from Object.prototype once it exists (1.13).
+            return self.fail();
+        }
+        Ok(Value::from_bool(has))
     }
 }
 

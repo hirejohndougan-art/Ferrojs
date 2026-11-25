@@ -275,3 +275,21 @@ fn reading_an_unknown_computed_key_interns_nothing() {
     run(&mut vm, "o[k] = 2;").unwrap();
     assert!(vm.tables.atom_count() > atoms);
 }
+
+#[test]
+fn inherited_object_prototype_names_fail_cleanly() {
+    for src in [
+        "var o = {}; var result = o.toString;",
+        "var o = {}; var result = 'hasOwnProperty' in o;",
+        "var o = {}; o.__proto__ = { a: 1 };",
+        "var o = {}; var result = o.__proto__;",
+        "var o = {}; o['__proto__'] = 1;",
+    ] {
+        let f = compile_script_source(src).unwrap();
+        assert_eq!(
+            vm(false).run_script(&f).unwrap(),
+            Outcome::Threw(Value::UNDEFINED, None),
+            "{src}"
+        );
+    }
+}

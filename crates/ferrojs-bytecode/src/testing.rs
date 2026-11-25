@@ -650,7 +650,12 @@ impl OpCtx for ToyCtx {
         }
         let k = self.key_text(key)?;
         if let Some(o) = self.object_of(obj) {
-            return Ok(self.objects[o].get(&k).copied().unwrap_or(Value::UNDEFINED));
+            return match self.objects[o].get(&k) {
+                Some(&v) => Ok(v),
+                // Inherited from Object.prototype once it exists (1.13).
+                None if is_proto_name(&k) => self.fail(),
+                None => Ok(Value::UNDEFINED),
+            };
         }
         if let Some(s) = self.string_of(obj).map(str::to_owned) {
             if let Some(v) = self.string_property(&s, &k)? {
@@ -677,10 +682,14 @@ impl OpCtx for ToyCtx {
             return Err(self.error(ErrorKind::NullishBase));
         }
         let k = self.key_text(key)?;
-        if v.is_uninitialized() {
+        if k == "__proto__" {
+            // The Object.prototype accessor sets the prototype (1.13).
             return self.fail();
         }
         if let Some(o) = self.object_of(obj) {
+            if v.is_uninitialized() {
+                return self.fail();
+            }
             self.objects[o].insert(k, v);
             return Ok(());
         }
@@ -732,13 +741,22 @@ impl OpCtx for ToyCtx {
     fn rt_has_property(&mut self, key: Value, obj: Value) -> Completion {
         let Some(o) = self.object_of(obj) else {
             return match obj.kind() {
-                Kind::Object(_) => self.fail(),
+                Kind::Object(_) | Kind::Other(..) | Kind::Uninitialized => self.fail(),
                 _ => Err(self.error(ErrorKind::NotAnObject)),
             };
         };
         let k = self.key_text(key)?;
-        Ok(Value::from_bool(self.objects[o].contains_key(&k)))
+        let has = self.objects[o].contains_key(&k);
+        if !has && is_proto_name(&k) {
+            // Inherited from Object.prototype once it exists (1.13).
+            return self.fail();
+        }
+        Ok(Value::from_bool(has))
     }
+}
+
+fn is_proto_name(k: &str) -> bool {
+    number::OBJECT_PROTOTYPE_NAMES.contains(&k)
 }
 
 /// How a [`run`] ended.

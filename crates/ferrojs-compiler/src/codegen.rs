@@ -21,7 +21,7 @@
 //! declarations, destructuring. String literals and template cooked
 //! strings become string constants (D-044); strings with lone surrogates
 //! are unsupported until the constant pool can hold UTF-16. Task 1.7e
-//! (D-052) adds object literals with data properties, property reads,
+//! (D-053) adds object literals with data properties, property reads,
 //! writes, compound and update assignments, `delete`, `in` and method
 //! calls; getters, setters, spread, `__proto__` and optional chaining are
 //! unsupported.
@@ -2564,7 +2564,7 @@ enum PropKey {
 }
 
 impl Gen<'_> {
-    // ---- properties (task 1.7e, D-052) ----
+    // ---- properties (task 1.7e, D-053) ----
 
     /// Refuses the member expressions this compiler doesn't do.
     fn check_member(&self, m: &MemberExpression<'_>) -> CResult<()> {

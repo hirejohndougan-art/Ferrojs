@@ -471,3 +471,30 @@ mod index_tests {
         }
     }
 }
+
+/// The property names of `Object.prototype` (ECMA-262 §20.1.3, Annex B
+/// §B.2.2). Until the built-ins exist (1.13) objects have no prototype,
+/// so a read or `in` of one of these that isn't an own property, and any
+/// assignment to `__proto__`, is a clean failure rather than a wrong
+/// answer (D-053).
+pub const OBJECT_PROTOTYPE_NAMES: [&str; 12] = [
+    "constructor",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toLocaleString",
+    "toString",
+    "valueOf",
+    "__proto__",
+    "__defineGetter__",
+    "__defineSetter__",
+    "__lookupGetter__",
+    "__lookupSetter__",
+];
+
+/// Whether `units` spell one of [`OBJECT_PROTOTYPE_NAMES`].
+pub fn is_object_prototype_name(units: &[u16]) -> bool {
+    OBJECT_PROTOTYPE_NAMES
+        .iter()
+        .any(|n| n.encode_utf16().eq(units.iter().copied()))
+}

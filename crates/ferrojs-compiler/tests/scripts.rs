@@ -175,3 +175,18 @@ fn computed_proto_key_is_a_plain_property() {
         "n:4014000000000000"
     );
 }
+
+#[test]
+fn inherited_object_prototype_names_fail_cleanly() {
+    // No Object.prototype until 1.13: these throw `undefined` with no
+    // error kind instead of giving Node's answer wrongly.
+    for src in [
+        "var o = {}; var result = o.toString;",
+        "var o = {}; var result = 'hasOwnProperty' in o;",
+        "var o = {}; o.__proto__ = { a: 1 };",
+        "var o = {}; var result = o.__proto__;",
+        "var o = {}; o['__proto__'] = 1;",
+    ] {
+        assert_eq!(run_scripts(&[src]), "throw:undefined", "{src}");
+    }
+}
