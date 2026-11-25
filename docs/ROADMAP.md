@@ -162,7 +162,7 @@ Order matters: each task builds on the ones above it.
   attribute changes (ValidateAndApplyPropertyDescriptor for data
   properties), dictionary mode (ARCHITECTURE.md §7.2), non-extensible
   objects. needs: 1.8a
-- [ ] 1.8d Objects, part d: accessor properties (getters and setters
+- [~] (claimed 2026-11-25 07:15 UTC) 1.8d Objects, part d: accessor properties (getters and setters
   called from get/set), the lazy key table for large shapes. needs: 1.8b, 1.7
 - [x] 1.8c (2026-11-23) Objects, part c: indexed properties in the elements store
   (packed, holey, sparse) and Array length. needs: 1.8a
