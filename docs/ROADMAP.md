@@ -178,7 +178,7 @@ Order matters: each task builds on the ones above it.
   (packed, holey, sparse) and Array length. needs: 1.8a
 - [x] (2026-11-25, D-054; merged 2026-11-25) 1.9 Minimal embedding API and a `ferrojs` command-line binary that
   runs a script and prints uncaught errors. needs: 1.7
-- [ ] 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
+- [~] (claimed 2026-11-25 07:46 UTC) 1.10 Hook the Test262 runner's `ferrojs` engine to the real engine;
   `print`, `$262` host object. First real baseline. needs: 1.9
 - [x] 1.11 (2026-11-23) Host hooks for randomness, clocks and job ordering (D-008).
 - 1.12 Bytecode compiler, part 2 (split 2026-11-23: everything but
