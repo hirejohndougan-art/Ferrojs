@@ -3,8 +3,9 @@
 A JavaScript engine in 100% Rust, aiming for 100% Test262 accuracy on the
 current ECMAScript edition and V8-class speed through a tiered JIT. MIT licensed.
 
-Status: **early development.** The value representation and the Test262
-conformance runner exist; the engine cannot run JavaScript yet.
+Status: **early development.** The interpreter runs scripts with functions,
+closures, strings and plain objects; most built-ins, classes, array literals
+and generators are still to come (see `docs/ROADMAP.md`).
 
 ## Layout
 
@@ -12,6 +13,8 @@ conformance runner exist; the engine cannot run JavaScript yet.
 | --- | --- |
 | `crates/ferrojs-value` | NaN-boxed 64-bit JavaScript values (safe Rust) |
 | `crates/ferrojs-core` | The only crate allowed to use `unsafe` (empty for now) |
+| `crates/ferrojs` | Embedding API: run scripts from Rust, install host functions |
+| `crates/ferrojs-cli` | The `ferrojs` command |
 | `crates/ferrojs-test262` | Test262 conformance runner and regression gate |
 | `conformance/test262-baseline.txt` | Every Test262 run that currently passes |
 | `tools/test262-commit.txt` | The Test262 commit all results are measured against |
@@ -33,6 +36,13 @@ conformance runner exist; the engine cannot run JavaScript yet.
 - Every bug fix lands with a test that reproduces it.
 
 ## Run
+
+A script (it gets a `print(value)` function; uncaught errors go to stderr):
+
+```
+cargo run --release -p ferrojs-cli -- script.js
+cargo run --release -p ferrojs-cli -- -e "print(6 * 7)"
+```
 
 Unit tests:
 

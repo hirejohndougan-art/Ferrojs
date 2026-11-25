@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ferrojs-value", "crates/ferrojs-core", "crates/ferrojs-bytecode", "crates/ferrojs-compiler", "crates/ferrojs-vm", "crates/ferrojs-test262", "crates/ferrojs-diff", "crates/ferrojs-bench"]
+members = ["crates/ferrojs-value", "crates/ferrojs-core", "crates/ferrojs-bytecode", "crates/ferrojs-compiler", "crates/ferrojs-vm", "crates/ferrojs", "crates/ferrojs-cli", "crates/ferrojs-test262", "crates/ferrojs-diff", "crates/ferrojs-bench"]
 exclude = ["fuzz"]
 
 [workspace.package]

@@ -116,6 +116,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "ferrojs"
+version = "0.0.1"
+dependencies = [
+ "ferrojs-bytecode",
+ "ferrojs-compiler",
+ "ferrojs-core",
+ "ferrojs-vm",
+]
+
+[[package]]
 name = "ferrojs-bytecode"
 version = "0.0.1"
 dependencies = [
@@ -138,10 +148,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrojs-core"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "ferrojs-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "ferrojs",
  "ferrojs-bytecode",
  "ferrojs-compiler",
  "ferrojs-value",
@@ -152,6 +171,16 @@ dependencies = [
 [[package]]
 name = "ferrojs-value"
 version = "0.0.1"
+
+[[package]]
+name = "ferrojs-vm"
+version = "0.0.1"
+dependencies = [
+ "ferrojs-bytecode",
+ "ferrojs-compiler",
+ "ferrojs-core",
+ "ferrojs-value",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -846,6 +875,21 @@ name = "utf_types"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
+
+[[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link",
+]
 
 [[package]]
 name = "writeable"

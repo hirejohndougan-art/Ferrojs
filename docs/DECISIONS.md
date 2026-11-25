@@ -1268,3 +1268,45 @@ planning document and gets logged here as each is implemented.
   catchable `undefined`; objects now reach operators that need
   ToPrimitive (`o + ''`, `o < 1`), which throw that way until 1.13.
   Tests assert error kinds on uncaught throws for this reason.
+
+## D-054 Host functions as owned-value closures; the `ferrojs` embedding crate and CLI
+- **Status:** Accepted (autopilot, 2026-11-25). Task 1.9.
+- **Choice:** a host function is a `Native` heap cell (`CellKind::Native`
+  = 10, 8 bytes, header `kind | index << 32`, no references) pointing at a
+  `Box<dyn FnMut(&HostValue, &[HostValue]) -> Result<HostValue,
+  HostValue>>` in the `Vm`'s table. The interpreter copies `this` and the
+  arguments out of the heap into owned `HostValue`s (strings as Rust
+  `String`, lone surrogates lossy; objects and functions as bare
+  markers), calls the closure with no heap access at all, then makes
+  the result (`Ok`) or the thrown value (`Err`) a value, allocating
+  strings after the call. No frame is pushed; a tail call to a host
+  function returns its result from the calling frame. Objects and
+  functions can't come back from the host side yet (a clean
+  unsupported throw). `Vm::define_native` installs one as a writable,
+  configurable, non-enumerable global property (built-in function
+  attributes, ECMA-262 §18), refused over a non-configurable `var`.
+  The `ferrojs` crate wraps this as `Engine` (`run`, `register`,
+  `global`, `interrupt_handle`) with an `Error` that keeps the phase
+  (syntax with line and column, unsupported, uncaught with constructor
+  name, terminated, out of memory). `ferrojs-cli` builds the `ferrojs`
+  binary: `ferrojs file.js` or `ferrojs -e source`, `print(v)` writes
+  `String(v)` to stdout, uncaught errors to stderr; exit 0, 1 (uncaught
+  or syntax error), 2 (usage), 3 (unsupported). New fuzz target
+  `run_script` runs arbitrary source on the real interpreter with a
+  100 ms watchdog on the interrupt flag.
+- **Why:** 1.10 (the real Test262 engine) and the differential harness
+  need a `print` hook, and embedders need a way in. Owned values make
+  host code unable to break rooting by construction, which matters more
+  than the copy for host hooks; built-ins (1.13) work on the heap
+  directly and don't use this path. Checking bytecode functions first
+  keeps the call path at +1% on `interp/run.loop_with_calls`.
+- **Rejected:** handing host functions `Gc` handles or a `Scope` (every
+  embedder would have to follow the rooting rules, and a mistake is a
+  use-after-free once the collector moves cells); host functions as
+  bytecode templates with a special op (a frame per call for nothing);
+  returning script completion values from `Engine::run` (the compiler
+  doesn't track them yet; `global` reads results instead).
+- **Known gaps:** engine errors carry no detail (`ReferenceError: a
+  name is not defined`, not which name) until error objects (1.13);
+  re-defining a host function leaves the old closure in the table;
+  host functions can't call back into JavaScript.

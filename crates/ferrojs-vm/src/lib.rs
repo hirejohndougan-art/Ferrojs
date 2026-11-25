@@ -45,10 +45,12 @@ use ferrojs_value::{Kind, Value};
 pub mod elements;
 pub mod host;
 pub mod interp;
+pub mod native;
 pub mod object;
 pub mod shape;
 pub mod string;
 
+pub use native::{HostValue, NativeFn};
 pub use object::Object;
 pub use shape::Shape;
 pub use string::JsString;
@@ -74,6 +76,9 @@ pub enum CellKind {
     /// The frame stack's anchor: tracing it reports every reference on
     /// the live part of the frame stack.
     Stack = 9,
+    /// A host function (task 1.9, D-054): an index into the [`Vm`]'s
+    /// table of Rust closures. No references.
+    Native = 10,
 }
 
 impl CellKind {
@@ -88,6 +93,7 @@ impl CellKind {
             7 => Some(CellKind::Function),
             8 => Some(CellKind::Env),
             9 => Some(CellKind::Stack),
+            10 => Some(CellKind::Native),
             _ => None,
         }
     }
@@ -190,6 +196,7 @@ impl Trace for Tracer {
                 }
             }
             CellKind::Stack => self.stack.trace(edges),
+            CellKind::Native => {}
             CellKind::Slots => {
                 let cap = (header >> 32) as u32;
                 assert!(8 + 8 * cap <= size, "slots larger than their cell");

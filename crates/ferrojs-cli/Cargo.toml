@@ -1,0 +1,18 @@
+[package]
+name = "ferrojs-cli"
+description = "The `ferrojs` command: runs a script file and prints uncaught errors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "ferrojs"
+path = "src/main.rs"
+
+[dependencies]
+ferrojs = { path = "../ferrojs" }
+
+[lints]
+workspace = true

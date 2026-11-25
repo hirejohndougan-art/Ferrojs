@@ -17,6 +17,7 @@ arbitrary = { version = "1", features = ["derive"] }
 ferrojs-value = { path = "../crates/ferrojs-value" }
 ferrojs-bytecode = { path = "../crates/ferrojs-bytecode" }
 ferrojs-compiler = { path = "../crates/ferrojs-compiler" }
+ferrojs = { path = "../crates/ferrojs" }
 oxc_ast = "=0.158.0"
 
 # Keeps this crate out of the parent workspace.
@@ -55,6 +56,13 @@ bench = false
 [[bin]]
 name = "parse"
 path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "run_script"
+path = "fuzz_targets/run_script.rs"
 test = false
 doc = false
 bench = false

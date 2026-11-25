@@ -36,6 +36,11 @@
 //!   `length` and their indices; other primitive and function bases throw
 //!   until their prototypes exist.
 //!
+//! - **Host functions** (task 1.9, D-054): `Native` cells, an index into
+//!   the [`Vm`]'s table of Rust closures ([`crate::native`]). Calling one
+//!   copies `this` and the arguments out of the heap, runs the closure
+//!   and stores its result; no frame is pushed.
+//!
 //! Error objects come with 1.13: until then a thrown error is `undefined`
 //! with its [`ErrorKind`] recorded, as in the toy context.
 
@@ -55,6 +60,7 @@ use ferrojs_core::gc::{Global, Scope};
 use ferrojs_core::{Gc, NoGc};
 use ferrojs_value::{HeapRef, Kind, Value};
 
+use crate::native::{DefineError, HostValue, NativeFn};
 use crate::shape::Attrs;
 use crate::{
     elements, object, string, value_ref, CellKind, JsString, Object, RootedValue, Tables, Vm,
@@ -93,6 +99,8 @@ const ARGC: u32 = 7;
 /// Offset of a function cell's environment reference.
 pub const FUNCTION_ENV: u32 = 8;
 const FUNCTION_SIZE: u32 = 16;
+// Native cell: header (kind | host function index << 32).
+const NATIVE_SIZE: u32 = 8;
 // Env cell: header (kind | slot count << 32), parent reference, slots.
 /// Offset of an environment's parent reference.
 pub const ENV_PARENT: u32 = 8;
@@ -103,6 +111,7 @@ pub const ENV_SLOTS: u32 = 16;
 pub struct FunctionCell;
 pub struct EnvCell;
 pub struct StackAnchor;
+pub struct NativeCell;
 
 /// The frame stack: slots outside the cage, shared with the tracer.
 pub struct FrameStack {
@@ -185,6 +194,8 @@ pub(crate) struct State {
     /// Atoms for the `typeof` results, by [`TypeName`].
     type_names: Vec<Value>,
     globals: Option<Globals>,
+    /// Host functions, by the index in their `Native` cells.
+    natives: Vec<NativeFn>,
 }
 
 impl State {
@@ -195,6 +206,7 @@ impl State {
             templates: Vec::new(),
             type_names: Vec::new(),
             globals: None,
+            natives: Vec::new(),
         }
     }
 }
@@ -326,6 +338,7 @@ impl Vm {
                 type_names: &interp.type_names,
                 globals: interp.globals.as_mut().expect("made by prepare"),
                 tables,
+                natives: &mut interp.natives,
                 interrupt: interrupt.as_ref(),
                 fp: 0,
                 tmpl: t,
@@ -365,6 +378,49 @@ impl Vm {
     /// The code units of string value `v`, if it is a live string.
     pub fn string_units(&self, v: Value) -> Option<Vec<u16>> {
         units_of(self.cx.nogc(), v)
+    }
+
+    /// `v` copied out of the heap (for an [`Outcome`]'s value, which is
+    /// only valid until the next allocation).
+    pub fn host_value(&self, v: Value) -> HostValue {
+        host_value(self.cx.nogc(), v)
+    }
+
+    /// Installs host function `f` as global `name`: a writable,
+    /// configurable, non-enumerable property of the global object, like a
+    /// built-in function (ECMA-262 §18). Replaces an earlier one of the
+    /// same name. A `let` or `const` of that name shadows it, as for any
+    /// global property.
+    pub fn define_native(&mut self, name: &str, f: NativeFn) -> Result<(), DefineError> {
+        let Vm {
+            cx, tables, interp, ..
+        } = self;
+        let index = interp.natives.len();
+        let header = CellKind::Native as u64 | ((index as u64) << 32);
+        let done = cx.scope(|s| {
+            prepare(s, tables, interp).map_err(|()| DefineError::OutOfMemory)?;
+            let oom = |_| DefineError::OutOfMemory;
+            let c = s
+                .alloc::<NativeCell>(NATIVE_SIZE)
+                .map_err(oom)?
+                .bind(s.nogc());
+            s.nogc().write_u64(c, 0, header);
+            let c = s.root(c.cast::<Object>());
+            let k = string::atom(s, tables, name).map_err(oom)?.bind(s.nogc());
+            let k = s.root(k);
+            let globals = interp.globals.as_ref().expect("made by prepare");
+            let o = s.root(globals.object.get(s.nogc()));
+            let attrs = Attrs(Attrs::WRITABLE.0 | Attrs::CONFIGURABLE.0);
+            match object::define(s, o, k, RootedValue::Object(c), attrs) {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(DefineError::Refused),
+                Err(_) => Err(DefineError::OutOfMemory),
+            }
+        });
+        if done.is_ok() {
+            interp.natives.push(f);
+        }
+        done
     }
 
     /// Frames' worth of slots in use (for tests: back to the base after a
@@ -509,6 +565,44 @@ fn rooted<'n>(n: &Scope<'n>, v: Value) -> Option<RootedValue<'n>> {
     }
 }
 
+/// How a call went on: in a new frame, or done (a host function's
+/// result).
+enum Called {
+    Frame,
+    Native(Value),
+}
+
+/// The host function index of `v`, if it is a live `Native` cell.
+fn native_index(nogc: NoGc<'_>, v: Value) -> Option<usize> {
+    let c = cell_of::<NativeCell>(nogc, v, CellKind::Native)?;
+    Some((nogc.read_u64(c, 0) >> 32) as usize)
+}
+
+/// `v` copied out of the heap ([`HostValue`]).
+fn host_value(nogc: NoGc<'_>, v: Value) -> HostValue {
+    match v.kind() {
+        Kind::Undefined | Kind::Uninitialized => HostValue::Undefined,
+        Kind::Null => HostValue::Null,
+        Kind::Bool(b) => HostValue::Bool(b),
+        Kind::Int32(_) | Kind::Double(_) => HostValue::Number(v.as_number().unwrap_or(f64::NAN)),
+        Kind::String(_) => match units_of(nogc, v) {
+            Some(u) => HostValue::String(String::from_utf16_lossy(&u)),
+            None => HostValue::Undefined,
+        },
+        Kind::Object(_) => {
+            let function = cell_of::<FunctionCell>(nogc, v, CellKind::Function).is_some()
+                || native_index(nogc, v).is_some();
+            if function {
+                HostValue::Function
+            } else {
+                HostValue::Object
+            }
+        }
+        // No symbols or BigInts exist yet.
+        Kind::Other(..) => HostValue::Object,
+    }
+}
+
 /// The cell `v` refers to if it is a live cell of `kind`.
 fn cell_of<'a, T>(nogc: NoGc<'a>, v: Value, kind: CellKind) -> Option<Gc<'a, T>> {
     let Kind::Object(HeapRef(r)) = v.kind() else {
@@ -566,6 +660,7 @@ struct Interp<'r, 's> {
     type_names: &'r [Value],
     globals: &'r mut Globals,
     tables: &'r mut Tables,
+    natives: &'r mut Vec<NativeFn>,
     interrupt: &'r std::sync::atomic::AtomicBool,
     fp: u32,
     tmpl: u32,
@@ -610,6 +705,59 @@ impl Interp<'_, '_> {
         let nogc = self.s.nogc();
         let f = cell_of::<FunctionCell>(nogc, callee, CellKind::Function)?;
         Some((nogc.read_u64(f, 0) >> 32) as u32)
+    }
+
+    /// The host function index of `callee`, if it is a `Native` cell.
+    fn native_of(&self, callee: Value) -> Option<usize> {
+        native_index(self.s.nogc(), callee)
+    }
+
+    /// `v` copied out of the heap for a host function.
+    fn host_value(&self, v: Value) -> HostValue {
+        host_value(self.s.nogc(), v)
+    }
+
+    /// A host function's result as a value (strings are allocated);
+    /// objects and functions can't be made from the host side.
+    fn value_of_host(&mut self, h: HostValue) -> Completion {
+        match h {
+            HostValue::Undefined => Ok(Value::UNDEFINED),
+            HostValue::Null => Ok(Value::NULL),
+            HostValue::Bool(b) => Ok(Value::from_bool(b)),
+            HostValue::Number(x) => Ok(Value::number(x)),
+            HostValue::String(t) => {
+                let units: Vec<u16> = t.encode_utf16().collect();
+                self.make_string(&units)
+            }
+            HostValue::Object | HostValue::Function => self.fail(),
+        }
+    }
+
+    /// Calls host function `i` from the call at `site`: its result, or
+    /// the throw (its error value, already pending).
+    fn call_native(&mut self, i: usize, site: CallSite) -> Result<Value, Thrown> {
+        if let Flow::Throw = self.check_interrupt() {
+            return Err(Thrown);
+        }
+        // Copies: nothing below holds a heap reference while the host
+        // function runs, and it can't allocate on the engine's heap.
+        let this = self.host_value(self.reg(site.this));
+        let args: Vec<HostValue> = (0..site.argc.0)
+            .map(|a| self.host_value(self.reg(Reg(site.args.0 + a))))
+            .collect();
+        let f = self
+            .natives
+            .get_mut(i)
+            .expect("native cells index the table");
+        match f(&this, &args) {
+            Ok(h) => self.value_of_host(h),
+            Err(h) => {
+                let v = self.value_of_host(h)?;
+                self.last_error = None;
+                self.stack.put(0, v.to_bits());
+                Err(Thrown)
+            }
+        }
     }
 
     fn error(&mut self, e: ErrorKind) -> Thrown {
@@ -1001,10 +1149,17 @@ impl Interp<'_, '_> {
                     let (insn, _) = decode(&code, pc).expect("verified bytecode decodes");
                     let site = CallSite::of(&insn).expect("only calls return Flow::Call");
                     match self.call(site, pc) {
-                        Ok(()) => {
+                        Ok(Called::Frame) => {
                             pc = 0;
                             code = self.code();
                             continue;
+                        }
+                        // A host function ran without a frame: a tail call
+                        // returns its result from this frame.
+                        Ok(Called::Native(v)) if site.tail => Flow::Return(v),
+                        Ok(Called::Native(v)) => {
+                            self.set(site.dst, v);
+                            Flow::Next
                         }
                         Err(Thrown) => Flow::Throw,
                     }
@@ -1090,9 +1245,13 @@ impl Interp<'_, '_> {
 
     /// Performs a call from the instruction at `pc`: on success the new
     /// frame is current and runs from pc 0.
-    fn call(&mut self, site: CallSite, pc: usize) -> Result<(), Thrown> {
+    fn call(&mut self, site: CallSite, pc: usize) -> Result<Called, Thrown> {
         let callee = self.reg(site.callee);
         let Some(t) = self.template_of(callee) else {
+            // Bytecode functions first: host calls are the rare case.
+            if let Some(i) = self.native_of(callee) {
+                return self.call_native(i, site).map(Called::Native);
+            }
             return Err(self.error(ErrorKind::NotCallable));
         };
         // Stack overflow before the interrupt check, as in the toy
@@ -1116,7 +1275,7 @@ impl Interp<'_, '_> {
                 self.slot(RETURN_INFO),
             );
             let fp = self.fp;
-            self.push_frame(fp, callee, this, &args, caller, call_pc, info)
+            self.push_frame(fp, callee, this, &args, caller, call_pc, info)?;
         } else {
             let top = self.frame_end();
             let info = u64::from(site.dst.0);
@@ -1128,8 +1287,9 @@ impl Interp<'_, '_> {
                 u64::from(self.fp),
                 pc as u64,
                 info,
-            )
+            )?;
         }
+        Ok(Called::Frame)
     }
 
     /// Whether a frame for template `t` with `argc` arguments fits at `fp`.
@@ -1482,7 +1642,9 @@ impl OpCtx for Interp<'_, '_> {
             Kind::Bool(_) => TypeName::Boolean,
             Kind::Int32(_) | Kind::Double(_) => TypeName::Number,
             Kind::String(_) => TypeName::String,
-            Kind::Object(_) if self.template_of(v).is_some() => TypeName::Function,
+            Kind::Object(_) if self.template_of(v).is_some() || self.native_of(v).is_some() => {
+                TypeName::Function
+            }
             Kind::Object(_) => TypeName::Object,
             Kind::Other(ferrojs_value::OtherKind::Symbol, _) => TypeName::Symbol,
             Kind::Other(ferrojs_value::OtherKind::BigInt, _) => TypeName::Bigint,

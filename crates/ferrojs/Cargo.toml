@@ -1,0 +1,17 @@
+[package]
+name = "ferrojs"
+description = "Embedding API: run JavaScript from Rust, install host functions, read results and uncaught errors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+ferrojs-bytecode = { path = "../ferrojs-bytecode" }
+ferrojs-compiler = { path = "../ferrojs-compiler" }
+ferrojs-core = { path = "../ferrojs-core" }
+ferrojs-vm = { path = "../ferrojs-vm" }
+
+[lints]
+workspace = true
